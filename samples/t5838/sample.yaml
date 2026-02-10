@@ -1,0 +1,5 @@
+sample:
+  description: T5838 PDM Microphone Test for ReSpeaker Lav
+  name: t5838
+  tests:
+    - sample.t5838
