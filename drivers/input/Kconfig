@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# GPIO button input driver configuration
+
+config GPIO_BUTTON
+	bool "GPIO button input driver"
+	select INPUT
+	help
+	  Enable GPIO button input driver using custom button API.
+
+if GPIO_BUTTON
+
+config INPUT_GPIO_BUTTON_OWN_THREAD
+	bool "Own thread"
+	help
+	  Each button device has its own thread.
+
+config INPUT_GPIO_BUTTON_GLOBAL_THREAD
+	bool "Global work queue"
+	depends on !INPUT_GPIO_BUTTON_OWN_THREAD
+	help
+	  All button devices share the same work queue.
+
+config INPUT_GPIO_BUTTON_THREAD_STACK_SIZE
+	int "Stack size"
+	depends on INPUT_GPIO_BUTTON_OWN_THREAD
+	default 256
+	help
+	  Stack size for the button thread.
+
+config INPUT_GPIO_BUTTON_THREAD_PRIORITY
+	int "Thread priority"
+	depends on INPUT_GPIO_BUTTON_OWN_THREAD
+	default 0
+	help
+	  Priority of the button thread.
+
+endif
