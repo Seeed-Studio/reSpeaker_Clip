@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config SPEEXDSP
+	bool "SpeexDSP Audio Processing Library"
+	help
+	  Enable SpeexDSP library for audio signal processing.
+	  Provides noise suppression, dereverberation, and other DSP features.

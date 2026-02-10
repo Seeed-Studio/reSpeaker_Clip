@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config OPUS_CODEC
+	bool "Opus Audio Codec"
+	help
+	  Enable Opus 1.5 audio codec library for encoding/decoding.

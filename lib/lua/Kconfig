@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config LUA
+	bool "Lua 5.5.0 Scripting Language"
+	help
+	  Enable Lua 5.5.0 scripting language library for embedded applications.
