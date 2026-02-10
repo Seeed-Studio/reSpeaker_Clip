@@ -3,4 +3,4 @@
 config OPUS_CODEC
 	bool "Opus Audio Codec"
 	help
-	  Enable Opus 1.5 audio codec library for encoding/decoding.
+	  Enable Opus 1.6.1 audio codec library for encoding/decoding.
