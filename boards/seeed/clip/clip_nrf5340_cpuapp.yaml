@@ -1,0 +1,10 @@
+identifier: clip/nrf5340/cpuapp
+name: Clip
+vendor: seeed
+type: mcu
+arch: arm
+ram: 448
+flash: 1024
+toolchain:
+  - zephyr
+supported: []

@@ -1,0 +1,10 @@
+identifier: clip/nrf5340/cpunet
+name: Clip
+vendor: seeed
+type: mcu
+arch: arm
+ram: 64
+flash: 256
+toolchain:
+  - zephyr
+supported: []

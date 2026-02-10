@@ -1,0 +1,8 @@
+board:
+  name: clip
+  vendor: seeed
+  socs:
+  - name: nrf5340
+    variants:
+    - name: ns
+      cpucluster: cpuapp
