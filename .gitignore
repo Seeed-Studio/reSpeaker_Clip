@@ -1,0 +1,46 @@
+# Zephyr build
+build*/
+*.bin
+*.hex
+*.elf
+*.map
+*.dmp
+*.lst
+*.log
+*.pyc
+*.pyo
+__pycache__/
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+# west
+.west/
+# Misc
+*.swp
+*.swo
+*.swn
+*.bak
+*.tmp
+*.orig
+*.user
+# VSCode
+.vscode/
+# CLion
+.idea/
+cmake-build-*/
+# Python virtualenv
+.venv/
+venv/
+ENV/
+# MacOS
+.DS_Store
+# Windows
+Thumbs.db
+# Claude
+.claude/
+*.wav
+*.mp3
+*.ogg
+
