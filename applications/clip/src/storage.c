@@ -435,3 +435,197 @@ static int update_free_space(void)
 
 	return 0;
 }
+
+/* Session management functions */
+int storage_list_sessions(struct storage_session_info *sessions, int max_sessions)
+{
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+	int count = 0;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!sessions || max_sessions <= 0) {
+		return -EINVAL;
+	}
+
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, "/SD:");
+	if (rc != 0) {
+		LOG_ERR("Failed to open directory: %d", rc);
+		return rc;
+	}
+
+	/* Scan for directories (sessions are stored in subdirectories) */
+	while (count < max_sessions) {
+		rc = fs_readdir(&dirp, &entry);
+		if (rc != 0 || entry.name[0] == 0) {
+			break;
+		}
+
+		/* Only look for directories that match session format */
+		if (entry.type != FS_DIR_ENTRY_DIR) {
+			continue;
+		}
+
+		/* Check if directory name matches session format (YYYYMMDD_HHMMSS) */
+		if (strlen(entry.name) != 15 || entry.name[8] != '_') {
+			continue;
+		}
+
+		/* Copy session ID */
+		strncpy(sessions[count].session_id, entry.name, sizeof(sessions[count].session_id) - 1);
+		sessions[count].session_id[sizeof(sessions[count].session_id) - 1] = '\0';
+
+		/* Count files and calculate size in this session */
+		char session_path[64];
+		struct fs_dir_t session_dir;
+		struct fs_dirent file_entry;
+
+		snprintf(session_path, sizeof(session_path), "/SD:/%s", entry.name);
+		fs_dir_t_init(&session_dir);
+
+		rc = fs_opendir(&session_dir, session_path);
+		if (rc == 0) {
+			sessions[count].file_count = 0;
+			sessions[count].total_bytes = 0;
+
+			while (1) {
+				rc = fs_readdir(&session_dir, &file_entry);
+				if (rc != 0 || file_entry.name[0] == 0) {
+					break;
+				}
+
+				if (file_entry.type == FS_DIR_ENTRY_FILE) {
+					sessions[count].file_count++;
+					sessions[count].total_bytes += file_entry.size;
+				}
+			}
+
+			fs_closedir(&session_dir);
+		}
+
+		/* Calculate duration (rough estimate: bytes / bitrate / 8) */
+		sessions[count].duration_sec = sessions[count].total_bytes / 3000;  /* ~24kbps */
+
+		count++;
+	}
+
+	fs_closedir(&dirp);
+
+	return count;
+}
+
+int storage_list_session_files(const char *session_id, char (*files)[32], int max_files)
+{
+	char session_path[64];
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+	int count = 0;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id || !files || max_files <= 0) {
+		return -EINVAL;
+	}
+
+	snprintf(session_path, sizeof(session_path), "/SD:/%s", session_id);
+
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, session_path);
+	if (rc != 0) {
+		LOG_ERR("Failed to open session directory: %d", rc);
+		return -ENOENT;
+	}
+
+	while (count < max_files) {
+		rc = fs_readdir(&dirp, &entry);
+		if (rc != 0 || entry.name[0] == 0) {
+			break;
+		}
+
+		/* Only list files */
+		if (entry.type != FS_DIR_ENTRY_FILE) {
+			continue;
+		}
+
+		strncpy(files[count], entry.name, 31);
+		files[count][31] = '\0';
+		count++;
+	}
+
+	fs_closedir(&dirp);
+
+	return count;
+}
+
+int storage_delete_session(const char *session_id)
+{
+	char session_path[64];
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	snprintf(session_path, sizeof(session_path), "/SD:/%s", session_id);
+
+	/* First, delete all files in the session directory */
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, session_path);
+	if (rc == 0) {
+		while (1) {
+			rc = fs_readdir(&dirp, &entry);
+			if (rc != 0 || entry.name[0] == 0) {
+				break;
+			}
+
+			if (entry.type == FS_DIR_ENTRY_FILE) {
+				char filepath[128];
+				snprintf(filepath, sizeof(filepath), "/SD:/%s/%s", session_id, entry.name);
+				fs_unlink(filepath);
+			}
+		}
+		fs_closedir(&dirp);
+	}
+
+	/* Then delete the directory */
+	rc = fs_unlink(session_path);
+	if (rc != 0) {
+		LOG_ERR("Failed to delete session directory: %d", rc);
+		return rc;
+	}
+
+	LOG_INF("Deleted session: %s", session_id);
+
+	return 0;
+}
+
+bool storage_session_exists(const char *session_id)
+{
+	char session_path[64];
+	struct fs_dirent entry;
+	int rc;
+
+	if (!sd_mounted || !session_id) {
+		return false;
+	}
+
+	snprintf(session_path, sizeof(session_path), "/SD:/%s", session_id);
+
+	rc = fs_stat(session_path, &entry);
+
+	return (rc == 0 && entry.type == FS_DIR_ENTRY_DIR);
+}

@@ -17,6 +17,7 @@
 #include "state_machine.h"
 #include "json_helper.h"
 #include "audio.h"
+#include "storage.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -409,6 +410,86 @@ static int cmd_mark(const struct at_command *cmd, char **response)
     return json_create_success(data, response);
 }
 
+static int cmd_list(const struct at_command *cmd, char **response)
+{
+    struct storage_session_info sessions[32];
+    char data[1024];
+    int count;
+
+    /* List all sessions */
+    count = storage_list_sessions(sessions, 32);
+    if (count < 0) {
+        return json_create_error("Failed to list sessions", response);
+    }
+
+    /* Build JSON response */
+    char *ptr = data;
+    int remaining = sizeof(data);
+
+    ptr += snprintf(ptr, remaining, "[");
+    remaining = sizeof(data) - (ptr - data);
+
+    for (int i = 0; i < count && remaining > 100; i++) {
+        int len = snprintf(ptr, remaining,
+                          "%s{\"id\":\"%s\",\"files\":%u,\"size\":%llu}",
+                          i > 0 ? "," : "",
+                          sessions[i].session_id,
+                          sessions[i].file_count,
+                          sessions[i].total_bytes);
+        ptr += len;
+        remaining -= len;
+    }
+
+    snprintf(ptr, remaining, "]");
+
+    return json_create_success(data, response);
+}
+
+static int cmd_delete(const struct at_command *cmd, char **response)
+{
+    int err;
+
+    if (!cmd->value) {
+        return json_create_error("Missing session ID", response);
+    }
+
+    /* Check if session exists */
+    if (!storage_session_exists(cmd->value)) {
+        return json_create_error("Session not found", response);
+    }
+
+    /* Delete the session */
+    err = storage_delete_session(cmd->value);
+    if (err != 0) {
+        return json_create_error("Failed to delete session", response);
+    }
+
+    char data[128];
+    snprintf(data, sizeof(data), "{\"deleted\":\"%s\"}", cmd->value);
+
+    return json_create_success(data, response);
+}
+
+static int cmd_marks(const struct at_command *cmd, char **response)
+{
+    if (!cmd->value) {
+        return json_create_error("Missing session ID", response);
+    }
+
+    /* Check if session exists */
+    if (!storage_session_exists(cmd->value)) {
+        return json_create_error("Session not found", response);
+    }
+
+    /* TODO: Implement bookmark reading from marks.bin file */
+    char data[256];
+    snprintf(data, sizeof(data),
+             "{\"session\":\"%s\",\"bookmarks\":[]}",
+             cmd->value);
+
+    return json_create_success(data, response);
+}
+
 /* Command table */
 struct cmd_entry {
     const char *name;
@@ -433,6 +514,11 @@ static const struct cmd_entry commands[] = {
     {"START",    cmd_start,        AT_CMD_EXEC | AT_CMD_SET},
     {"STOP",     cmd_stop,         AT_CMD_EXEC},
     {"MARK",     cmd_mark,         AT_CMD_EXEC | AT_CMD_SET},
+
+    /* Session management commands */
+    {"LIST",     cmd_list,         AT_CMD_EXEC},
+    {"DELETE",   cmd_delete,       AT_CMD_SET},
+    {"MARKS",    cmd_marks,        AT_CMD_SET},
 
     /* Sentinel */
     {NULL, NULL, 0}

@@ -121,4 +121,49 @@ int storage_delete_file(const char *filename);
  */
 int storage_format_card(void);
 
+/**
+ * @brief Session information
+ */
+struct storage_session_info {
+	char session_id[32];      /* Session ID (YYYYMMDD_HHMMSS) */
+	uint32_t file_count;      /* Number of files in session */
+	uint64_t total_bytes;     /* Total bytes in session */
+	uint32_t duration_sec;    /* Duration in seconds */
+};
+
+/**
+ * @brief List all sessions
+ *
+ * @param sessions Array to fill with session info
+ * @param max_sessions Maximum number of sessions to return
+ * @return Number of sessions found, or negative error code
+ */
+int storage_list_sessions(struct storage_session_info *sessions, int max_sessions);
+
+/**
+ * @brief Get session file list
+ *
+ * @param session_id Session ID
+ * @param files Output array for file names
+ * @param max_files Maximum files to return
+ * @return Number of files found, or negative error code
+ */
+int storage_list_session_files(const char *session_id, char (*files)[32], int max_files);
+
+/**
+ * @brief Delete a session
+ *
+ * @param session_id Session ID to delete
+ * @return 0 on success, negative error code on failure
+ */
+int storage_delete_session(const char *session_id);
+
+/**
+ * @brief Check if session exists
+ *
+ * @param session_id Session ID to check
+ * @return true if exists, false otherwise
+ */
+bool storage_session_exists(const char *session_id);
+
 #endif /* STORAGE_H */
