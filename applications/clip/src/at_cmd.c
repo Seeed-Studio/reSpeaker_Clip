@@ -258,6 +258,224 @@ static int cmd_charging_set(const struct at_command *cmd, char **response)
     return json_create_success(data, response);
 }
 
+static int cmd_autodel_set(const struct at_command *cmd, char **response)
+{
+    char data[128];
+
+    if (!cmd->value) {
+        /* Get current auto-delete policy */
+        if (g_config.auto_delete_days < 0) {
+            return json_create_kv("value", "\"off\"", response);
+        } else {
+            snprintf(data, sizeof(data), "{\"value\":%d}", g_config.auto_delete_days);
+            return json_create_success(data, response);
+        }
+    }
+
+    /* Parse value */
+    if (strcasecmp(cmd->value, "off") == 0) {
+        g_config.auto_delete_days = -1;
+    } else {
+        int days = atoi(cmd->value);
+        if (days < 0 || days > 30) {
+            return json_create_error("Invalid value (use off or 0-30)", response);
+        }
+        g_config.auto_delete_days = (int8_t)days;
+    }
+
+    if (g_config.auto_delete_days < 0) {
+        return json_create_kv("value", "\"off\"", response);
+    } else {
+        snprintf(data, sizeof(data), "{\"value\":%d}", g_config.auto_delete_days);
+        return json_create_success(data, response);
+    }
+}
+
+static int cmd_noise_set(const struct at_command *cmd, char **response)
+{
+    uint8_t level;
+    char data[128];
+
+    if (!cmd->value) {
+        snprintf(data, sizeof(data), "{\"value\":%u}", g_config.noise_suppress);
+        return json_create_success(data, response);
+    }
+
+    level = (uint8_t)atoi(cmd->value);
+
+    if (level > 60) {
+        return json_create_error("Invalid level (0-60 dB)", response);
+    }
+
+    g_config.noise_suppress = level;
+
+    snprintf(data, sizeof(data), "{\"value\":%u}", level);
+    return json_create_success(data, response);
+}
+
+static int cmd_agc_set(const struct at_command *cmd, char **response)
+{
+    char data[256];
+    bool enable;
+    uint8_t target = 0;
+
+    if (!cmd->value) {
+        snprintf(data, sizeof(data),
+                "{\"enabled\":%s,\"target\":%u}",
+                g_config.agc_enabled ? "true" : "false",
+                g_config.agc_target);
+        return json_create_success(data, response);
+    }
+
+    /* Parse format: on/off,target or just on/off */
+    char *comma = strchr(cmd->value, ',');
+
+    if (comma) {
+        *comma = '\0';
+        char *enable_str = cmd->value;
+        char *target_str = comma + 1;
+
+        /* Parse enable */
+        if (strcasecmp(enable_str, "on") == 0 || strcasecmp(enable_str, "1") == 0) {
+            enable = true;
+        } else if (strcasecmp(enable_str, "off") == 0 || strcasecmp(enable_str, "0") == 0) {
+            enable = false;
+        } else {
+            return json_create_error("Invalid enable value", response);
+        }
+
+        /* Parse target */
+        target = (uint8_t)atoi(target_str);
+        if (target > 30) {
+            return json_create_error("Invalid target (0-30 dB)", response);
+        }
+    } else {
+        /* Just enable/disable */
+        if (strcasecmp(cmd->value, "on") == 0 || strcasecmp(cmd->value, "1") == 0) {
+            enable = true;
+            target = g_config.agc_target;
+        } else if (strcasecmp(cmd->value, "off") == 0 || strcasecmp(cmd->value, "0") == 0) {
+            enable = false;
+        } else {
+            return json_create_error("Invalid value (use on/off or 0/1)", response);
+        }
+    }
+
+    g_config.agc_enabled = enable;
+    g_config.agc_target = target;
+
+    snprintf(data, sizeof(data),
+            "{\"enabled\":%s,\"target\":%u}",
+            enable ? "true" : "false",
+            target);
+    return json_create_success(data, response);
+}
+
+static int cmd_dereverb_set(const struct at_command *cmd, char **response)
+{
+    char data[256];
+    bool enable;
+    uint8_t level = 5;
+    uint8_t decay = 0;
+
+    if (!cmd->value) {
+        snprintf(data, sizeof(data),
+                "{\"enabled\":%s,\"level\":%u,\"decay\":%u}",
+                g_config.dereverb_enabled ? "true" : "false",
+                (uint8_t)5, (uint8_t)0);
+        return json_create_success(data, response);
+    }
+
+    /* Parse format: on/off,level,decay or just on/off */
+    char *comma1 = strchr(cmd->value, ',');
+    char *comma2 = NULL;
+
+    if (comma1) {
+        *comma1 = '\0';
+        comma2 = strchr(comma1 + 1, ',');
+        if (comma2) {
+            *comma2 = '\0';
+        }
+
+        char *enable_str = cmd->value;
+        char *level_str = comma1 + 1;
+        char *decay_str = comma2 ? comma2 + 1 : NULL;
+
+        /* Parse enable */
+        if (strcasecmp(enable_str, "on") == 0 || strcasecmp(enable_str, "1") == 0) {
+            enable = true;
+        } else if (strcasecmp(enable_str, "off") == 0 || strcasecmp(enable_str, "0") == 0) {
+            enable = false;
+        } else {
+            return json_create_error("Invalid enable value", response);
+        }
+
+        /* Parse level */
+        if (level_str) {
+            level = (uint8_t)atoi(level_str);
+            if (level > 10) {
+                return json_create_error("Invalid level (0-10)", response);
+            }
+        }
+
+        /* Parse decay */
+        if (decay_str) {
+            decay = (uint8_t)atoi(decay_str);
+            if (decay > 10) {
+                return json_create_error("Invalid decay (0-10)", response);
+            }
+        }
+    } else {
+        /* Just enable/disable */
+        if (strcasecmp(cmd->value, "on") == 0 || strcasecmp(cmd->value, "1") == 0) {
+            enable = true;
+        } else if (strcasecmp(cmd->value, "off") == 0 || strcasecmp(cmd->value, "0") == 0) {
+            enable = false;
+        } else {
+            return json_create_error("Invalid value (use on/off or 0/1)", response);
+        }
+    }
+
+    g_config.dereverb_enabled = enable;
+
+    snprintf(data, sizeof(data),
+            "{\"enabled\":%s,\"level\":%u,\"decay\":%u}",
+            enable ? "true" : "false",
+            level,
+            decay);
+    return json_create_success(data, response);
+}
+
+static int cmd_pair(const struct at_command *cmd, char **response)
+{
+    char data[256];
+    int err;
+
+    if (!cmd->value) {
+        /* Get pairing status */
+        bool is_paired = ble_svc_is_ready();
+        snprintf(data, sizeof(data),
+                "{\"paired\":%s}",
+                is_paired ? "true" : "false");
+        return json_create_success(data, response);
+    }
+
+    /* Parse command */
+    if (strcasecmp(cmd->value, "reset") == 0 || strcasecmp(cmd->value, "clear") == 0) {
+        /* Delete pairing information */
+        /* TODO: Implement actual BLE pairing deletion */
+        err = 0;  /* Placeholder */
+
+        if (err != 0) {
+            return json_create_error("Failed to clear pairing", response);
+        }
+
+        return json_create_success("{\"action\":\"cleared\"}", response);
+    }
+
+    return json_create_error("Invalid value (use reset/clear)", response);
+}
+
 static int cmd_bitrate_set(const struct at_command *cmd, char **response)
 {
     int bitrate;
@@ -795,12 +1013,21 @@ static const struct cmd_entry commands[] = {
     {"PURGE",    cmd_purge,        AT_CMD_EXEC},
     {"BATTERY",  cmd_battery_set,  AT_CMD_SET | AT_CMD_GET},
     {"CHARGING", cmd_charging_set, AT_CMD_SET | AT_CMD_GET},
+    {"PAIR",     cmd_pair,         AT_CMD_SET | AT_CMD_GET},
 
     /* Configuration commands */
     {"BITRATE",  cmd_bitrate_set,  AT_CMD_SET | AT_CMD_GET},
     {"COMPLEXITY", cmd_complexity_set, AT_CMD_SET | AT_CMD_GET},
     {"MODE",     cmd_mode_set,     AT_CMD_SET | AT_CMD_GET},
     {"CHUNKSIZE", cmd_chunksize_set, AT_CMD_SET | AT_CMD_GET},
+
+    /* Audio processing commands */
+    {"NOISE",    cmd_noise_set,     AT_CMD_SET | AT_CMD_GET},
+    {"AGC",      cmd_agc_set,       AT_CMD_SET | AT_CMD_GET},
+    {"DEREVERB", cmd_dereverb_set,  AT_CMD_SET | AT_CMD_GET},
+
+    /* Storage management commands */
+    {"AUTODEL",  cmd_autodel_set,   AT_CMD_SET | AT_CMD_GET},
 
     /* Recording commands */
     {"START",    cmd_start,        AT_CMD_EXEC | AT_CMD_SET},

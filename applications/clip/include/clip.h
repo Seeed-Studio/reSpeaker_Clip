@@ -61,6 +61,10 @@ struct clip_config {
     enum recording_mode mode; /* Recording mode */
     uint8_t noise_suppress;   /* Noise suppression (dB) */
     uint16_t chunk_size;      /* Transfer chunk size */
+    int8_t auto_delete_days;  /* Auto-delete policy: -1=off, 0-30=days */
+    uint8_t agc_target;        /* AGC target level (dB) */
+    bool agc_enabled;         /* AGC enabled */
+    bool dereverb_enabled;    /* Dereverberation enabled */
 };
 
 /* Global configuration */

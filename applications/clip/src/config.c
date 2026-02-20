@@ -18,6 +18,10 @@ static const struct clip_config factory_config = {
     .mode = MODE_NORMAL,
     .noise_suppress = 0,
     .chunk_size = 500,
+    .auto_delete_days = -1,  /* Disabled by default */
+    .agc_target = 0,
+    .agc_enabled = false,
+    .dereverb_enabled = false,
 };
 
 #ifdef CONFIG_SETTINGS
@@ -217,6 +221,34 @@ int config_set(uint16_t key, const void *value, size_t len)
             ret = -EINVAL;
         }
         break;
+    case NVS_KEY_AUTODEL:
+        if (len == sizeof(int8_t)) {
+            g_config.auto_delete_days = *(const int8_t *)value;
+        } else {
+            ret = -EINVAL;
+        }
+        break;
+    case NVS_KEY_AGC_ENABLE:
+        if (len == sizeof(bool)) {
+            g_config.agc_enabled = *(const bool *)value;
+        } else {
+            ret = -EINVAL;
+        }
+        break;
+    case NVS_KEY_AGC_TARGET:
+        if (len == sizeof(uint8_t)) {
+            g_config.agc_target = *(const uint8_t *)value;
+        } else {
+            ret = -EINVAL;
+        }
+        break;
+    case NVS_KEY_DEREVERB:
+        if (len == sizeof(bool)) {
+            g_config.dereverb_enabled = *(const bool *)value;
+        } else {
+            ret = -EINVAL;
+        }
+        break;
     default:
         return -EINVAL;
     }
@@ -238,6 +270,14 @@ int config_set(uint16_t key, const void *value, size_t len)
         return settings_save_one("config/noise_suppress", value, len);
     case NVS_KEY_CHUNK_SIZE:
         return settings_save_one("config/chunk_size", value, len);
+    case NVS_KEY_AUTODEL:
+        return settings_save_one("config/auto_delete_days", value, len);
+    case NVS_KEY_AGC_ENABLE:
+        return settings_save_one("config/agc_enabled", value, len);
+    case NVS_KEY_AGC_TARGET:
+        return settings_save_one("config/agc_target", value, len);
+    case NVS_KEY_DEREVERB:
+        return settings_save_one("config/dereverb_enabled", value, len);
     }
 #endif
 
@@ -274,6 +314,30 @@ int config_get(uint16_t key, void *value, size_t len)
     case NVS_KEY_CHUNK_SIZE:
         if (len == sizeof(uint16_t)) {
             *(uint16_t *)value = g_config.chunk_size;
+            return 0;
+        }
+        break;
+    case NVS_KEY_AUTODEL:
+        if (len == sizeof(int8_t)) {
+            *(int8_t *)value = g_config.auto_delete_days;
+            return 0;
+        }
+        break;
+    case NVS_KEY_AGC_ENABLE:
+        if (len == sizeof(bool)) {
+            *(bool *)value = g_config.agc_enabled;
+            return 0;
+        }
+        break;
+    case NVS_KEY_AGC_TARGET:
+        if (len == sizeof(uint8_t)) {
+            *(uint8_t *)value = g_config.agc_target;
+            return 0;
+        }
+        break;
+    case NVS_KEY_DEREVERB:
+        if (len == sizeof(bool)) {
+            *(bool *)value = g_config.dereverb_enabled;
             return 0;
         }
         break;

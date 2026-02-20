@@ -17,6 +17,10 @@
 #define NVS_KEY_MODE        0x03
 #define NVS_KEY_NOISE       0x04
 #define NVS_KEY_CHUNK_SIZE  0x05
+#define NVS_KEY_AUTODEL     0x06
+#define NVS_KEY_AGC_ENABLE  0x07
+#define NVS_KEY_AGC_TARGET  0x08
+#define NVS_KEY_DEREVERB    0x09
 
 /**
  * @brief Initialize configuration manager
