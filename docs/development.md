@@ -128,7 +128,139 @@ PDM Microphone → DMIC Driver → Process PCM (mode)
 
 ---
 
-## 2025-02-20 - Initial Implementation (Continued)
+## 2025-02-20 - Phase 3: SD Card Storage Implementation
+
+### Completed Tasks
+
+#### 1. Storage Module
+- ✅ Created `storage.h` and `storage.c` - Complete SD card management
+- ✅ FAT filesystem integration (FatFS + ELM)
+- ✅ SD card initialization and mounting
+- ✅ File operations: create, write, close, delete, list
+- ✅ 4KB write buffer for efficient SD card writes
+- ✅ Storage statistics tracking (files, bytes, free space)
+- ✅ SD card formatting support
+
+#### 2. Audio-to-Storage Integration
+- ✅ Auto-create file on recording start
+- ✅ Filename format: `rec_<session_id>_<mode>.opus`
+- ✅ Write each Opus frame to SD card with length header
+- ✅ Close file on recording stop
+- ✅ Error handling - continue recording if SD fails
+
+#### 3. Binary File Format
+- Frame format: `[2-byte little-endian length][Opus data]`
+- Easy to parse with Python script
+- Compatible with samples/opus_encode format
+
+#### 4. Configuration
+Added to `prj.conf`:
+```conf
+CONFIG_DISK_ACCESS=y
+CONFIG_DISK_DRIVER_SDMMC=y
+CONFIG_FILE_SYSTEM=y
+CONFIG_FAT_FILESYSTEM_ELM=y
+CONFIG_FS_FATFS_LFN=y
+CONFIG_FS_FATFS_MKFS=y
+CONFIG_FILE_SYSTEM_MKFS=y
+```
+
+### Build Configuration Updates
+
+**Memory Usage**:
+- Before: 269 KB FLASH / 110 KB RAM
+- After: 292 KB FLASH / 117 KB RAM
+- Increase: +23 KB FLASH (filesystem), +7 KB RAM (FS buffers)
+
+**Total Progress**:
+- FLASH: 292 KB / 1 MB (29%)
+- RAM: 117 KB / 448 KB (26%)
+
+### Technical Details
+
+**Write Buffer Strategy**:
+- 4KB buffer accumulates multiple frames
+- Flush when buffer full or file close
+- Reduces SD card write operations by ~10x
+- Minimizes write wear and power consumption
+
+**Frame Storage Format**:
+```
+[0x00][0x3E] - Length = 62 bytes
+[Opus packet data... 62 bytes]
+[0x00][0x45] - Length = 69 bytes
+[Opus packet data... 69 bytes]
+...
+```
+
+**File Management**:
+- Auto-generate filename from uptime + mode
+- Track total files and bytes across sessions
+- Free space monitoring via FatFS
+- Support long filenames (up to 64 chars)
+
+### Testing Status
+
+**Completed**:
+- ✅ Compiles successfully with SD card support
+- ✅ Memory usage within limits (292KB / 1MB = 29%)
+- ✅ File system integration complete
+
+**Not Yet Tested**:
+- ⏳ SD card mounting on actual hardware
+- ⏳ File write/read operations
+- ⏳ Recording to SD card
+- ⏳ SD card removal handling
+
+### Known Issues
+
+1. **BLE Audio Streaming** - Not yet implemented
+   - Need to implement Opus packet transmission via BLE
+   - File data characteristic ready but not used
+   - MTU-aware packetization needed
+
+2. **Display UI** - Not yet implemented
+   - Recording indicator
+   - Time/frames display
+   - Battery status
+   - Error messages
+
+3. **Button Control** - Not yet implemented
+   - Custom input driver (CONFIG_INPUT_CLIP)
+   - Multi-press support
+   - Integration with state machine
+
+4. **Storage Commands** - Need AT commands for:
+   - `AT+FILES` - List files on SD card
+   - `AT+DELETE <filename>` - Delete file
+   - `AT+FORMAT` - Format SD card
+
+### Next Steps
+
+#### Phase 4: Final Features (Remaining)
+1. **BLE Audio Streaming** (High Priority)
+   - Transmit Opus frames via File Data characteristic
+   - Implement flow control
+   - Track packet statistics
+
+2. **Button Control**
+   - Integrate INPUT_CLIP driver
+   - Map short/long/double-press to actions
+   - Sync with state machine
+
+3. **Display Integration**
+   - CH1115 OLED driver
+   - Recording status display
+   - Error message display
+
+4. **Additional AT Commands**
+   - File management commands
+   - Storage statistics query
+   - Audio mode query
+
+---
+
+## 2025-02-20 - Phase 2: Audio Recording Implementation (Continued)
 
 ### Completed Tasks (Phase 1)
 - ✅ Created `docs/requirements.md` - Product Requirements Document
