@@ -5,5 +5,5 @@
  */
 
 &uart0 {
-	current-speed = <921600>;
+	current-speed = <115200>;
 };

@@ -168,7 +168,7 @@ zephyr_library_sources_ifdef(CONFIG_OPUS_CODEC
     # ARM optimizations
     opus/celt/arm/arm_celt_map.c
     opus/celt/arm/armcpu.c
-    opus/celt/arm/celt_pitch_xcorr_arm_gcc.s  
+    #opus/celt/arm/celt_pitch_xcorr_arm_gcc.s  
     opus/silk/arm/arm_silk_map.c
 )
 

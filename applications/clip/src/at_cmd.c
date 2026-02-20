@@ -1,0 +1,440 @@
+/*
+ * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/logging/log.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include "at_cmd.h"
+#include "clip.h"
+#include "state_machine.h"
+#include "json_helper.h"
+
+LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
+
+/* Helper function to trim whitespace */
+static void trim_whitespace(char *str)
+{
+    char *start = str;
+    char *end;
+
+    while (isspace((unsigned char)*start)) {
+        start++;
+    }
+
+    if (*start == 0) {
+        *str = 0;
+        return;
+    }
+
+    end = start + strlen(start) - 1;
+    while (end > start && isspace((unsigned char)*end)) {
+        end--;
+    }
+
+    memmove(str, start, end - start + 1);
+    str[end - start + 1] = '\0';
+}
+
+/* Helper to extract integer from string */
+static int extract_int(const char *str, int *value)
+{
+    char *end;
+    long val = strtol(str, &end, 10);
+
+    if (end == str || *end != '\0') {
+        return -EINVAL;
+    }
+
+    *value = (int)val;
+    return 0;
+}
+
+int at_cmd_parse(const char *cmd_str, struct at_command *cmd)
+{
+    char buffer[256];
+    char *token;
+    char *value_start;
+
+    if (!cmd_str || !cmd) {
+        return -EINVAL;
+    }
+
+    /* Copy command to buffer */
+    strncpy(buffer, cmd_str, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    /* Trim whitespace */
+    trim_whitespace(buffer);
+
+    /* Check for AT prefix */
+    if (strncmp(buffer, "AT", 2) != 0) {
+        return -EINVAL;
+    }
+
+    /* Skip AT */
+    token = buffer + 2;
+
+    /* Skip whitespace after AT */
+    while (*token == ' ') {
+        token++;
+    }
+
+    /* Find + separator */
+    if (*token != '+') {
+        return -EINVAL;
+    }
+
+    token++; /* Skip + */
+
+    /* Find command name (uppercase) */
+    char name_start[32] = {0};
+    int i = 0;
+    while (*token && *token != '=' && *token != '?' && *token != ' ' &&
+           i < (sizeof(name_start) - 1)) {
+        name_start[i++] = toupper((unsigned char)*token++);
+    }
+    name_start[i] = '\0';
+
+    strncpy(cmd->name, name_start, sizeof(cmd->name) - 1);
+    cmd->name[sizeof(cmd->name) - 1] = '\0';
+
+    /* Determine command type and extract value */
+    value_start = token;
+
+    if (*value_start == '?') {
+        /* GET command */
+        cmd->type = AT_CMD_GET;
+        cmd->value = NULL;
+    } else if (*value_start == '=') {
+        value_start++; /* Skip = */
+
+        if (*value_start == '?') {
+            /* Some commands use =? which is still a GET */
+            cmd->type = AT_CMD_GET;
+            cmd->value = NULL;
+        } else {
+            /* SET command */
+            cmd->type = AT_CMD_SET;
+            trim_whitespace(value_start);
+
+            if (strlen(value_start) > 0) {
+                cmd->value = k_strdup(value_start);
+                if (!cmd->value) {
+                    return -ENOMEM;
+                }
+            } else {
+                cmd->value = NULL;
+            }
+        }
+    } else {
+        /* EXEC command */
+        cmd->type = AT_CMD_EXEC;
+        cmd->value = NULL;
+    }
+
+    return 0;
+}
+
+void at_cmd_cleanup(struct at_command *cmd)
+{
+    if (cmd->value) {
+        k_free(cmd->value);
+        cmd->value = NULL;
+    }
+}
+
+/* Command handlers */
+static int cmd_gstat(const struct at_command *cmd, char **response)
+{
+    char buffer[512];
+
+    snprintf(buffer, sizeof(buffer),
+             "{\"state\":\"%s\","
+             "\"battery\":%u,"
+             "\"charging\":%s,"
+             "\"mode\":\"%s\","
+             "\"bitrate\":%u,"
+             "\"free_space\":%u,"
+             "\"session_count\":%u}",
+             state_to_string(state_get_current()),
+             g_status.battery.percent,
+             g_status.battery.charging ? "true" : "false",
+             g_config.mode == MODE_NORMAL ? "normal" : "enhanced",
+             g_config.bitrate,
+             g_status.free_space,
+             g_status.session_count);
+
+    return json_create_success(buffer, response);
+}
+
+static int cmd_version(const struct at_command *cmd, char **response)
+{
+    return json_create_kv("firmware", "\"1.0.0\"", response);
+}
+
+static int cmd_time_get(const struct at_command *cmd, char **response)
+{
+    return json_create_kv("value", "\"2024-02-03T10:00:00Z\"", response);
+}
+
+static int cmd_bitrate_set(const struct at_command *cmd, char **response)
+{
+    int bitrate;
+
+    if (!cmd->value) {
+        return json_create_error("Missing bitrate value", response);
+    }
+
+    if (extract_int(cmd->value, &bitrate) != 0) {
+        return json_create_error("Invalid bitrate format", response);
+    }
+
+    /* Validate bitrate */
+    if (bitrate < 12000 || bitrate > 64000) {
+        return json_create_error("Bitrate out of range (12000-64000)", response);
+    }
+
+    g_config.bitrate = bitrate;
+
+    return json_create_kv("value", cmd->value, response);
+}
+
+static int cmd_bitrate_get(const struct at_command *cmd, char **response)
+{
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%u", g_config.bitrate);
+    return json_create_kv("value", buffer, response);
+}
+
+static int cmd_complexity_set(const struct at_command *cmd, char **response)
+{
+    int complexity;
+
+    if (!cmd->value) {
+        return json_create_error("Missing complexity value", response);
+    }
+
+    if (extract_int(cmd->value, &complexity) != 0) {
+        return json_create_error("Invalid complexity format", response);
+    }
+
+    if (complexity < 0 || complexity > 10) {
+        return json_create_error("Complexity out of range (0-10)", response);
+    }
+
+    g_config.complexity = complexity;
+
+    return json_create_kv("value", cmd->value, response);
+}
+
+static int cmd_complexity_get(const struct at_command *cmd, char **response)
+{
+    char buffer[16];
+    snprintf(buffer, sizeof(buffer), "%u", g_config.complexity);
+    return json_create_kv("value", buffer, response);
+}
+
+static int cmd_mode_set(const struct at_command *cmd, char **response)
+{
+    char mode_str[32];
+
+    if (!cmd->value) {
+        return json_create_error("Missing mode value", response);
+    }
+
+    /* Copy and trim */
+    strncpy(mode_str, cmd->value, sizeof(mode_str) - 1);
+    mode_str[sizeof(mode_str) - 1] = '\0';
+    trim_whitespace(mode_str);
+
+    /* Convert to lowercase */
+    for (char *p = mode_str; *p; p++) {
+        *p = tolower((unsigned char)*p);
+    }
+
+    if (strcmp(mode_str, "normal") == 0) {
+        g_config.mode = MODE_NORMAL;
+    } else if (strcmp(mode_str, "enhanced") == 0) {
+        g_config.mode = MODE_ENHANCED;
+    } else {
+        return json_create_error("Invalid mode (use normal or enhanced)", response);
+    }
+
+    return json_create_kv("value", mode_str, response);
+}
+
+static int cmd_mode_get(const struct at_command *cmd, char **response)
+{
+    const char *mode = (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced";
+    return json_create_kv("value", mode, response);
+}
+
+static int cmd_start(const struct at_command *cmd, char **response)
+{
+    enum recording_mode mode = g_config.mode;
+
+    /* Parse mode parameter if provided */
+    if (cmd->value) {
+        char mode_str[32];
+        strncpy(mode_str, cmd->value, sizeof(mode_str) - 1);
+        mode_str[sizeof(mode_str) - 1] = '\0';
+        trim_whitespace(mode_str);
+
+        for (char *p = mode_str; *p; p++) {
+            *p = tolower((unsigned char)*p);
+        }
+
+        if (strcmp(mode_str, "normal") == 0) {
+            mode = MODE_NORMAL;
+        } else if (strcmp(mode_str, "enhanced") == 0) {
+            mode = MODE_ENHANCED;
+        } else {
+            return json_create_error("Invalid mode", response);
+        }
+    }
+
+    /* Check current state */
+    if (state_get_current() == CLIP_STATE_RECORDING) {
+        return json_create_error("Already recording", response);
+    }
+
+    /* Transition to recording state */
+    int err = state_transition(CLIP_STATE_RECORDING);
+    if (err) {
+        return json_create_error("Cannot start recording", response);
+    }
+
+    LOG_INF("Recording started in %s mode",
+           mode == MODE_NORMAL ? "normal" : "enhanced");
+
+    return json_create_kv("session", "\"20240203_100000\"", response);
+}
+
+static int cmd_stop(const struct at_command *cmd, char **response)
+{
+    /* Check current state */
+    if (state_get_current() != CLIP_STATE_RECORDING) {
+        return json_create_error("Not recording", response);
+    }
+
+    /* Transition to idle state */
+    int err = state_transition(CLIP_STATE_IDLE);
+    if (err) {
+        return json_create_error("Cannot stop recording", response);
+    }
+
+    LOG_INF("Recording stopped after %u seconds", g_recording_time);
+
+    char data[256];
+    snprintf(data, sizeof(data),
+             "{\"session\":\"20240203_100000\","
+             "\"duration\":%u,"
+             "\"file_count\":1,"
+             "\"total_size\":3600000}",
+             g_recording_time);
+
+    g_recording_time = 0;
+
+    return json_create_success(data, response);
+}
+
+static int cmd_mark(const struct at_command *cmd, char **response)
+{
+    /* Check if recording */
+    if (state_get_current() != CLIP_STATE_RECORDING) {
+        return json_create_error("Not recording", response);
+    }
+
+    const char *note = cmd->value ? cmd->value : "";
+
+    LOG_INF("Bookmark added at %u seconds: %s", g_recording_time, note);
+
+    char data[256];
+    snprintf(data, sizeof(data),
+             "{\"timestamp\":1706918430,"
+             "\"offset\":%u,"
+             "\"file\":\"001.opus\","
+             "\"note\":\"%s\"}",
+             g_recording_time,
+             note);
+
+    return json_create_success(data, response);
+}
+
+/* Command table */
+struct cmd_entry {
+    const char *name;
+    int (*handler)(const struct at_command *cmd, char **response);
+    enum at_cmd_type allowed_types;
+};
+
+static const struct cmd_entry commands[] = {
+    /* Status commands */
+    {"GSTAT",    cmd_gstat,        AT_CMD_EXEC},
+
+    /* System commands */
+    {"VERSION",  cmd_version,      AT_CMD_EXEC},
+    {"TIME",     cmd_time_get,     AT_CMD_GET},
+
+    /* Configuration commands */
+    {"BITRATE",  cmd_bitrate_set,  AT_CMD_SET | AT_CMD_GET},
+    {"COMPLEXITY", cmd_complexity_set, AT_CMD_SET | AT_CMD_GET},
+    {"MODE",     cmd_mode_set,     AT_CMD_SET | AT_CMD_GET},
+
+    /* Recording commands */
+    {"START",    cmd_start,        AT_CMD_EXEC | AT_CMD_SET},
+    {"STOP",     cmd_stop,         AT_CMD_EXEC},
+    {"MARK",     cmd_mark,         AT_CMD_EXEC | AT_CMD_SET},
+
+    /* Sentinel */
+    {NULL, NULL, 0}
+};
+
+int at_cmd_execute(const struct at_command *cmd, char **response)
+{
+    const struct cmd_entry *entry;
+
+    LOG_INF("Executing AT command: %s (type=%d)", cmd->name, cmd->type);
+
+    /* Find command handler */
+    for (entry = commands; entry->name; entry++) {
+        if (strcmp(cmd->name, entry->name) == 0) {
+            /* Check if command type is allowed */
+            if (!(entry->allowed_types & cmd->type)) {
+                return json_create_error("Command type not supported", response);
+            }
+
+            /* Execute handler */
+            return entry->handler(cmd, response);
+        }
+    }
+
+    /* Command not found */
+    return json_create_error("Unknown command", response);
+}
+
+int at_cmd_init(void)
+{
+    /* Initialize global status */
+    memset(&g_status, 0, sizeof(g_status));
+    g_status.battery.percent = 100;
+    g_status.battery.charging = false;
+    g_status.free_space = 1024000000;
+    g_status.session_count = 0;
+
+    /* Initialize default configuration */
+    g_config.bitrate = 24000;
+    g_config.complexity = 5;
+    g_config.mode = MODE_NORMAL;
+    g_config.noise_suppress = 0;
+    g_config.chunk_size = 500;
+
+    return 0;
+}
