@@ -25,6 +25,7 @@
 #include "clip.h"
 #include "config.h"
 #include "storage.h"
+#include "bookmarks.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
@@ -88,6 +89,9 @@ static bool storage_enabled = true;
 #define SEGMENT_DURATION_SEC 300  /* 5 minutes per file */
 static uint32_t recording_frame_count = 0;
 static uint32_t current_file_index = 1;
+
+/* Current session ID for bookmarks */
+static char current_session_id[32] = {0};
 
 /* Forward declarations */
 static int init_opus_encoder(void);
@@ -225,6 +229,17 @@ int audio_start_recording(enum audio_mode mode)
 	stats.encode_time_min_ms = INT64_MAX;
 	encode_time_total = 0;
 
+	/* Reset recording counters */
+	recording_frame_count = 0;
+	current_file_index = 1;
+
+	/* Generate session ID from timestamp */
+	uint32_t session_ts = (uint32_t)(k_uptime_get() / 1000);
+	snprintf(current_session_id, sizeof(current_session_id), "%010u", session_ts);
+
+	/* Initialize bookmarks for this session */
+	bookmarks_init(current_session_id);
+
 	/* Create SD card file if storage enabled and mounted */
 	if (storage_enabled && storage_is_mounted()) {
 		const char *mode_str = (mode == AUDIO_MODE_STEREO) ? "enhanced" : "normal";
@@ -281,6 +296,12 @@ int audio_stop_recording(void)
 			LOG_WRN("Failed to close storage file: %d", ret);
 		}
 		memset(&current_storage_file, 0, sizeof(current_storage_file));
+	}
+
+	/* Save bookmarks */
+	ret = bookmarks_save(current_session_id);
+	if (ret != 0) {
+		LOG_WRN("Failed to save bookmarks: %d", ret);
 	}
 
 	/* Calculate average encode time */
@@ -683,4 +704,42 @@ static int mic_power_off(void)
 		gpio_pin_set_dt(&mic_en, 0);
 	}
 	return 0;
+}
+
+/* Public API functions */
+int audio_add_bookmark(const char *note)
+{
+	struct bookmark bm;
+	uint32_t recording_sec;
+
+	if (!recording_active) {
+		return -EINVAL;
+	}
+
+	/* Calculate recording time in seconds */
+	recording_sec = (stats.frames_encoded * AUDIO_FRAME_MS) / 1000;
+
+	/* Fill bookmark structure */
+	memset(&bm, 0, sizeof(bm));
+	bm.timestamp = (uint32_t)(k_uptime_get() / 1000);
+	bm.offset_sec = recording_sec;
+	bm.file_index = current_file_index;
+	bm.file_offset = current_storage_file.bytes_written;
+	if (note) {
+		strncpy(bm.note, note, sizeof(bm.note) - 1);
+	} else {
+		bm.note[0] = '\0';
+	}
+
+	/* Add to bookmarks module */
+	return bookmarks_add(current_session_id, &bm);
+}
+
+const char *audio_get_session_id(void)
+{
+	if (!recording_active) {
+		return NULL;
+	}
+
+	return current_session_id;
 }

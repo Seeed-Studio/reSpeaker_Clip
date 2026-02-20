@@ -134,4 +134,19 @@ int audio_get_stats(struct audio_stats *stats);
  */
 void audio_recording_thread(void *p1, void *p2, void *p3);
 
+/**
+ * @brief Add a bookmark during recording
+ *
+ * @param note Optional note text (can be NULL)
+ * @return 0 on success, negative error code on failure
+ */
+int audio_add_bookmark(const char *note);
+
+/**
+ * @brief Get current session ID
+ *
+ * @return Session ID string, or NULL if not recording
+ */
+const char *audio_get_session_id(void);
+
 #endif /* AUDIO_H */

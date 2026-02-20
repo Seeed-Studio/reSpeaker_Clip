@@ -20,5 +20,6 @@ target_sources(app PRIVATE
     src/storage.c
     src/button_handler.c
     src/transfer.c
+    src/bookmarks.c
     # src/display_ctrl.c  # Disabled for now
 )

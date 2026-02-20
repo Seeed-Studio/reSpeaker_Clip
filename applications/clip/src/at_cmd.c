@@ -19,6 +19,7 @@
 #include "audio.h"
 #include "storage.h"
 #include "transfer.h"
+#include "bookmarks.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -416,21 +417,28 @@ static int cmd_stop(const struct at_command *cmd, char **response)
 
 static int cmd_mark(const struct at_command *cmd, char **response)
 {
+    int err;
+    const char *note = cmd->value ? cmd->value : "";
+
     /* Check if recording */
     if (state_get_current() != CLIP_STATE_RECORDING) {
         return json_create_error("Not recording", response);
     }
 
-    const char *note = cmd->value ? cmd->value : "";
+    /* Add bookmark via audio module */
+    err = audio_add_bookmark(note);
+    if (err != 0) {
+        return json_create_error("Failed to add bookmark", response);
+    }
 
     LOG_INF("Bookmark added at %u seconds: %s", g_recording_time, note);
 
     char data[256];
     snprintf(data, sizeof(data),
-             "{\"timestamp\":1706918430,"
+             "{\"timestamp\":%u,"
              "\"offset\":%u,"
-             "\"file\":\"001.opus\","
              "\"note\":\"%s\"}",
+             (uint32_t)(k_uptime_get() / 1000),
              g_recording_time,
              note);
 
@@ -499,6 +507,10 @@ static int cmd_delete(const struct at_command *cmd, char **response)
 
 static int cmd_marks(const struct at_command *cmd, char **response)
 {
+    struct bookmark bookmarks[BOOKMARKS_MAX_COUNT];
+    char data[1024];
+    int count;
+
     if (!cmd->value) {
         return json_create_error("Missing session ID", response);
     }
@@ -508,11 +520,34 @@ static int cmd_marks(const struct at_command *cmd, char **response)
         return json_create_error("Session not found", response);
     }
 
-    /* TODO: Implement bookmark reading from marks.bin file */
-    char data[256];
-    snprintf(data, sizeof(data),
-             "{\"session\":\"%s\",\"bookmarks\":[]}",
-             cmd->value);
+    /* Get bookmarks for session */
+    count = bookmarks_get_all(cmd->value, bookmarks, BOOKMARKS_MAX_COUNT);
+    if (count < 0) {
+        return json_create_error("Failed to get bookmarks", response);
+    }
+
+    /* Build JSON response */
+    char *ptr = data;
+    int remaining = sizeof(data);
+
+    ptr += snprintf(ptr, remaining, "{\"bookmarks\":[");
+    remaining = sizeof(data) - (ptr - data);
+
+    for (int i = 0; i < count && remaining > 100; i++) {
+        int len = snprintf(ptr, remaining,
+                          "%s{\"time\":%u,\"offset\":%u,\"file\":%u,"
+                          "\"file_offset\":%u,\"note\":\"%s\"}",
+                          i > 0 ? "," : "",
+                          bookmarks[i].timestamp,
+                          bookmarks[i].offset_sec,
+                          bookmarks[i].file_index,
+                          bookmarks[i].file_offset,
+                          bookmarks[i].note);
+        ptr += len;
+        remaining -= len;
+    }
+
+    snprintf(ptr, remaining, "]}");
 
     return json_create_success(data, response);
 }
