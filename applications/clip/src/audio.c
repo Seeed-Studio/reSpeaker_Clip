@@ -84,6 +84,11 @@ static int64_t encode_time_total = 0;
 static struct storage_file current_storage_file = {0};
 static bool storage_enabled = true;
 
+/* Recording segmentation */
+#define SEGMENT_DURATION_SEC 300  /* 5 minutes per file */
+static uint32_t recording_frame_count = 0;
+static uint32_t current_file_index = 1;
+
 /* Forward declarations */
 static int init_opus_encoder(void);
 static void cleanup_opus_encoder(void);
@@ -492,6 +497,28 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		/* Update statistics */
 		stats.frames_encoded++;
 		stats.total_bytes += encoded_bytes;
+		recording_frame_count++;
+
+		/* Check if we need to create a new file (segmentation) */
+		uint32_t frames_per_file = SEGMENT_DURATION_SEC * (1000 / AUDIO_FRAME_MS);
+		if (recording_frame_count % frames_per_file == 1) {
+			/* Time to create a new segment file */
+			if (current_storage_file.is_open) {
+				/* Close current file */
+				storage_close_file(&current_storage_file);
+			}
+
+			/* Create new file with incremented index */
+			char filename[32];
+			snprintf(filename, sizeof(filename), "%03u.opus", current_file_index++);
+			ret = storage_create_file(&current_storage_file, 0, "normal");
+			if (ret != 0) {
+				LOG_ERR("Failed to create segment file: %d", ret);
+				/* Continue recording without storage */
+			} else {
+				LOG_INF("Created new segment: %s", filename);
+			}
+		}
 
 		/* Save to SD card if storage enabled and file open */
 		if (storage_enabled && current_storage_file.is_open) {
@@ -504,8 +531,6 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 				memset(&current_storage_file, 0, sizeof(current_storage_file));
 			}
 		}
-
-		/* TODO: Send via BLE when implemented */
 
 		k_yield();
 	}

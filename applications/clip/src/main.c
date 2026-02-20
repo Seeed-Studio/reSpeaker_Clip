@@ -15,6 +15,7 @@
 #include "audio.h"
 #include "storage.h"
 #include "button_handler.h"
+/* #include "display_ctrl.h" */
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -92,6 +93,9 @@ int clip_init(void)
         /* Continue anyway, button is optional */
     }
 
+    /* Initialize display (disabled for now) */
+    /* err = display_init(); */
+
     /* Transition to idle state */
     err = state_transition(CLIP_STATE_IDLE);
     if (err) {
@@ -115,6 +119,9 @@ static void state_change_handler(enum clip_state old_state,
     /* Update status */
     g_status.state = new_state;
 
+    /* Update display (disabled for now) */
+    /* display_update_status(); */
+
     /* Send state change notification via BLE if connected */
     if (ble_svc_is_ready()) {
         char *response;
@@ -131,7 +138,7 @@ static void state_change_handler(enum clip_state old_state,
         json_free(response);
     }
 
-    /* TODO: Update display, haptic feedback, etc. */
+    /* TODO: Add haptic feedback */
 }
 
 void clip_main_loop(void)

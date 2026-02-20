@@ -9,6 +9,7 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include "at_cmd.h"

@@ -5,9 +5,11 @@
  */
 
 #include <zephyr/kernel.h>
-#include <zephyr/settings/settings.h>
 #include <string.h>
+#include <zephyr/logging/log.h>
 #include "config.h"
+
+LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 
 /* Factory default configuration */
 static const struct clip_config factory_config = {
@@ -17,6 +19,9 @@ static const struct clip_config factory_config = {
     .noise_suppress = 0,
     .chunk_size = 500,
 };
+
+#ifdef CONFIG_SETTINGS
+#include <zephyr/settings/settings.h>
 
 /* Settings handler for configuration */
 static int config_set_handler(const char *name, size_t len,
@@ -74,47 +79,56 @@ static struct settings_handler config_handler = {
     .name = "config",
     .h_set = config_set_handler,
 };
+#endif /* CONFIG_SETTINGS */
 
 int config_init(void)
 {
+    /* Load factory defaults */
+    memcpy(&g_config, &factory_config, sizeof(g_config));
+
+#ifdef CONFIG_SETTINGS
     int err;
 
     /* Initialize settings subsystem */
     err = settings_subsys_init();
     if (err) {
-        printk("Settings subsystem init failed: %d\n", err);
-        /* Continue with defaults */
-        memcpy(&g_config, &factory_config, sizeof(g_config));
+        LOG_WRN("Settings subsystem init failed: %d, using defaults", err);
         return 0;
     }
 
     /* Register settings handler */
     err = settings_register(&config_handler);
     if (err) {
-        printk("Settings register failed: %d\n", err);
-        memcpy(&g_config, &factory_config, sizeof(g_config));
+        LOG_WRN("Settings register failed: %d, using defaults", err);
         return 0;
     }
 
     /* Load configuration from NVS */
     err = settings_load();
     if (err) {
-        printk("Settings load failed: %d, using defaults\n", err);
-        memcpy(&g_config, &factory_config, sizeof(g_config));
+        LOG_WRN("Settings load failed: %d, using defaults", err);
         /* Save defaults to NVS */
         config_save();
     }
+#else
+    LOG_INF("Config initialized with factory defaults (settings disabled)");
+#endif /* CONFIG_SETTINGS */
 
     return 0;
 }
 
 int config_load(void)
 {
+#ifdef CONFIG_SETTINGS
     return settings_load();
+#else
+    return 0;
+#endif
 }
 
 int config_save(void)
 {
+#ifdef CONFIG_SETTINGS
     int err;
 
     err = settings_save_one("config/bitrate", &g_config.bitrate,
@@ -148,6 +162,10 @@ int config_save(void)
     }
 
     return 0;
+#else
+    LOG_WRN("Config save not implemented (settings disabled)");
+    return -ENOTSUP;
+#endif
 }
 
 int config_factory_reset(void)
@@ -161,42 +179,69 @@ int config_factory_reset(void)
 
 int config_set(uint16_t key, const void *value, size_t len)
 {
+    int ret = 0;
+
     switch (key) {
     case NVS_KEY_BITRATE:
         if (len == sizeof(uint16_t)) {
             g_config.bitrate = *(const uint16_t *)value;
-            return settings_save_one("config/bitrate", value, len);
+        } else {
+            ret = -EINVAL;
         }
         break;
     case NVS_KEY_COMPLEXITY:
         if (len == sizeof(uint8_t)) {
             g_config.complexity = *(const uint8_t *)value;
-            return settings_save_one("config/complexity", value, len);
+        } else {
+            ret = -EINVAL;
         }
         break;
     case NVS_KEY_MODE:
         if (len == sizeof(uint8_t)) {
             g_config.mode = *(const uint8_t *)value;
-            return settings_save_one("config/mode", value, len);
+        } else {
+            ret = -EINVAL;
         }
         break;
     case NVS_KEY_NOISE:
         if (len == sizeof(uint8_t)) {
             g_config.noise_suppress = *(const uint8_t *)value;
-            return settings_save_one("config/noise_suppress", value, len);
+        } else {
+            ret = -EINVAL;
         }
         break;
     case NVS_KEY_CHUNK_SIZE:
         if (len == sizeof(uint16_t)) {
             g_config.chunk_size = *(const uint16_t *)value;
-            return settings_save_one("config/chunk_size", value, len);
+        } else {
+            ret = -EINVAL;
         }
         break;
     default:
         return -EINVAL;
     }
 
-    return -EINVAL;
+    if (ret) {
+        return ret;
+    }
+
+#ifdef CONFIG_SETTINGS
+    /* Save to NVS */
+    switch (key) {
+    case NVS_KEY_BITRATE:
+        return settings_save_one("config/bitrate", value, len);
+    case NVS_KEY_COMPLEXITY:
+        return settings_save_one("config/complexity", value, len);
+    case NVS_KEY_MODE:
+        return settings_save_one("config/mode", value, len);
+    case NVS_KEY_NOISE:
+        return settings_save_one("config/noise_suppress", value, len);
+    case NVS_KEY_CHUNK_SIZE:
+        return settings_save_one("config/chunk_size", value, len);
+    }
+#endif
+
+    return 0;
 }
 
 int config_get(uint16_t key, void *value, size_t len)
