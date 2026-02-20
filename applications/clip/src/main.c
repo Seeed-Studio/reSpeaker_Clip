@@ -14,6 +14,7 @@
 #include "json_helper.h"
 #include "audio.h"
 #include "storage.h"
+#include "button_handler.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -82,6 +83,13 @@ int clip_init(void)
     if (err) {
         LOG_WRN("Storage init failed: %d, SD card features disabled", err);
         /* Continue anyway, SD card is optional */
+    }
+
+    /* Initialize button handler */
+    err = button_handler_init();
+    if (err) {
+        LOG_WRN("Button handler init failed: %d, button features disabled", err);
+        /* Continue anyway, button is optional */
     }
 
     /* Transition to idle state */

@@ -18,4 +18,5 @@ target_sources(app PRIVATE
     src/json_helper.c
     src/audio.c
     src/storage.c
+    src/button_handler.c
 )
