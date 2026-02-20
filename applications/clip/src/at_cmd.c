@@ -18,6 +18,7 @@
 #include "json_helper.h"
 #include "audio.h"
 #include "storage.h"
+#include "transfer.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -490,6 +491,118 @@ static int cmd_marks(const struct at_command *cmd, char **response)
     return json_create_success(data, response);
 }
 
+static int cmd_download(const struct at_command *cmd, char **response)
+{
+    char session_id[32] = {0};
+    char filename[64] = {0};
+    char *slash;
+    int err;
+
+    if (!cmd->value) {
+        return json_create_error("Missing session ID", response);
+    }
+
+    /* Parse session/filename or just session */
+    slash = strchr(cmd->value, '/');
+    if (slash) {
+        /* Session/filename format */
+        *slash = '\0';
+        strncpy(session_id, cmd->value, sizeof(session_id) - 1);
+        strncpy(filename, slash + 1, sizeof(filename) - 1);
+    } else {
+        /* Just session ID */
+        strncpy(session_id, cmd->value, sizeof(session_id) - 1);
+    }
+
+    /* Check if session exists */
+    if (!storage_session_exists(session_id)) {
+        return json_create_error("Session not found", response);
+    }
+
+    /* Start transfer */
+    err = transfer_start(session_id, filename[0] ? filename : NULL);
+    if (err != 0) {
+        return json_create_error("Failed to start transfer", response);
+    }
+
+    /* Transition to transmitting state */
+    err = state_transition(CLIP_STATE_TRANSMITTING);
+    if (err != 0) {
+        return json_create_error("State transition failed", response);
+    }
+
+    return json_create_success(NULL, response);
+}
+
+static int cmd_progress(const struct at_command *cmd, char **response)
+{
+    struct transfer_info info;
+    char data[256];
+    int err;
+
+    err = transfer_get_progress(&info);
+    if (err != 0) {
+        return json_create_error("Failed to get progress", response);
+    }
+
+    snprintf(data, sizeof(data),
+             "{\"progress\":%u,"
+             "\"transferred\":%llu,"
+             "\"total\":%llu,"
+             "\"state\":%u}",
+             info.progress_percent,
+             info.bytes_transferred,
+             info.total_bytes,
+             info.state);
+
+    return json_create_success(data, response);
+}
+
+static int cmd_pause(const struct at_command *cmd, char **response)
+{
+    int err;
+
+    err = transfer_pause();
+    if (err != 0) {
+        return json_create_error("No transfer in progress", response);
+    }
+
+    /* Transition to paused state */
+    state_transition(CLIP_STATE_PAUSED);
+
+    return json_create_success(NULL, response);
+}
+
+static int cmd_resume(const struct at_command *cmd, char **response)
+{
+    int err;
+
+    err = transfer_resume();
+    if (err != 0) {
+        return json_create_error("No transfer to resume", response);
+    }
+
+    /* Transition back to transmitting state */
+    state_transition(CLIP_STATE_TRANSMITTING);
+
+    return json_create_success(NULL, response);
+}
+
+static int cmd_cancel(const struct at_command *cmd, char **response)
+{
+    int err;
+
+    err = transfer_cancel();
+    if (err != 0) {
+        return json_create_error("No transfer to cancel", response);
+    }
+
+    /* Transition to idle state */
+    state_transition(CLIP_STATE_IDLE);
+
+    return json_create_success(NULL, response);
+}
+
 /* Command table */
 struct cmd_entry {
     const char *name;
@@ -519,6 +632,13 @@ static const struct cmd_entry commands[] = {
     {"LIST",     cmd_list,         AT_CMD_EXEC},
     {"DELETE",   cmd_delete,       AT_CMD_SET},
     {"MARKS",    cmd_marks,        AT_CMD_SET},
+
+    /* Transfer commands */
+    {"DOWNLOAD", cmd_download,     AT_CMD_SET},
+    {"PROGRESS", cmd_progress,     AT_CMD_EXEC},
+    {"PAUSE",    cmd_pause,        AT_CMD_EXEC},
+    {"RESUME",   cmd_resume,       AT_CMD_EXEC},
+    {"CANCEL",   cmd_cancel,       AT_CMD_EXEC},
 
     /* Sentinel */
     {NULL, NULL, 0}

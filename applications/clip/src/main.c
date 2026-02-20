@@ -15,6 +15,7 @@
 #include "audio.h"
 #include "storage.h"
 #include "button_handler.h"
+#include "transfer.h"
 /* #include "display_ctrl.h" */
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -91,6 +92,13 @@ int clip_init(void)
     if (err) {
         LOG_WRN("Button handler init failed: %d, button features disabled", err);
         /* Continue anyway, button is optional */
+    }
+
+    /* Initialize transfer subsystem */
+    err = transfer_init();
+    if (err) {
+        LOG_WRN("Transfer init failed: %d, transfer features disabled", err);
+        /* Continue anyway, transfer is optional */
     }
 
     /* Initialize display (disabled for now) */

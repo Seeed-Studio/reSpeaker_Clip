@@ -19,5 +19,6 @@ target_sources(app PRIVATE
     src/audio.c
     src/storage.c
     src/button_handler.c
+    src/transfer.c
     # src/display_ctrl.c  # Disabled for now
 )
