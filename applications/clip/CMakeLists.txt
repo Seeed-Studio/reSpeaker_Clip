@@ -17,4 +17,5 @@ target_sources(app PRIVATE
     src/config.c
     src/json_helper.c
     src/audio.c
+    src/storage.c
 )

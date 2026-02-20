@@ -24,6 +24,7 @@
 #include "audio.h"
 #include "clip.h"
 #include "config.h"
+#include "storage.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
@@ -78,6 +79,10 @@ static bool speex_enabled = false;
 /* Statistics */
 static struct audio_stats stats = {0};
 static int64_t encode_time_total = 0;
+
+/* Storage for recording */
+static struct storage_file current_storage_file = {0};
+static bool storage_enabled = true;
 
 /* Forward declarations */
 static int init_opus_encoder(void);
@@ -215,10 +220,28 @@ int audio_start_recording(enum audio_mode mode)
 	stats.encode_time_min_ms = INT64_MAX;
 	encode_time_total = 0;
 
+	/* Create SD card file if storage enabled and mounted */
+	if (storage_enabled && storage_is_mounted()) {
+		const char *mode_str = (mode == AUDIO_MODE_STEREO) ? "enhanced" : "normal";
+		ret = storage_create_file(&current_storage_file,
+					 (uint32_t)(k_uptime_get() / 1000),
+					 mode_str);
+		if (ret != 0) {
+			LOG_WRN("Failed to create storage file: %d", ret);
+			/* Continue anyway, storage is optional */
+		} else {
+			LOG_INF("Recording to file: %s", current_storage_file.filename);
+		}
+	}
+
 	/* Start DMIC */
 	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
 	if (ret < 0) {
 		LOG_ERR("Failed to start DMIC: %d", ret);
+		/* Close file if opened */
+		if (current_storage_file.is_open) {
+			storage_close_file(&current_storage_file);
+		}
 		return ret;
 	}
 
@@ -244,6 +267,15 @@ int audio_stop_recording(void)
 	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
 	if (ret < 0) {
 		LOG_ERR("Failed to stop DMIC: %d", ret);
+	}
+
+	/* Close SD card file if open */
+	if (current_storage_file.is_open) {
+		ret = storage_close_file(&current_storage_file);
+		if (ret != 0) {
+			LOG_WRN("Failed to close storage file: %d", ret);
+		}
+		memset(&current_storage_file, 0, sizeof(current_storage_file));
 	}
 
 	/* Calculate average encode time */
@@ -461,8 +493,19 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		stats.frames_encoded++;
 		stats.total_bytes += encoded_bytes;
 
-		/* TODO: Send via BLE or save to SD card */
-		/* For now, just count frames */
+		/* Save to SD card if storage enabled and file open */
+		if (storage_enabled && current_storage_file.is_open) {
+			ret = storage_write_frame(&current_storage_file,
+					       opus_packet, encoded_bytes);
+			if (ret != 0) {
+				LOG_ERR("Storage write error: %d", ret);
+				/* Close file on error */
+				storage_close_file(&current_storage_file);
+				memset(&current_storage_file, 0, sizeof(current_storage_file));
+			}
+		}
+
+		/* TODO: Send via BLE when implemented */
 
 		k_yield();
 	}
