@@ -280,6 +280,32 @@ static int cmd_mode_get(const struct at_command *cmd, char **response)
     return json_create_kv("value", mode, response);
 }
 
+static int cmd_chunksize_set(const struct at_command *cmd, char **response)
+{
+    uint32_t value;
+    char data[128];
+
+    if (!cmd->value) {
+        /* Get current chunk size */
+        snprintf(data, sizeof(data), "{\"value\":%u}", g_config.chunk_size);
+        return json_create_success(data, response);
+    }
+
+    /* Parse chunk size value */
+    value = atoi(cmd->value);
+
+    /* Validate range */
+    if (value < 100 || value > 4096) {
+        return json_create_error("Invalid chunk size (100-4096)", response);
+    }
+
+    /* Set chunk size */
+    g_config.chunk_size = value;
+
+    snprintf(data, sizeof(data), "{\"value\":%u}", value);
+    return json_create_success(data, response);
+}
+
 static int cmd_start(const struct at_command *cmd, char **response)
 {
     int err;
@@ -603,6 +629,51 @@ static int cmd_cancel(const struct at_command *cmd, char **response)
     return json_create_success(NULL, response);
 }
 
+static int cmd_purge(const struct at_command *cmd, char **response)
+{
+    struct storage_session_info sessions[32];
+    char deleted_list[512];
+    int count;
+    int deleted_count = 0;
+    uint64_t total_freed = 0;
+
+    /* List all sessions */
+    count = storage_list_sessions(sessions, 32);
+    if (count < 0) {
+        return json_create_error("Failed to list sessions", response);
+    }
+
+    if (count == 0) {
+        return json_create_success("{\"deleted\":[],\"freed\":0}", response);
+    }
+
+    /* Build deleted list JSON */
+    char *ptr = deleted_list;
+    int remaining = sizeof(deleted_list);
+
+    ptr += snprintf(ptr, remaining, "{\"deleted\":[");
+    remaining = sizeof(deleted_list) - (ptr - deleted_list);
+
+    /* Delete all sessions */
+    for (int i = 0; i < count && remaining > 50; i++) {
+        int err = storage_delete_session(sessions[i].session_id);
+        if (err == 0) {
+            int len = snprintf(ptr, remaining,
+                              "%s\"%s\"",
+                              deleted_count > 0 ? "," : "",
+                              sessions[i].session_id);
+            ptr += len;
+            remaining -= len;
+            total_freed += sessions[i].total_bytes;
+            deleted_count++;
+        }
+    }
+
+    snprintf(ptr, remaining, "],\"freed\":%llu}", total_freed);
+
+    return json_create_success(deleted_list, response);
+}
+
 /* Command table */
 struct cmd_entry {
     const char *name;
@@ -617,11 +688,13 @@ static const struct cmd_entry commands[] = {
     /* System commands */
     {"VERSION",  cmd_version,      AT_CMD_EXEC},
     {"TIME",     cmd_time_get,     AT_CMD_GET},
+    {"PURGE",    cmd_purge,        AT_CMD_EXEC},
 
     /* Configuration commands */
     {"BITRATE",  cmd_bitrate_set,  AT_CMD_SET | AT_CMD_GET},
     {"COMPLEXITY", cmd_complexity_set, AT_CMD_SET | AT_CMD_GET},
     {"MODE",     cmd_mode_set,     AT_CMD_SET | AT_CMD_GET},
+    {"CHUNKSIZE", cmd_chunksize_set, AT_CMD_SET | AT_CMD_GET},
 
     /* Recording commands */
     {"START",    cmd_start,        AT_CMD_EXEC | AT_CMD_SET},
