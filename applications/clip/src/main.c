@@ -16,6 +16,7 @@
 #include "storage.h"
 #include "button_handler.h"
 #include "transfer.h"
+#include "battery.h"
 /* #include "display_ctrl.h" */
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -99,6 +100,13 @@ int clip_init(void)
     if (err) {
         LOG_WRN("Transfer init failed: %d, transfer features disabled", err);
         /* Continue anyway, transfer is optional */
+    }
+
+    /* Initialize battery subsystem */
+    err = battery_init();
+    if (err) {
+        LOG_WRN("Battery init failed: %d, battery features disabled", err);
+        /* Continue anyway, battery is optional */
     }
 
     /* Initialize display (disabled for now) */

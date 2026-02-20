@@ -20,6 +20,7 @@
 #include "storage.h"
 #include "transfer.h"
 #include "bookmarks.h"
+#include "battery.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -159,6 +160,13 @@ void at_cmd_cleanup(struct at_command *cmd)
 static int cmd_gstat(const struct at_command *cmd, char **response)
 {
     char buffer[512];
+    struct storage_stats stats;
+    uint32_t free_space = 0;
+
+    /* Get storage statistics */
+    if (storage_get_stats(&stats) == 0) {
+        free_space = stats.free_space_mb;
+    }
 
     snprintf(buffer, sizeof(buffer),
              "{\"state\":\"%s\","
@@ -166,15 +174,13 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
              "\"charging\":%s,"
              "\"mode\":\"%s\","
              "\"bitrate\":%u,"
-             "\"free_space\":%u,"
-             "\"session_count\":%u}",
+             "\"free_space\":%u}",
              state_to_string(state_get_current()),
-             g_status.battery.percent,
-             g_status.battery.charging ? "true" : "false",
+             battery_get_level(),
+             battery_is_charging() ? "true" : "false",
              g_config.mode == MODE_NORMAL ? "normal" : "enhanced",
              g_config.bitrate,
-             g_status.free_space,
-             g_status.session_count);
+             free_space);
 
     return json_create_success(buffer, response);
 }
@@ -187,6 +193,69 @@ static int cmd_version(const struct at_command *cmd, char **response)
 static int cmd_time_get(const struct at_command *cmd, char **response)
 {
     return json_create_kv("value", "\"2024-02-03T10:00:00Z\"", response);
+}
+
+static int cmd_battery_get(const struct at_command *cmd, char **response)
+{
+    char data[256];
+
+    snprintf(data, sizeof(data),
+             "{\"level\":%u,"
+             "\"voltage\":%u,"
+             "\"charging\":%s}",
+             battery_get_level(),
+             battery_get_voltage(),
+             battery_is_charging() ? "true" : "false");
+
+    return json_create_success(data, response);
+}
+
+static int cmd_battery_set(const struct at_command *cmd, char **response)
+{
+    uint32_t level;
+    char data[128];
+
+    if (!cmd->value) {
+        return json_create_error("Missing battery level", response);
+    }
+
+    level = atoi(cmd->value);
+
+    if (level > 100) {
+        return json_create_error("Invalid battery level (0-100)", response);
+    }
+
+    battery_set_level((uint8_t)level);
+
+    snprintf(data, sizeof(data), "{\"level\":%u}", level);
+    return json_create_success(data, response);
+}
+
+static int cmd_charging_set(const struct at_command *cmd, char **response)
+{
+    bool charging;
+    char data[128];
+
+    if (!cmd->value) {
+        /* Get current charging status */
+        snprintf(data, sizeof(data), "{\"charging\":%s}",
+                battery_is_charging() ? "true" : "false");
+        return json_create_success(data, response);
+    }
+
+    /* Parse value */
+    if (strcasecmp(cmd->value, "on") == 0 || strcasecmp(cmd->value, "1") == 0) {
+        charging = true;
+    } else if (strcasecmp(cmd->value, "off") == 0 || strcasecmp(cmd->value, "0") == 0) {
+        charging = false;
+    } else {
+        return json_create_error("Invalid value (use on/off or 0/1)", response);
+    }
+
+    battery_set_charging(charging);
+
+    snprintf(data, sizeof(data), "{\"charging\":%s}", charging ? "true" : "false");
+    return json_create_success(data, response);
 }
 
 static int cmd_bitrate_set(const struct at_command *cmd, char **response)
@@ -724,6 +793,8 @@ static const struct cmd_entry commands[] = {
     {"VERSION",  cmd_version,      AT_CMD_EXEC},
     {"TIME",     cmd_time_get,     AT_CMD_GET},
     {"PURGE",    cmd_purge,        AT_CMD_EXEC},
+    {"BATTERY",  cmd_battery_set,  AT_CMD_SET | AT_CMD_GET},
+    {"CHARGING", cmd_charging_set, AT_CMD_SET | AT_CMD_GET},
 
     /* Configuration commands */
     {"BITRATE",  cmd_bitrate_set,  AT_CMD_SET | AT_CMD_GET},
