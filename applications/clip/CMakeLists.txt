@@ -16,4 +16,5 @@ target_sources(app PRIVATE
     src/state_machine.c
     src/config.c
     src/json_helper.c
+    src/audio.c
 )

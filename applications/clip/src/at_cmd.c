@@ -15,6 +15,7 @@
 #include "clip.h"
 #include "state_machine.h"
 #include "json_helper.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -278,7 +279,9 @@ static int cmd_mode_get(const struct at_command *cmd, char **response)
 
 static int cmd_start(const struct at_command *cmd, char **response)
 {
-    enum recording_mode mode = g_config.mode;
+    int err;
+    enum audio_mode audio_mode = AUDIO_MODE_MONO; /* Default to mono */
+    enum recording_mode rec_mode = g_config.mode;
 
     /* Parse mode parameter if provided */
     if (cmd->value) {
@@ -292,11 +295,20 @@ static int cmd_start(const struct at_command *cmd, char **response)
         }
 
         if (strcmp(mode_str, "normal") == 0) {
-            mode = MODE_NORMAL;
+            rec_mode = MODE_NORMAL;
+            audio_mode = AUDIO_MODE_MERGE; /* Mono with mixed L+R */
         } else if (strcmp(mode_str, "enhanced") == 0) {
-            mode = MODE_ENHANCED;
+            rec_mode = MODE_ENHANCED;
+            audio_mode = AUDIO_MODE_STEREO; /* Stereo */
         } else {
             return json_create_error("Invalid mode", response);
+        }
+    } else {
+        /* Use config default */
+        if (rec_mode == MODE_NORMAL) {
+            audio_mode = AUDIO_MODE_MERGE;
+        } else {
+            audio_mode = AUDIO_MODE_STEREO;
         }
     }
 
@@ -305,42 +317,70 @@ static int cmd_start(const struct at_command *cmd, char **response)
         return json_create_error("Already recording", response);
     }
 
-    /* Transition to recording state */
-    int err = state_transition(CLIP_STATE_RECORDING);
+    /* Start audio recording */
+    err = audio_start_recording(audio_mode);
     if (err) {
+        return json_create_error("Failed to start audio", response);
+    }
+
+    /* Transition to recording state */
+    err = state_transition(CLIP_STATE_RECORDING);
+    if (err) {
+        audio_stop_recording();
         return json_create_error("Cannot start recording", response);
     }
 
     LOG_INF("Recording started in %s mode",
-           mode == MODE_NORMAL ? "normal" : "enhanced");
+           rec_mode == MODE_NORMAL ? "normal" : "enhanced");
 
-    return json_create_kv("session", "\"20240203_100000\"", response);
+    /* Generate session ID based on uptime */
+    char session_id[32];
+    snprintf(session_id, sizeof(session_id), "\"%08u_%s\"",
+             (uint32_t)(k_uptime_get() / 1000),
+             rec_mode == MODE_NORMAL ? "normal" : "enhanced");
+
+    return json_create_kv("session", session_id, response);
 }
 
 static int cmd_stop(const struct at_command *cmd, char **response)
 {
+    int err;
+    struct audio_stats audio_stats;
+
     /* Check current state */
     if (state_get_current() != CLIP_STATE_RECORDING) {
         return json_create_error("Not recording", response);
     }
 
+    /* Stop audio recording */
+    err = audio_stop_recording();
+    if (err) {
+        LOG_WRN("Failed to stop audio: %d", err);
+    }
+
     /* Transition to idle state */
-    int err = state_transition(CLIP_STATE_IDLE);
+    err = state_transition(CLIP_STATE_IDLE);
     if (err) {
         return json_create_error("Cannot stop recording", response);
     }
 
-    LOG_INF("Recording stopped after %u seconds", g_recording_time);
+    /* Get audio statistics */
+    audio_get_stats(&audio_stats);
+
+    LOG_INF("Recording stopped: %u frames, %u bytes",
+             audio_stats.frames_encoded, audio_stats.total_bytes);
 
     char data[256];
     snprintf(data, sizeof(data),
-             "{\"session\":\"20240203_100000\","
+             "{\"session\":\"%08u\","
              "\"duration\":%u,"
+             "\"frames\":%u,"
              "\"file_count\":1,"
-             "\"total_size\":3600000}",
-             g_recording_time);
-
-    g_recording_time = 0;
+             "\"total_size\":%u}",
+             (uint32_t)(k_uptime_get() / 1000),
+             (uint32_t)(audio_stats.recording_time_ms / 1000),
+             audio_stats.frames_encoded,
+             audio_stats.total_bytes);
 
     return json_create_success(data, response);
 }

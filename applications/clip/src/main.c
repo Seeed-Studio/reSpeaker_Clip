@@ -12,6 +12,7 @@
 #include "at_cmd.h"
 #include "config.h"
 #include "json_helper.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -19,6 +20,13 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 struct clip_config g_config;
 struct device_status g_status;
 uint32_t g_recording_time = 0;
+
+/* Audio recording thread */
+#define AUDIO_STACK_SIZE 8192
+#define AUDIO_PRIORITY 5
+K_THREAD_DEFINE(audio_thread, AUDIO_STACK_SIZE,
+		audio_recording_thread, NULL, NULL, NULL,
+		AUDIO_PRIORITY, 0, 0);
 
 /* Forward declarations */
 static void state_change_handler(enum clip_state old_state,
@@ -59,6 +67,13 @@ int clip_init(void)
     if (err) {
         LOG_ERR("BLE service init failed: %d", err);
         return err;
+    }
+
+    /* Initialize audio subsystem */
+    err = audio_init();
+    if (err) {
+        LOG_WRN("Audio init failed: %d, audio features disabled", err);
+        /* Continue anyway, audio is optional */
     }
 
     /* Transition to idle state */

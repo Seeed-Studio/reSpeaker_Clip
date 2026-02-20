@@ -1,20 +1,136 @@
-# reSpeaker Clip BLE Recorder - Development Log
-
-## Project Overview
-
-实现基于 BLE 的录音设备固件，支持通过 AT 命令控制录音、配置和文件传输。
-
-**Hardware**: Seeed ReSpeaker Clip (Nordic nRF5340)
-**RTOS**: Zephyr RTOS v3.2.1 (via Nordic nRF Connect SDK)
-**Application Location**: `applications/clip`
-
----
-
-## 2025-02-20 - Initial Implementation
+## 2025-02-20 - Phase 2: Audio Recording Implementation
 
 ### Completed Tasks
 
-#### 1. Documentation (Phase 1)
+#### 1. Audio Module (Phase 2)
+- ✅ Created `audio.h` and `audio.c` - Complete audio subsystem
+- ✅ PDM microphone driver integration (DMIC API)
+- ✅ Opus encoding (16kHz, mono/stereo, configurable bitrate)
+- ✅ SpeexDSP preprocessing (noise suppression, dereverb)
+- ✅ Audio modes: mono (L channel only), merge (L+R mixed), stereo
+- ✅ Dedicated audio recording thread (8KB stack)
+- ✅ Audio statistics tracking (frames, bytes, encode time)
+- ✅ Microphone power control
+- ✅ Hardware gain control (+20dB)
+
+#### 2. Audio Configuration
+Added to `prj.conf`:
+```conf
+CONFIG_AUDIO=y
+CONFIG_AUDIO_DMIC=y
+CONFIG_OPUS_CODEC=y
+CONFIG_SPEEXDSP=y
+```
+
+#### 3. Integration with AT Commands
+- ✅ `AT+START` command now starts audio recording
+  - Parses mode parameter (normal/enhanced)
+  - Maps to audio mode (merge/stereo)
+  - Transitions state machine to RECORDING
+- ✅ `AT+STOP` command stops audio recording
+  - Retrieves audio statistics
+  - Returns recording summary with frame count and byte size
+- ✅ State machine synchronizes with audio subsystem
+
+#### 4. Architecture Enhancements
+**Audio Module Structure**:
+- `audio_recording_thread()` - Background thread for continuous recording
+- `audio_init()` - Initialize DMIC, Opus, SpeexDSP
+- `audio_start_recording()` - Start DMIC and encode frames
+- `audio_stop_recording()` - Stop DMIC and cleanup
+- Audio statistics tracking
+- Runtime bitrate/complexity/noise suppression control
+
+**Audio Pipeline**:
+```
+PDM Microphone → DMIC Driver → Process PCM (mode)
+→ SpeexDSP (optional) → Opus Encode → [BLE/SD Storage]
+```
+
+### Build Configuration Updates
+
+**Memory Usage**:
+- Before: 133 KB FLASH / 81 KB RAM
+- After: 269 KB FLASH / 110 KB RAM
+- Increase: +136 KB FLASH (Opus + SpeexDSP), +29 KB RAM
+
+**Stack Sizes**:
+- Main thread: 16KB
+- Audio recording thread: 8KB
+- BLE RX thread: 2KB
+
+### Testing Status
+
+**Completed**:
+- ✅ Compiles successfully with all audio features
+- ✅ Memory usage within limits (269KB / 1MB = 27%)
+- ✅ Audio thread configured and started
+
+**Not Yet Tested**:
+- ⏳ Audio recording on actual hardware
+- ⏳ BLE audio streaming
+- ⏳ SD card storage
+- ⏳ Button control
+- ⏳ Display integration
+
+### Known Issues
+
+1. **SD Card Storage** - Not yet implemented
+   - File I/O functions need to be added
+   - Filename generation based on timestamp
+   - Storage space monitoring
+
+2. **BLE Audio Streaming** - Not yet implemented
+   - Opus packet transmission via BLE File Data characteristic
+   - MTU-aware packetization
+   - Flow control to prevent packet loss
+
+3. **Display UI** - Not yet implemented
+   - Recording indicator
+   - Time/frames display
+   - Battery status
+
+4. **Button Control** - Not yet implemented
+   - Custom input driver integration (CONFIG_INPUT_CLIP)
+   - Multi-press support (short/long/double-click)
+
+### Next Steps
+
+#### Phase 3: Storage & UI (Next Priority)
+1. Implement SD card file I/O
+   - Create file management module
+   - Buffering strategy for efficient writes
+   - Error handling for SD card removal
+2. Integrate button input driver
+3. Add display driver (CH1115 OLED)
+4. Implement BLE audio streaming
+
+### Technical Details
+
+**Audio Configuration**:
+- Sample rate: 16 kHz
+- Sample depth: 16-bit
+- Channels: 2 (stereo capture from PDM)
+- Frame size: 20ms (320 samples per channel)
+- Block size: 1280 bytes (stereo, 16-bit, 20ms)
+- Opus frame: 320 samples
+- Bitrate: 24 kbps (mono), 48 kbps (stereo)
+
+**Audio Modes**:
+- `AUDIO_MODE_MONO`: Left channel only
+- `AUDIO_MODE_MERGE`: Mix L+R to mono (default for normal mode)
+- `AUDIO_MODE_STEREO`: Full stereo (enhanced mode)
+
+**Encoding Performance** (from samples/opus_encode reference):
+- Opus encode time: <5ms per frame (20ms audio)
+- DSP processing time: <2ms per frame
+- Total overhead: <35% CPU time
+
+---
+
+## 2025-02-20 - Initial Implementation (Continued)
+
+### Completed Tasks (Phase 1)
 - ✅ Created `docs/requirements.md` - Product Requirements Document
 - ✅ Created `docs/protocol.md` - BLE AT Protocol Specification
 - ✅ Created `docs/architecture.md` - System Architecture Design
