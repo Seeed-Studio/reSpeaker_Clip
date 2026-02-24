@@ -27,6 +27,8 @@ enum transfer_direction {
 	TRANSFER_DIR_DOWNLOAD  /* App -> Device (upload) */
 };
 
+#define TRANSFER_MAX_FILES 64
+
 /* Transfer information */
 struct transfer_info {
 	enum transfer_state state;
@@ -38,6 +40,7 @@ struct transfer_info {
 	uint64_t bytes_transferred;  /* Bytes transferred so far */
 	uint64_t total_bytes;     /* Total bytes to transfer */
 	uint8_t progress_percent; /* 0-100 */
+	char file_list[TRANSFER_MAX_FILES][32];  /* List of files in session */
 };
 
 /**

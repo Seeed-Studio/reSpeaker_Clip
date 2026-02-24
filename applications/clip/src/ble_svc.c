@@ -369,6 +369,9 @@ int ble_svc_send_response(const char *json)
 {
     int err;
     uint16_t max_len;
+    size_t total_len;
+    size_t offset = 0;
+    int chunk_count = 0;
 
     if (!ble_svc_is_ready()) {
         LOG_ERR("Cannot send response: not ready");
@@ -382,26 +385,44 @@ int ble_svc_send_response(const char *json)
 
     /* MTU - 3 bytes ATT header = max notify payload */
     max_len = bt_gatt_get_mtu(current_conn) - 3;
-    if (strlen(json) > max_len) {
-        LOG_WRN("Response too long: %u > %u", (uint32_t)strlen(json), max_len);
+    total_len = strlen(json);
+
+    /* Split into chunks if needed */
+    while (offset < total_len) {
+        size_t chunk_len = total_len - offset;
+        if (chunk_len > max_len) {
+            chunk_len = max_len;
+        }
+
+        err = bt_gatt_notify(current_conn, &clip_svc.attrs[4],
+                              json + offset, chunk_len);
+        if (err) {
+            LOG_ERR("Notify failed at chunk %d (offset %u): %d",
+                    chunk_count, (uint32_t)offset, err);
+            return err;
+        }
+
+        chunk_count++;
+        offset += chunk_len;
+
+        /* Small delay between chunks to avoid overwhelming the client */
+        if (offset < total_len) {
+            k_sleep(K_MSEC(5));
+        }
     }
 
-    LOG_INF("Sending notify: len=%u, data=%s", (uint32_t)strlen(json), json);
-    err = bt_gatt_notify(current_conn, &clip_svc.attrs[4],
-                          (const void *)json, strlen(json));
-    if (err) {
-        LOG_ERR("Notify failed: %d", err);
-    } else {
-        LOG_INF("Notify sent successfully");
-    }
+    LOG_DBG("Sent %d chunks, total %u bytes", chunk_count, (uint32_t)total_len);
 
-    return err;
+    return 0;
 }
 
 int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
 {
     int err;
     uint16_t max_len;
+    size_t offset = 0;
+    int retry_count = 0;
+    const int max_retries = 3;
 
     if (!file_data_notify_enabled || !current_conn) {
         return -ENOTCONN;
@@ -409,17 +430,44 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
 
     /* MTU - 3 bytes ATT header = max notify payload */
     max_len = bt_gatt_get_mtu(current_conn) - 3;
-    if (len > max_len) {
-        LOG_WRN("File data too long: %u > %u", len, max_len);
+
+    /* Split into chunks if needed */
+    while (offset < len) {
+        size_t chunk_len = len - offset;
+        if (chunk_len > max_len) {
+            chunk_len = max_len;
+        }
+
+        /* Retry logic for temporary failures */
+        retry_count = 0;
+        do {
+            err = bt_gatt_notify(current_conn, &clip_svc.attrs[7],
+                                  data + offset, chunk_len);
+
+            if (err == 0) {
+                break;  /* Success */
+            }
+
+            /* Retry on temporary errors */
+            if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY) {
+                retry_count++;
+                if (retry_count < max_retries) {
+                    k_sleep(K_MSEC(10));  /* Wait before retry */
+                    continue;
+                }
+            }
+
+            /* Fatal error or retries exhausted */
+            LOG_ERR("File notify failed at offset %u: %d (retries: %d)",
+                    (uint32_t)offset, err, retry_count);
+            return err;
+
+        } while (retry_count < max_retries);
+
+        offset += chunk_len;
     }
 
-    err = bt_gatt_notify(current_conn, &clip_svc.attrs[7],
-                          data, len);
-    if (err) {
-        LOG_ERR("File notify failed: %d", err);
-    }
-
-    return err;
+    return 0;
 }
 
 bool ble_svc_is_ready(void)

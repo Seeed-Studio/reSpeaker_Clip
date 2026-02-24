@@ -11,8 +11,23 @@ Usage:
 import asyncio
 import json
 import os
+import struct
+import wave
 from bleak import BleakClient, BleakScanner
 from pathlib import Path
+
+# Try to import opuslib for decoding (requires native libopus)
+HAS_OPUSLIB = False
+try:
+    import opuslib
+    # Test if decoder actually works (may fail on Windows without libopus)
+    decoder = opuslib.Decoder(fs=16000, channels=2)
+    HAS_OPUSLIB = True
+    print("✓ Opus decoding available via opuslib")
+except Exception as e:
+    print(f"Note: Opus decoding not available ({e})")
+    print("  Raw Opus files will be saved. Use ffmpeg to decode:")
+    print("  ffmpeg -i merged.opus -c copy output.wav")
 
 # UUIDs
 SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -28,7 +43,9 @@ DOWNLOAD_DIR = Path("downloads")
 class ClipClient:
     def __init__(self):
         self.client = None
+        self.address = None
         self.last_response = None
+        self.response_buffer = bytearray()  # Buffer for fragmented responses
         self.file_data = bytearray()
         self.downloading_file = False
         self.download_filename = None
@@ -46,8 +63,10 @@ class ClipClient:
             return False
         print(f"Found: {device.name} ({device.address})")
 
+        self.address = device.address
+
         self.client = BleakClient(self.address, disconnected_callback=self._disconnect_callback)
-        print(f"Connecting to {device.address}...")
+        print(f"Connecting to {self.address}...")
         try:
             await self.client.connect(timeout=30.0)
             print("Connected!")
@@ -68,11 +87,95 @@ class ClipClient:
             print("Disconnected")
 
     def _notification_handler(self, sender, data):
-        self.last_response = data.decode('utf-8').strip()
+        # Append data to buffer
+        self.response_buffer.extend(data)
+
+        # Try to decode and check if we have a complete JSON response
+        try:
+            response_str = self.response_buffer.decode('utf-8').strip()
+
+            # Check if response looks complete (ends with } or ])
+            if response_str.endswith('}') or response_str.endswith(']'):
+                self.last_response = response_str
+                # Clear buffer for next response
+                self.response_buffer.clear()
+        except UnicodeDecodeError:
+            pass  # Wait for more data
 
     def _file_data_handler(self, sender, data):
         if self.downloading_file:
             self.file_data.extend(data)
+
+    def decode_opus_to_wav(self, opus_data, wav_path, sample_rate=16000, channels=2):
+        """Decode Opus frame data to WAV file.
+
+        Args:
+            opus_data: Raw bytes containing length-prefixed Opus frames
+            wav_path: Output WAV file path
+            sample_rate: Sample rate (default 16000 Hz)
+            channels: Number of channels (default 2 for stereo)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not HAS_OPUSLIB:
+            return False
+
+        try:
+            # Create Opus decoder
+            decoder = opuslib.Decoder(fs=sample_rate, channels=channels)
+            frame_size = sample_rate // 50  # 20ms frames
+
+            pcm_frames = []
+            offset = 0
+
+            while offset < len(opus_data):
+                # Read 2-byte little-endian length
+                if offset + 2 > len(opus_data):
+                    break
+                frame_len = struct.unpack('<H', opus_data[offset:offset+2])[0]
+                offset += 2
+
+                # Read frame data
+                if offset + frame_len > len(opus_data):
+                    print(f"Warning: Incomplete frame at offset {offset}")
+                    break
+
+                frame_data = opus_data[offset:offset+frame_len]
+                offset += frame_len
+
+                # Decode Opus frame to PCM
+                try:
+                    pcm_data = decoder.decode(frame_data, frame_size, decode_fec=False)
+                    pcm_frames.append(pcm_data)
+                except Exception as e:
+                    print(f"Warning: Failed to decode frame: {e}")
+                    continue
+
+            if not pcm_frames:
+                print("No valid Opus frames decoded")
+                return False
+
+            # Combine all PCM frames
+            all_pcm = b''.join(pcm_frames)
+
+            # Write WAV file
+            with wave.open(str(wav_path), 'wb') as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)  # 16-bit
+                wf.setframerate(sample_rate)
+                wf.writeframes(all_pcm)
+
+            duration = len(all_pcm) / (sample_rate * channels * 2)
+            print(f"  ✓ Decoded to WAV: {wav_path}")
+            print(f"    Duration: {duration:.2f}s, Frames: {len(pcm_frames)}")
+            return True
+
+        except Exception as e:
+            print(f"  ✗ Opus decode error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     async def send_command(self, cmd, timeout=5.0):
         self.last_response = None
@@ -109,7 +212,7 @@ class ClipClient:
             print(f"✗ Failed to start: {response.get('error')}")
             return False, None
 
-        session = response.get("session")
+        session = str(response.get("session", ""))
         print(f"✓ Recording started, session: {session}")
         print(f"  Recording for {duration} seconds...")
 
@@ -140,36 +243,97 @@ class ClipClient:
         """Download all files from a session"""
         print(f"\n=== Downloading session: {session_id} ===")
 
+        # Ensure session_id is a string (JSON might parse large numbers as int)
+        session_id = str(session_id)
+
         # Create download directory
         session_dir = DOWNLOAD_DIR / session_id
         session_dir.mkdir(parents=True, exist_ok=True)
 
-        # First, get marks to know how many files
-        response = await self.send_command(f"AT+MARKS={session_id}")
-        if response.get("ok"):
-            marks = response.get("data", {}).get("bookmarks", [])
-            print(f"  Session has {len(marks)} bookmarks")
-            # Extract unique file indices from marks
-            file_indices = sorted(set(m.get("file") for m in marks))
-            print(f"  Files to download: {file_indices}")
-        else:
-            # Try to list session files another way
-            file_indices = None
+        # Get list of files in this session
+        response = await self.send_command(f"AT+LIST={session_id}")
+        if not response.get("ok"):
+            print(f"  ✗ Failed to list files: {response.get('error')}")
+            return False
 
-        # Download by trying common file names (001.opus, 002.opus, etc.)
-        file_index = 1
+        files = response.get("data", [])
+        if not files:
+            print(f"  No files found in session")
+            return False
+
+        print(f"  Found {len(files)} file(s): {', '.join(files)}")
+
+        # First, try session-level download (all files at once)
+        print("  Attempting session-level download...")
+        response = await self.send_command(f"AT+DOWNLOAD={session_id}")
+
+        if response.get("ok"):
+            # Session-level download started, wait for completion
+            self.file_data = bytearray()
+            self.downloading_file = True
+
+            timeout = 60  # seconds - longer for multiple files
+            start_time = asyncio.get_event_loop().time()
+            last_size = 0
+            no_progress_count = 0
+            total_files_seen = 0
+
+            print("  Downloading all files in session...")
+            while asyncio.get_event_loop().time() - start_time < timeout:
+                await asyncio.sleep(0.5)
+
+                # Check progress
+                progress_resp = await self.send_command("AT+PROGRESS")
+                if progress_resp.get("ok"):
+                    data = progress_resp.get("data", {})
+                    transferred = data.get("transferred", 0)
+                    total = data.get("total", 0)
+
+                    if total > 0:
+                        progress = (transferred * 100) // total
+                        received = len(self.file_data)
+                        print(f"    Progress: {progress}% ({transferred}/{total} bytes, received: {received})", end='\r')
+
+                    if transferred > 0 and transferred == total and total > 0:
+                        # All files downloaded
+                        print(f"\n  ✓ Download complete: {len(self.file_data)} bytes received (expected: {total})")
+                        # Split data into individual files (since we don't have file boundaries)
+                        # Save as single file for now
+                        filepath = session_dir / "merged.opus"
+                        file_bytes = bytes(self.file_data)  # Copy before clearing
+                        with open(filepath, "wb") as f:
+                            f.write(file_bytes)
+                        self.file_data = bytearray()
+                        self.downloading_file = False
+                        print(f"\n✓ Saved merged file to {filepath}")
+
+                        # Try to decode Opus to WAV
+                        wav_path = session_dir / "merged.wav"
+                        if not self.decode_opus_to_wav(file_bytes, wav_path):
+                            print("  (Opus decoding skipped - raw file saved)")
+
+                        return True
+                    elif transferred == last_size and transferred > 0:
+                        no_progress_count += 1
+                        if no_progress_count > 10:
+                            print(f"\n  ✗ No progress, canceling")
+                            await self.send_command("AT+CANCEL")
+                            await asyncio.sleep(0.5)
+                            break
+                    else:
+                        last_size = transferred
+                        no_progress_count = 0
+
+        # Fall back to individual file download
+        print("  Session-level download not available, downloading individual files...")
+
         total_downloaded = 0
 
-        while True:
-            filename = f"{file_index:03d}.opus"
+        for filename in files:
             full_response = await self.send_command(f"AT+DOWNLOAD={session_id}/{filename}")
 
             if not full_response.get("ok"):
-                # Check if it's because file doesn't exist
-                if "not found" in full_response.get("error", "").lower():
-                    break
                 print(f"  ✗ {filename}: {full_response.get('error')}")
-                file_index += 1
                 continue
 
             # Wait for file data
@@ -196,11 +360,19 @@ class ClipClient:
                     if transferred > 0 and transferred == total:
                         # Download complete
                         size = len(self.file_data)
+                        file_bytes = bytes(self.file_data)  # Copy before clearing
                         filepath = session_dir / filename
                         with open(filepath, "wb") as f:
-                            f.write(self.file_data)
+                            f.write(file_bytes)
                         print(f"  ✓ {filename}: {size} bytes")
                         total_downloaded += 1
+
+                        # Try to decode Opus to WAV
+                        if filename.endswith('.opus'):
+                            wav_filename = filename.replace('.opus', '.wav')
+                            wav_path = session_dir / wav_filename
+                            if not self.decode_opus_to_wav(file_bytes, wav_path):
+                                print("    (Opus decoding skipped)")
 
                         self.file_data = bytearray()
                         self.downloading_file = False
@@ -208,19 +380,16 @@ class ClipClient:
                     elif transferred == last_size:
                         no_progress_count += 1
                         if no_progress_count > 5:
-                            print(f"  ✗ {filename}: No progress, timeout")
+                            print(f"  ✗ {filename}: No progress, canceling transfer")
+                            # Cancel the stuck transfer
+                            await self.send_command("AT+CANCEL")
+                            await asyncio.sleep(0.5)  # Wait for cleanup
                             break
                     else:
                         last_size = transferred
                         no_progress_count = 0
 
-            file_index += 1
-
-            # Break if we've tried 10 consecutive files without success
-            if file_index - total_downloaded > 10:
-                break
-
-        print(f"\n✓ Downloaded {total_downloaded} file(s) to {session_dir}")
+        print(f"\n✓ Downloaded {total_downloaded}/{len(files)} file(s) to {session_dir}")
         return total_downloaded > 0
 
     async def run_test(self):
@@ -250,20 +419,13 @@ class ClipClient:
             print("Download complete!")
             print("="*50)
             print(f"\nFiles saved to: {DOWNLOAD_DIR.absolute()}/")
-            print("\nTo merge Opus files into one:")
-            print("  Option 1: Concatenate (for streaming):")
-            print(f"    cat {DOWNLOAD_DIR.absolute()}/{session}/*.opus > merged.opus")
-            print("  Option 2: Decode to WAV and re-encode:")
-            print(f"    for f in {DOWNLOAD_DIR.absolute()}/{session}/*.opus; do")
-            print("        opusdec --rate 48000 \"$f\" - | opusenc --bitrate 48000 - \"${f%.opus}.wav\"")
-            print("        ffmpeg -i \"${f%.opus}.wav\" -c copy output.wav")
-            print("    done")
-            print("    ffmpeg -f concat -i list.txt -c copy output.wav")
-            print("  Option 3: Use opusdec to decode all to PCM:")
-            print(f"    for f in {DOWNLOAD_DIR.absolute()}/{session}/*.opus; do")
-            print("        opusdec --rate 48000 \"$f\" \"$f.wav\"")
-            print("    done")
-            print("    # Then merge WAV files with ffmpeg or other tool")
+
+            if HAS_OPUSLIB:
+                print("Note: Opus files have been automatically decoded to WAV.")
+            else:
+                print("\nTo decode Opus files to WAV:")
+                print("  ffmpeg -f opus -i merged.opus -ar 16000 output.wav")
+                print("  (Windows users: download ffmpeg from https://ffmpeg.org/)")
 
         finally:
             await self.disconnect()

@@ -807,6 +807,69 @@ static int cmd_mark(const struct at_command *cmd, char **response)
 
 static int cmd_list(const struct at_command *cmd, char **response)
 {
+    /* If value provided, list files in that session */
+    if (cmd->value) {
+        char (*files)[32];
+        int count;
+
+        /* Allocate buffer for files on heap */
+        files = k_malloc(64 * sizeof(char[32]));
+        if (!files) {
+            return json_create_error("Out of memory", response);
+        }
+
+        /* List files in session */
+        count = storage_list_session_files(cmd->value, files, 64);
+        if (count < 0) {
+            k_free(files);
+            return json_create_error("Failed to list files", response);
+        }
+
+        /* Build complete JSON response in shared buffer (no nested allocation) */
+        char *ptr = json_buffer;
+        int remaining = sizeof(json_buffer);
+
+        /* Start with {"ok":true,"data":[ */
+        ptr += snprintf(ptr, remaining, "{\"ok\":true,\"data\":[");
+        remaining = sizeof(json_buffer) - (ptr - json_buffer);
+
+        for (int i = 0; i < count && remaining > 100; i++) {
+            int len = snprintf(ptr, remaining,
+                              "%s\"%s\"",
+                              i > 0 ? "," : "",
+                              files[i]);
+
+            /* Check if snprintf was truncated */
+            if (len < 0 || len >= remaining) {
+                /* Not enough space, stop adding files */
+                break;
+            }
+            ptr += len;
+            remaining -= len;
+        }
+
+        /* Close with ]} - check space first */
+        if (remaining > 10) {
+            snprintf(ptr, remaining, "]}");
+        } else {
+            /* Buffer too small, go back and close properly */
+            ptr[-1] = '\0';  /* Remove trailing comma */
+            snprintf(ptr - 1, remaining + 1, "]}");
+        }
+
+        k_free(files);
+
+        /* Allocate and copy response */
+        *response = k_malloc(strlen(json_buffer) + 1);
+        if (!*response) {
+            return json_create_error("Out of memory", response);
+        }
+        strcpy(*response, json_buffer);
+
+        return 0;
+    }
+
+    /* Otherwise, list all sessions */
     struct storage_session_info *sessions;
     int count;
 
@@ -823,28 +886,50 @@ static int cmd_list(const struct at_command *cmd, char **response)
         return json_create_error("Failed to list sessions", response);
     }
 
-    /* Build JSON response in shared buffer */
+    /* Build complete JSON response in shared buffer (no nested allocation) */
     char *ptr = json_buffer;
     int remaining = sizeof(json_buffer);
 
-    ptr += snprintf(ptr, remaining, "[");
+    /* Start with {"ok":true,"data":[ */
+    ptr += snprintf(ptr, remaining, "{\"ok\":true,\"data\":[");
     remaining = sizeof(json_buffer) - (ptr - json_buffer);
 
-    for (int i = 0; i < count && remaining > 100; i++) {
+    for (int i = 0; i < count && remaining > 150; i++) {
         int len = snprintf(ptr, remaining,
                           "%s{\"id\":\"%s\",\"files\":%u,\"size\":%llu}",
                           i > 0 ? "," : "",
                           sessions[i].session_id,
                           sessions[i].file_count,
                           sessions[i].total_bytes);
+
+        /* Check if snprintf was truncated */
+        if (len < 0 || len >= remaining) {
+            /* Not enough space, don't add this session and stop */
+            break;
+        }
         ptr += len;
         remaining -= len;
     }
 
-    snprintf(ptr, remaining, "]");
+    /* Close with ]} - check space first */
+    if (remaining > 10) {
+        snprintf(ptr, remaining, "]}");
+    } else {
+        /* Buffer too small, go back and close properly */
+        ptr[-1] = '\0';  /* Remove trailing comma */
+        snprintf(ptr - 1, remaining + 1, "]}");
+    }
 
     k_free(sessions);
-    return json_create_success(json_buffer, response);
+
+    /* Allocate and copy response */
+    *response = k_malloc(strlen(json_buffer) + 1);
+    if (!*response) {
+        return json_create_error("Out of memory", response);
+    }
+    strcpy(*response, json_buffer);
+
+    return 0;
 }
 
 static int cmd_delete(const struct at_command *cmd, char **response)
@@ -1122,7 +1207,7 @@ static const struct cmd_entry commands[] = {
     {"MARK",     cmd_mark,         AT_CMD_EXEC | AT_CMD_SET},
 
     /* Session management commands */
-    {"LIST",     cmd_list,         AT_CMD_EXEC},
+    {"LIST",     cmd_list,         AT_CMD_EXEC | AT_CMD_SET},
     {"DELETE",   cmd_delete,       AT_CMD_SET},
     {"MARKS",    cmd_marks,        AT_CMD_SET},
 

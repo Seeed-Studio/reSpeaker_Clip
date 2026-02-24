@@ -277,6 +277,12 @@ int storage_close_file(struct storage_file *file)
 		}
 	}
 
+	/* Sync file to ensure data is written to SD card */
+	rc = fs_sync(current_file_ptr);
+	if (rc != 0) {
+		LOG_WRN("File sync failed: %d", rc);
+	}
+
 	/* Close file */
 	rc = fs_close(current_file_ptr);
 	if (rc != 0) {

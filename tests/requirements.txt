@@ -1,3 +1,6 @@
 # Python dependencies for reSpeaker Clip BLE test script
 
- bleak>=0.21.0
+bleak>=0.21.0
+
+# Note: Opus decoding uses ffmpeg instead of opuslib (more reliable cross-platform)
+# Install ffmpeg from: https://ffmpeg.org/download.html
