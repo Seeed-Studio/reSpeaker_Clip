@@ -41,6 +41,19 @@ struct battery_info {
 };
 
 /**
+ * @brief Synchronized time from BLE
+ */
+struct synced_time {
+    uint16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t min;
+    uint8_t sec;
+    bool valid;         /* True if time has been synchronized */
+};
+
+/**
  * @brief Device status
  */
 struct device_status {
@@ -75,6 +88,9 @@ extern struct device_status g_status;
 
 /* Recording time (seconds) */
 extern uint32_t g_recording_time;
+
+/* Synchronized time from BLE */
+extern struct synced_time g_synced_time;
 
 /**
  * @brief Initialize clip recorder application

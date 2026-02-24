@@ -68,14 +68,36 @@ bool storage_is_mounted(void);
 int storage_get_stats(struct storage_stats *stats);
 
 /**
- * @brief Create a new recording file
+ * @brief Create a new recording session directory
  *
- * @param file Output file handle structure
- * @param session_id Session ID for filename
- * @param mode Audio mode (normal/enhanced)
+ * Creates /SD:/REC/<session_id>/ directory
+ *
+ * @param session_id Session ID (YYYYMMDDHHMMSS format)
  * @return 0 on success, negative error code on failure
  */
-int storage_create_file(struct storage_file *file, uint32_t session_id, const char *mode);
+int storage_create_session(const char *session_id);
+
+/**
+ * @brief Create a new recording file within a session
+ *
+ * @param file Output file handle structure
+ * @param session_id Session ID (YYYYMMDDHHMMSS format)
+ * @param file_index File index within session (1, 2, 3...)
+ * @return 0 on success, negative error code on failure
+ */
+int storage_create_file(struct storage_file *file, const char *session_id, uint16_t file_index);
+
+/**
+ * @brief Close a recording session and create metadata files
+ *
+ * Creates session.json and files.lst in the session directory
+ *
+ * @param session_id Session ID
+ * @param duration_sec Recording duration in seconds
+ * @param file_count Number of audio files in session
+ * @return 0 on success, negative error code on failure
+ */
+int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_t file_count);
 
 /**
  * @brief Write audio frame data to file

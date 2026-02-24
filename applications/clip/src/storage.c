@@ -26,6 +26,9 @@ static struct fs_mount_t mp = {
 };
 static bool sd_mounted = false;
 
+/* Current session directory */
+static char current_session_dir[64] = {0};
+
 /* Write buffer for efficient SD card operations */
 static uint8_t write_buffer[STORAGE_WRITE_BUFFER_SIZE];
 static uint32_t buffer_pos = 0;
@@ -106,7 +109,50 @@ int storage_get_stats(struct storage_stats *stats)
 	return 0;
 }
 
-int storage_create_file(struct storage_file *file, uint32_t session_id, const char *mode)
+int storage_create_session(const char *session_id)
+{
+	char dir_path[64];
+	struct fs_dirent entry;
+	int rc;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	/* Check and create REC directory if not exists */
+	rc = fs_stat("/SD:/REC", &entry);
+	if (rc != 0 || entry.type != FS_DIR_ENTRY_DIR) {
+		rc = fs_mkdir("/SD:/REC");
+		if (rc != 0 && rc != -EEXIST) {
+			LOG_ERR("Failed to create REC directory: %d", rc);
+			return rc;
+		}
+	}
+
+	/* Check and create session directory */
+	snprintf(dir_path, sizeof(dir_path), "/SD:/REC/%s", session_id);
+	rc = fs_stat(dir_path, &entry);
+	if (rc != 0 || entry.type != FS_DIR_ENTRY_DIR) {
+		rc = fs_mkdir(dir_path);
+		if (rc != 0 && rc != -EEXIST) {
+			LOG_ERR("Failed to create session directory: %d", rc);
+			return rc;
+		}
+	}
+
+	/* Store current session directory */
+	strncpy(current_session_dir, dir_path, sizeof(current_session_dir) - 1);
+	current_session_dir[sizeof(current_session_dir) - 1] = '\0';
+
+	LOG_INF("Created session directory: %s", dir_path);
+	return 0;
+}
+
+int storage_create_file(struct storage_file *file, const char *session_id, uint16_t file_index)
 {
 	int rc;
 	char filepath[128];
@@ -115,7 +161,7 @@ int storage_create_file(struct storage_file *file, uint32_t session_id, const ch
 		return -ENODEV;
 	}
 
-	if (!file) {
+	if (!file || !session_id) {
 		return -EINVAL;
 	}
 
@@ -125,11 +171,11 @@ int storage_create_file(struct storage_file *file, uint32_t session_id, const ch
 		return -EBUSY;
 	}
 
-	/* Generate filename */
-	snprintf(file->filename, sizeof(file->filename),
-		 "rec_%08u_%s.opus", session_id, mode ? mode : "normal");
+	/* Generate filename: NNN.opus */
+	snprintf(file->filename, sizeof(file->filename), "%03u.opus", file_index);
 
-	snprintf(filepath, sizeof(filepath), "/SD:/%s", file->filename);
+	/* Full path: /SD:/REC/<session_id>/<NNN.opus> */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, file->filename);
 
 	LOG_INF("Creating file: %s", filepath);
 
@@ -247,6 +293,70 @@ int storage_close_file(struct storage_file *file)
 	LOG_INF("File closed: %s (%u bytes, %u frames)",
 		file->filename, file->bytes_written, file->frames_written);
 
+	return 0;
+}
+
+int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_t file_count)
+{
+	char filepath[128];
+	struct fs_file_t file;
+	int rc;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	/* Create session.json */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
+	if (rc == 0) {
+		char json_buf[256];
+		int len = snprintf(json_buf, sizeof(json_buf),
+			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u}\n",
+			session_id, duration_sec, file_count);
+		fs_write(&file, json_buf, len);
+		fs_close(&file);
+		LOG_INF("Created session.json");
+	}
+
+	/* Create files.lst */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/files.lst", session_id);
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
+	if (rc == 0) {
+		/* List all .opus files in session directory */
+		char session_path[64];
+		struct fs_dir_t dirp;
+		struct fs_dirent entry;
+
+		snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
+		fs_dir_t_init(&dirp);
+
+		if (fs_opendir(&dirp, session_path) == 0) {
+			while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != 0) {
+				if (entry.type == FS_DIR_ENTRY_FILE &&
+				    strstr(entry.name, ".opus") != NULL) {
+					char line[64];
+					int len = snprintf(line, sizeof(line), "%s %u\n",
+						entry.name, (uint32_t)entry.size);
+					fs_write(&file, line, len);
+				}
+			}
+			fs_closedir(&dirp);
+		}
+		fs_close(&file);
+		LOG_INF("Created files.lst");
+	}
+
+	/* Clear current session directory */
+	memset(current_session_dir, 0, sizeof(current_session_dir));
+
+	LOG_INF("Session closed: %s", session_id);
 	return 0;
 }
 
@@ -419,8 +529,8 @@ static int update_free_space(void)
 		return -ENODEV;
 	}
 
-	/* Get free space from FatFS */
-	rc = f_getfree("/SD:", &free_sectors, &fat_fs_p);
+	/* Get free space from FatFS - use FatFS native path */
+	rc = f_getfree("0:", &free_sectors, &fat_fs_p);
 	if (rc != 0) {
 		LOG_WRN("Failed to get free space: %d", rc);
 		free_space_mb = 0;
@@ -453,26 +563,27 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 	}
 
 	fs_dir_t_init(&dirp);
-	rc = fs_opendir(&dirp, "/SD:");
+	rc = fs_opendir(&dirp, "/SD:/REC");
 	if (rc != 0) {
-		LOG_ERR("Failed to open directory: %d", rc);
-		return rc;
+		/* REC directory doesn't exist yet - no sessions */
+		return 0;
 	}
 
-	/* Scan for directories (sessions are stored in subdirectories) */
+	/* Scan for session directories */
 	while (count < max_sessions) {
 		rc = fs_readdir(&dirp, &entry);
 		if (rc != 0 || entry.name[0] == 0) {
 			break;
 		}
 
-		/* Only look for directories that match session format */
+		/* Only look for directories */
 		if (entry.type != FS_DIR_ENTRY_DIR) {
 			continue;
 		}
 
-		/* Check if directory name matches session format (YYYYMMDD_HHMMSS) */
-		if (strlen(entry.name) != 15 || entry.name[8] != '_') {
+		/* Check if directory name matches session format (YYYYMMDDHHMMSS or REC_XXXXXX) */
+		size_t len = strlen(entry.name);
+		if (len != 14 && len != 13) {  /* YYYYMMDDHHMMSS=14 or REC_XXXXXX=13 */
 			continue;
 		}
 
@@ -485,7 +596,7 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 		struct fs_dir_t session_dir;
 		struct fs_dirent file_entry;
 
-		snprintf(session_path, sizeof(session_path), "/SD:/%s", entry.name);
+		snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", entry.name);
 		fs_dir_t_init(&session_dir);
 
 		rc = fs_opendir(&session_dir, session_path);
@@ -499,7 +610,8 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 					break;
 				}
 
-				if (file_entry.type == FS_DIR_ENTRY_FILE) {
+				if (file_entry.type == FS_DIR_ENTRY_FILE &&
+				    strstr(file_entry.name, ".opus") != NULL) {
 					sessions[count].file_count++;
 					sessions[count].total_bytes += file_entry.size;
 				}
@@ -535,7 +647,7 @@ int storage_list_session_files(const char *session_id, char (*files)[32], int ma
 		return -EINVAL;
 	}
 
-	snprintf(session_path, sizeof(session_path), "/SD:/%s", session_id);
+	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
 
 	fs_dir_t_init(&dirp);
 	rc = fs_opendir(&dirp, session_path);
@@ -550,14 +662,13 @@ int storage_list_session_files(const char *session_id, char (*files)[32], int ma
 			break;
 		}
 
-		/* Only list files */
-		if (entry.type != FS_DIR_ENTRY_FILE) {
-			continue;
+		/* Only list .opus files */
+		if (entry.type == FS_DIR_ENTRY_FILE &&
+		    strstr(entry.name, ".opus") != NULL) {
+			strncpy(files[count], entry.name, 31);
+			files[count][31] = '\0';
+			count++;
 		}
-
-		strncpy(files[count], entry.name, 31);
-		files[count][31] = '\0';
-		count++;
 	}
 
 	fs_closedir(&dirp);
@@ -580,7 +691,7 @@ int storage_delete_session(const char *session_id)
 		return -EINVAL;
 	}
 
-	snprintf(session_path, sizeof(session_path), "/SD:/%s", session_id);
+	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
 
 	/* First, delete all files in the session directory */
 	fs_dir_t_init(&dirp);
@@ -594,7 +705,7 @@ int storage_delete_session(const char *session_id)
 
 			if (entry.type == FS_DIR_ENTRY_FILE) {
 				char filepath[128];
-				snprintf(filepath, sizeof(filepath), "/SD:/%s/%s", session_id, entry.name);
+				snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, entry.name);
 				fs_unlink(filepath);
 			}
 		}
@@ -623,7 +734,7 @@ bool storage_session_exists(const char *session_id)
 		return false;
 	}
 
-	snprintf(session_path, sizeof(session_path), "/SD:/%s", session_id);
+	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
 
 	rc = fs_stat(session_path, &entry);
 

@@ -221,7 +221,7 @@ static int transfer_next_file(void)
 
 	/* If filename is already set, open it */
 	if (current_transfer.current_file[0] != '\0') {
-		snprintf(filepath, sizeof(filepath), "/SD:/%s/%s",
+		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 			 current_transfer.session_id, current_transfer.current_file);
 	} else {
 		/* TODO: Implement file listing and iteration */

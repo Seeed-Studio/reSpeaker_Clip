@@ -41,7 +41,7 @@ static int bookmarks_get_filepath(const char *session_id, char *filepath, size_t
 		return -EINVAL;
 	}
 
-	snprintf(filepath, size, "/SD:/%s/%s", session_id, BOOKMARK_FILE_NAME);
+	snprintf(filepath, size, "/SD:/REC/%s/%s", session_id, BOOKMARK_FILE_NAME);
 
 	return 0;
 }

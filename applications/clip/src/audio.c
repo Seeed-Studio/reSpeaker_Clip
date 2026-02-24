@@ -29,8 +29,8 @@
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
-/* Memory slab for DMIC buffers */
-K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 16, 4);
+/* Memory slab for DMIC buffers (increased for double-buffering) */
+K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 32, 4);
 
 /* DMIC device */
 static const struct device *const dmic_dev = DEVICE_DT_GET(DT_ALIAS(dmic0));
@@ -86,12 +86,14 @@ static struct storage_file current_storage_file = {0};
 static bool storage_enabled = true;
 
 /* Recording segmentation */
-#define SEGMENT_DURATION_SEC 300  /* 5 minutes per file */
+#define SEGMENT_DURATION_SEC 60  /* 1 minute per file for testing */
 static uint32_t recording_frame_count = 0;
 static uint32_t current_file_index = 1;
+static uint32_t session_counter = 0;  /* Fallback counter for session ID */
 
 /* Current session ID for bookmarks */
 static char current_session_id[32] = {0};
+static uint32_t recording_start_time = 0;  /* For duration calculation */
 
 /* Forward declarations */
 static int init_opus_encoder(void);
@@ -232,25 +234,41 @@ int audio_start_recording(enum audio_mode mode)
 	/* Reset recording counters */
 	recording_frame_count = 0;
 	current_file_index = 1;
+	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
 
-	/* Generate session ID from timestamp */
-	uint32_t session_ts = (uint32_t)(k_uptime_get() / 1000);
-	snprintf(current_session_id, sizeof(current_session_id), "%010u", session_ts);
+	/* Generate session ID */
+	if (g_synced_time.valid) {
+		/* Use BLE synchronized time: YYYYMMDDHHMMSS */
+		snprintf(current_session_id, sizeof(current_session_id),
+			"%04d%02d%02d%02d%02d%02d",
+			g_synced_time.year, g_synced_time.month, g_synced_time.day,
+			g_synced_time.hour, g_synced_time.min, g_synced_time.sec);
+	} else {
+		/* Fallback: use incrementing counter */
+		snprintf(current_session_id, sizeof(current_session_id),
+			"REC_%06u", session_counter++);
+	}
+
+	LOG_INF("Session ID: %s", current_session_id);
 
 	/* Initialize bookmarks for this session */
 	bookmarks_init(current_session_id);
 
-	/* Create SD card file if storage enabled and mounted */
+	/* Create session directory and first file */
 	if (storage_enabled && storage_is_mounted()) {
-		const char *mode_str = (mode == AUDIO_MODE_STEREO) ? "enhanced" : "normal";
-		ret = storage_create_file(&current_storage_file,
-					 (uint32_t)(k_uptime_get() / 1000),
-					 mode_str);
+		/* Create session directory */
+		ret = storage_create_session(current_session_id);
 		if (ret != 0) {
-			LOG_WRN("Failed to create storage file: %d", ret);
-			/* Continue anyway, storage is optional */
+			LOG_WRN("Failed to create session directory: %d", ret);
 		} else {
-			LOG_INF("Recording to file: %s", current_storage_file.filename);
+			/* Create first file */
+			ret = storage_create_file(&current_storage_file,
+				current_session_id, current_file_index);
+			if (ret != 0) {
+				LOG_WRN("Failed to create storage file: %d", ret);
+			} else {
+				LOG_INF("Recording to: %s", current_storage_file.filename);
+			}
 		}
 	}
 
@@ -274,6 +292,7 @@ int audio_start_recording(enum audio_mode mode)
 int audio_stop_recording(void)
 {
 	int ret;
+	uint32_t duration_sec;
 
 	if (!recording_active) {
 		return 0;
@@ -298,10 +317,21 @@ int audio_stop_recording(void)
 		memset(&current_storage_file, 0, sizeof(current_storage_file));
 	}
 
+	/* Calculate duration */
+	duration_sec = (uint32_t)(k_uptime_get() / 1000) - recording_start_time;
+
 	/* Save bookmarks */
 	ret = bookmarks_save(current_session_id);
 	if (ret != 0) {
 		LOG_WRN("Failed to save bookmarks: %d", ret);
+	}
+
+	/* Close session and create metadata files */
+	if (storage_is_mounted()) {
+		ret = storage_close_session(current_session_id, duration_sec, current_file_index);
+		if (ret != 0) {
+			LOG_WRN("Failed to close session: %d", ret);
+		}
 	}
 
 	/* Calculate average encode time */
@@ -309,8 +339,8 @@ int audio_stop_recording(void)
 		stats.encode_time_avg_ms = encode_time_total / stats.frames_encoded;
 	}
 
-	LOG_INF("Recording stopped: %u frames, %u bytes, %llu ms",
-		stats.frames_encoded, stats.total_bytes, stats.recording_time_ms);
+	LOG_INF("Recording stopped: %u frames, %u bytes, %u sec",
+		stats.frames_encoded, stats.total_bytes, duration_sec);
 
 	return 0;
 }
@@ -521,23 +551,28 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		recording_frame_count++;
 
 		/* Check if we need to create a new file (segmentation) */
+		/* Only create new file after SEGMENT_DURATION_SEC, not on first frame */
 		uint32_t frames_per_file = SEGMENT_DURATION_SEC * (1000 / AUDIO_FRAME_MS);
-		if (recording_frame_count % frames_per_file == 1) {
+		if (recording_frame_count > 1 && recording_frame_count % frames_per_file == 1) {
 			/* Time to create a new segment file */
+			LOG_INF("Segment switch: frame %u, creating file #%u",
+				recording_frame_count, current_file_index + 1);
+
 			if (current_storage_file.is_open) {
-				/* Close current file */
+				LOG_INF("Closing current segment: %s (%u bytes)",
+					current_storage_file.filename,
+					current_storage_file.bytes_written);
 				storage_close_file(&current_storage_file);
 			}
 
 			/* Create new file with incremented index */
-			char filename[32];
-			snprintf(filename, sizeof(filename), "%03u.opus", current_file_index++);
-			ret = storage_create_file(&current_storage_file, 0, "normal");
+			ret = storage_create_file(&current_storage_file,
+				current_session_id, ++current_file_index);
 			if (ret != 0) {
 				LOG_ERR("Failed to create segment file: %d", ret);
 				/* Continue recording without storage */
 			} else {
-				LOG_INF("Created new segment: %s", filename);
+				LOG_INF("Created new segment: %s", current_storage_file.filename);
 			}
 		}
 
