@@ -43,20 +43,20 @@ static k_tid_t at_thread_id;
 
 /* Service UUID: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E */
 static const struct bt_uuid_128 svc_uuid = BT_UUID_INIT_128(
-    BT_UUID_128_ENCODE(0x6E400001, 0xB5A3F393, 0xE0A9E50E, 0x24DCCA9E, 0x00000000));
+    BT_UUID_128_ENCODE(0x6E400001, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
 
 /* Characteristic UUIDs */
 /* Command Receive: 6E400002-B5A3-F393-E0A9-E50E24DCCA9E */
 static const struct bt_uuid_128 cmd_recv_uuid = BT_UUID_INIT_128(
-    BT_UUID_128_ENCODE(0x6E400002, 0xB5A3F393, 0xE0A9E50E, 0x24DCCA9E, 0x00000000));
+    BT_UUID_128_ENCODE(0x6E400002, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
 
 /* Response Send: 6E400003-B5A3-F393-E0A9-E50E24DCCA9E */
 static const struct bt_uuid_128 resp_send_uuid = BT_UUID_INIT_128(
-    BT_UUID_128_ENCODE(0x6E400003, 0xB5A3F393, 0xE0A9E50E, 0x24DCCA9E, 0x00000000));
+    BT_UUID_128_ENCODE(0x6E400003, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
 
 /* File Data: 6E400004-B5A3-F393-E0A9-E50E24DCCA9E */
 static const struct bt_uuid_128 file_data_uuid = BT_UUID_INIT_128(
-    BT_UUID_128_ENCODE(0x6E400004, 0xB5A3F393, 0xE0A9E50E, 0x24DCCA9E, 0x00000000));
+    BT_UUID_128_ENCODE(0x6E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
 
 /* Connection and notification state */
 static struct bt_conn *current_conn;
@@ -205,8 +205,8 @@ static const struct bt_data ad[] = {
 
 static const struct bt_data sd[] = {
     BT_DATA_BYTES(BT_DATA_UUID128_ALL,
-                  0x6E, 0x40, 0x00, 0x01, 0xB5, 0xA3, 0xF3, 0x93,
-                  0xE0, 0xA9, 0xE5, 0x0E, 0x24, 0x4D, 0xCC, 0x9E),
+                  0x01, 0x00, 0x40, 0x6E, 0xA3, 0xB5, 0x93, 0xF3,
+                  0xA9, 0xE0, 0x9E, 0xCA, 0xCC, 0x4D, 0x0E, 0xE5),
 };
 
 /* Work queue for operations */
