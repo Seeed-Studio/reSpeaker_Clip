@@ -254,18 +254,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     LOG_INF("BLE connected");
 
-    /* Request better connection parameters
-     * Interval: 30-50 (37.5-62.5ms)
-     * Latency: 0
-     * Timeout: 600 (6 seconds)
+    /* Don't request parameter update immediately - let connection stabilize first.
+     * Windows may reject or delay the request, causing timeout with short initial params.
+     * We'll rely on the host's parameters for stability.
      */
-    const struct bt_le_conn_param param = {
-        .interval_min = 30,
-        .interval_max = 50,
-        .latency = 0,
-        .timeout = 600,
-    };
-    bt_conn_le_param_update(conn, &param);
 
     /* Delay MTU exchange */
     k_work_schedule(&mtu_work, K_MSEC(500));
@@ -297,10 +289,30 @@ static void le_param_updated(struct bt_conn *conn, uint16_t interval,
     }
 }
 
+/* Reject connection parameters that are too aggressive */
+static bool le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
+{
+    /* Require minimum timeout of 200 (2 seconds) for stability */
+    if (param->timeout < 200) {
+        LOG_WRN("Rejecting params: timeout %u too short, requesting 200",
+                param->timeout);
+        param->timeout = 200;
+        param->interval_min = 30;
+        param->interval_max = 50;
+        param->latency = 0;
+        return false;  /* Reject with our counter-proposal */
+    }
+
+    LOG_INF("Accepting params: interval=%u-%u, latency=%u, timeout=%u",
+            param->interval_min, param->interval_max, param->latency, param->timeout);
+    return true;  /* Accept */
+}
+
 static struct bt_conn_cb conn_callbacks = {
     .connected = connected,
     .disconnected = disconnected,
     .le_param_updated = le_param_updated,
+    .le_param_req = le_param_req,
 };
 
 /* Public API implementation */
