@@ -54,6 +54,24 @@ int ble_svc_send_response(const char *json);
 int ble_svc_send_file_data(const uint8_t *data, uint16_t len);
 
 /**
+ * @brief Send file ready event (when file recording completes and ready for transfer)
+ *
+ * @param session_id Session ID
+ * @param filename Name of the file that is ready
+ * @param size File size in bytes
+ * @return 0 on success, negative error code on failure
+ */
+int ble_svc_send_file_ready(const char *session_id, const char *filename, uint64_t size);
+
+/**
+ * @brief Send file transfer complete event
+ *
+ * @param filename Name of the file that completed transfer
+ * @return 0 on success, negative error code on failure
+ */
+int ble_svc_send_file_complete(const char *filename);
+
+/**
  * @brief Check if BLE is connected and ready
  *
  * @return true if ready, false otherwise

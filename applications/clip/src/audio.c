@@ -26,6 +26,7 @@
 #include "config.h"
 #include "storage.h"
 #include "bookmarks.h"
+#include "ble_svc.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
@@ -86,7 +87,7 @@ static struct storage_file current_storage_file = {0};
 static bool storage_enabled = true;
 
 /* Recording segmentation */
-#define SEGMENT_DURATION_SEC 60  /* 1 minute per file for testing */
+#define SEGMENT_DURATION_SEC 10  /* 10 seconds per file for testing */
 static uint32_t recording_frame_count = 0;
 static uint32_t current_file_index = 1;
 
@@ -318,6 +319,14 @@ int audio_stop_recording(void)
 
 	/* Close SD card file if open */
 	if (current_storage_file.is_open) {
+		/* Save filename and size before closing */
+		char completed_filename[64];
+		uint32_t completed_size;
+		strncpy(completed_filename, current_storage_file.filename,
+		       sizeof(completed_filename) - 1);
+		completed_filename[sizeof(completed_filename) - 1] = '\0';
+		completed_size = current_storage_file.bytes_written;
+
 		ret = storage_close_file(&current_storage_file);
 		if (ret != 0) {
 			LOG_WRN("Failed to close storage file: %d", ret);
@@ -325,6 +334,10 @@ int audio_stop_recording(void)
 		/* Clear writing file mark */
 		storage_set_writing_file(NULL, NULL);
 		memset(&current_storage_file, 0, sizeof(current_storage_file));
+
+		/* Notify that file is ready for transfer */
+		ble_svc_send_file_ready(current_session_id,
+			completed_filename, completed_size);
 	}
 
 	/* Calculate duration */
@@ -572,9 +585,22 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 				LOG_INF("Closing current segment: %s (%u bytes)",
 					current_storage_file.filename,
 					current_storage_file.bytes_written);
+
+				/* Save filename and size before closing */
+				char completed_filename[64];
+				uint32_t completed_size;
+				strncpy(completed_filename, current_storage_file.filename,
+				       sizeof(completed_filename) - 1);
+				completed_filename[sizeof(completed_filename) - 1] = '\0';
+				completed_size = current_storage_file.bytes_written;
+
 				storage_close_file(&current_storage_file);
 				/* Clear old writing file mark */
 				storage_set_writing_file(NULL, NULL);
+
+				/* Notify that file is ready for transfer */
+				ble_svc_send_file_ready(current_session_id,
+					completed_filename, completed_size);
 			}
 
 			/* Create new file with incremented index */

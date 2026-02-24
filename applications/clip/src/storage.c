@@ -17,6 +17,9 @@
 
 LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
 
+/* SD Card access mutex - prevents concurrent read/write conflicts */
+K_MUTEX_DEFINE(sd_card_mutex);
+
 /* SD Card and File System */
 static FATFS fat_fs;
 static struct fs_mount_t mp = {
@@ -43,6 +46,17 @@ static int flush_write_buffer(void);
 static int update_free_space(void);
 
 static uint32_t free_space_mb = 0;
+
+/* Public API for SD card lock */
+void storage_lock_sd_card(void)
+{
+	k_mutex_lock(&sd_card_mutex, K_FOREVER);
+}
+
+void storage_unlock_sd_card(void)
+{
+	k_mutex_unlock(&sd_card_mutex);
+}
 
 int storage_init(void)
 {
@@ -192,7 +206,14 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 	fs_file_t_init(current_file_ptr);
 	rc = fs_open(current_file_ptr, filepath, FS_O_CREATE | FS_O_WRITE);
 	if (rc != 0) {
-		LOG_ERR("Failed to create file: %d", rc);
+		LOG_ERR("Failed to create file: %d (path: %s)", rc, filepath);
+		/* Check if directory exists */
+		struct fs_dirent entry;
+		char dirpath[128];
+		snprintf(dirpath, sizeof(dirpath), "/SD:/REC/%s", session_id);
+		int dir_rc = fs_stat(dirpath, &entry);
+		LOG_ERR("Directory check: %s -> %d (type=%d)", dirpath, dir_rc,
+		        dir_rc == 0 ? entry.type : -1);
 		current_file_ptr = NULL;
 		return rc;
 	}
@@ -462,6 +483,8 @@ int storage_delete_file(const char *filename)
 int storage_format_card(void)
 {
 	int rc;
+	MKFS_PARM opt;
+	char work[4096] __aligned(8);  /* Larger, aligned work area */
 
 	if (!sd_mounted) {
 		return -ENODEV;
@@ -469,21 +492,52 @@ int storage_format_card(void)
 
 	LOG_INF("Formatting SD card...");
 
-	/* Unmount first */
-	fs_unmount(&mp);
+	/* Check if any file is open */
+	if (current_file_ptr != NULL) {
+		LOG_ERR("Cannot format: file still open");
+		return -EBUSY;
+	}
+
+	/* Flush any pending writes */
+	if (buffer_pos > 0) {
+		LOG_WRN("Flushing pending writes before format");
+		flush_write_buffer();
+	}
+
+	LOG_INF("Unmounting...");
+	rc = fs_unmount(&mp);
+	if (rc != 0) {
+		LOG_WRN("Unmount failed: %d", rc);
+	}
 	sd_mounted = false;
 
-	/* Format the card */
-	rc = fs_mkfs(FS_FATFS, "/SD:", NULL, 0);
+	k_sleep(K_MSEC(200));
+
+	LOG_INF("Re-initializing disk...");
+	rc = disk_access_init("SD");
 	if (rc != 0) {
-		LOG_ERR("Format failed: %d", rc);
-		/* Try to remount */
-		fs_mount(&mp);
-		sd_mounted = true;
+		LOG_ERR("Disk re-init failed: %d", rc);
 		return rc;
 	}
 
-	/* Remount */
+	k_sleep(K_MSEC(100));
+
+	/* Try simpler format approach - no work area */
+	LOG_INF("Calling f_mkfs (no work area)...");
+	memset(&opt, 0, sizeof(opt));
+	opt.fmt = FM_ANY | FM_SFD;  /* Auto-detect, default to FAT16 */
+
+	/* First try without work area (NULL) */
+	rc = f_mkfs("0:", &opt, NULL, 0);
+	LOG_INF("f_mkfs returned: %d", rc);
+
+	if (rc == 0) {
+		LOG_INF("Format successful!");
+	} else {
+		LOG_ERR("f_mkfs failed: %d", rc);
+	}
+
+	/* Try to remount regardless of result */
 	rc = fs_mount(&mp);
 	if (rc != 0) {
 		LOG_ERR("Remount failed: %d", rc);
@@ -495,33 +549,57 @@ int storage_format_card(void)
 	total_files = 0;
 	total_bytes = 0;
 
-	LOG_INF("SD card formatted successfully");
-
-	return 0;
+	if (rc == 0) {
+		LOG_INF("SD card formatted successfully");
+		return 0;
+	} else {
+		return -EIO;
+	}
 }
 
 /* Internal functions */
 static int flush_write_buffer(void)
 {
 	ssize_t written;
+	int retry_count = 0;
+	const int max_retries = 5;
 
 	if (buffer_pos == 0 || !current_file_ptr) {
 		return 0;
 	}
 
-	written = fs_write(current_file_ptr, write_buffer, buffer_pos);
+	/* Lock SD card for write operation */
+	storage_lock_sd_card();
 
-	if (written < 0) {
-		LOG_ERR("SD write error: %zd", written);
-		return written;
+	/* Retry write on failure */
+	while (retry_count < max_retries) {
+		written = fs_write(current_file_ptr, write_buffer, buffer_pos);
+
+		if (written >= 0) {
+			/* Success */
+			if (written != buffer_pos) {
+				LOG_WRN("SD partial write: %zd/%u", written, buffer_pos);
+			}
+			buffer_pos = 0;
+			storage_unlock_sd_card();
+			return 0;
+		}
+
+		/* Write failed, retry */
+		retry_count++;
+		if (retry_count < max_retries) {
+			LOG_WRN("SD write failed: %zd, retrying (%d/%d)...",
+				written, retry_count, max_retries);
+			storage_unlock_sd_card();  /* Unlock before sleep */
+			k_sleep(K_MSEC(10));  /* Wait before retry */
+			storage_lock_sd_card();  /* Re-lock before retry */
+		}
 	}
 
-	if (written != buffer_pos) {
-		LOG_WRN("SD partial write: %zd/%u", written, buffer_pos);
-	}
-
-	buffer_pos = 0;
-	return 0;
+	/* All retries failed */
+	storage_unlock_sd_card();
+	LOG_ERR("SD write error after %d retries: %zd", max_retries, written);
+	return written;
 }
 
 static int update_free_space(void)

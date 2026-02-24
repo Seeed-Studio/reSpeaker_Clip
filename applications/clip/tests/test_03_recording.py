@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import struct
+import sys
 import wave
 from bleak import BleakClient, BleakScanner
 from pathlib import Path
@@ -47,8 +48,26 @@ class ClipClient:
         self.last_response = None
         self.response_buffer = bytearray()  # Buffer for fragmented responses
         self.file_data = bytearray()
+        self.current_file_data = bytearray()  # Buffer for current file being received
         self.downloading_file = False
         self.download_filename = None
+        self._should_stop_download = False  # Signal to stop download
+        self._stop_requested = False  # User pressed Enter
+        self._recording_stopped = False  # AT+STOP was sent
+        self.completed_files = []  # List of completed (filename, data) tuples
+        self._last_filename = None  # Last file that received file_ready event
+        self._last_file_size = 0
+        self.session_dir = None  # Download directory for current session
+
+    def stop_download(self):
+        """Signal the download to stop after current file completes"""
+        self._stop_requested = True
+
+    async def wait_for_enter(self):
+        """Wait for Enter key press without blocking event loop"""
+        loop = asyncio.get_event_loop()
+        # Read from stdin in a thread pool to avoid blocking
+        await loop.run_in_executor(None, sys.stdin.readline)
 
     def _disconnect_callback(self, client):
         print("\n[!] Device disconnected")
@@ -94,9 +113,46 @@ class ClipClient:
         try:
             response_str = self.response_buffer.decode('utf-8').strip()
 
-            # Check if response looks complete (ends with } or ])
-            if response_str.endswith('}') or response_str.endswith(']'):
-                self.last_response = response_str
+            # Check if response looks complete (ends with })
+            if response_str.endswith('}'):
+                # Try to parse as JSON
+                try:
+                    event_data = json.loads(response_str)
+                    event_type = event_data.get("event", "")
+
+                    if event_type == "file_complete":
+                        filename = event_data.get("filename", "")
+                        print(f"\n  [DEBUG] file_complete: {filename}, data_size={len(self.current_file_data)}, last_file={self._last_filename}", flush=True)
+                        # Only save if matches the last ready file AND has data
+                        if filename == self._last_filename and len(self.current_file_data) > 0:
+                            filepath = self.session_dir / filename
+                            with open(filepath, "wb") as f:
+                                f.write(self.current_file_data)
+                            print(f"\n  [SAVED TO DISK] {filename} ({len(self.current_file_data)} bytes)", flush=True)
+                            self.completed_files.append((filename, bytes(self.current_file_data)))
+                            self.current_file_data = bytearray()
+                            self._last_filename = None
+                        else:
+                            print(f"\n  [DEBUG] Skipping save: match={filename == self._last_filename}, data_size={len(self.current_file_data)}", flush=True)
+
+                    elif event_type == "file_ready":
+                        filename = event_data.get("filename", "")
+                        size = event_data.get("size", 0)
+                        print(f"\n  [FILE READY] {filename} ({size} bytes) - will start transfer", flush=True)
+                        # Clear previous file data when new file is ready
+                        if len(self.current_file_data) > 0 and self._last_filename and self._last_filename != filename:
+                            print(f"\n  [DEBUG] Clearing previous data for: {self._last_filename}", flush=True)
+                            self.current_file_data = bytearray()
+                        self._last_filename = filename
+                        self._last_file_size = size
+                    else:
+                        # Not an event, store as regular response
+                        self.last_response = response_str
+
+                except json.JSONDecodeError:
+                    # Not valid JSON, store as regular response
+                    self.last_response = response_str
+
                 # Clear buffer for next response
                 self.response_buffer.clear()
         except UnicodeDecodeError:
@@ -104,7 +160,9 @@ class ClipClient:
 
     def _file_data_handler(self, sender, data):
         if self.downloading_file:
-            self.file_data.extend(data)
+            # Regular file data
+            self.current_file_data.extend(data)
+            self.file_data.extend(data)  # Also keep in main buffer for progress tracking
 
     def decode_opus_to_wav(self, opus_data, wav_path, sample_rate=16000, channels=2):
         """Decode Opus frame data to WAV file.
@@ -177,16 +235,22 @@ class ClipClient:
             traceback.print_exc()
             return False
 
-    async def send_command(self, cmd, timeout=5.0):
+    async def send_command(self, cmd, timeout=10.0):
         self.last_response = None
         print(f" -> {cmd}")
         await self.client.write_gatt_char(CMD_RECV_UUID, cmd.encode('utf-8'))
+        # Small delay to let command be processed
+        await asyncio.sleep(0.2)
 
-        for _ in range(int(timeout * 10)):
+        for i in range(int(timeout * 10)):
             await asyncio.sleep(0.1)
             if self.last_response:
                 try:
-                    return json.loads(self.last_response)
+                    parsed = json.loads(self.last_response)
+                    # Debug: print parsed response
+                    if "session" in parsed or "event" in parsed:
+                        print(f"  [DEBUG] Parsed response: {parsed}", flush=True)
+                    return parsed
                 except:
                     return {"ok": False, "error": "Invalid JSON"}
 
@@ -240,157 +304,92 @@ class ClipClient:
         return sessions
 
     async def download_session(self, session_id):
-        """Download all files from a session"""
+        """Download all files from a session continuously until all files transferred"""
         print(f"\n=== Downloading session: {session_id} ===")
+        print(f"  [DEBUG] download_session called", flush=True)
 
-        # Ensure session_id is a string (JSON might parse large numbers as int)
         session_id = str(session_id)
 
         # Create download directory
-        session_dir = DOWNLOAD_DIR / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir = DOWNLOAD_DIR / session_id
+        self.session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Get list of files in this session
-        response = await self.send_command(f"AT+LIST={session_id}")
-        if not response.get("ok"):
-            print(f"  ✗ Failed to list files: {response.get('error')}")
-            return False
+        # Clear any previous state
+        self.completed_files = []
+        self.current_file_data = bytearray()
+        self.file_data = bytearray()
+        self._stop_requested = False  # User pressed Enter
+        self._recording_stopped = False  # AT+STOP was sent
 
-        files = response.get("data", [])
-        if not files:
-            print(f"  No files found in session")
-            return False
-
-        print(f"  Found {len(files)} file(s): {', '.join(files)}")
-
-        # First, try session-level download (all files at once)
-        print("  Attempting session-level download...")
+        # Start download
+        print("  Starting download...", flush=True)
         response = await self.send_command(f"AT+DOWNLOAD={session_id}")
+        if not response.get("ok"):
+            print(f"  ✗ Failed to start: {response.get('error')}")
+            return False
 
-        if response.get("ok"):
-            # Session-level download started, wait for completion
-            self.file_data = bytearray()
-            self.downloading_file = True
+        self.downloading_file = True
+        self._should_stop_download = False  # Reset flag
 
-            timeout = 60  # seconds - longer for multiple files
-            start_time = asyncio.get_event_loop().time()
-            last_size = 0
-            no_progress_count = 0
-            total_files_seen = 0
+        print("  Downloading... files will be saved as they complete (press Enter to stop)", flush=True)
 
-            print("  Downloading all files in session...")
-            while asyncio.get_event_loop().time() - start_time < timeout:
-                await asyncio.sleep(0.5)
+        last_file_count = 0
+        no_new_files_count = 0
 
-                # Check progress
-                progress_resp = await self.send_command("AT+PROGRESS")
-                if progress_resp.get("ok"):
-                    data = progress_resp.get("data", {})
-                    transferred = data.get("transferred", 0)
-                    total = data.get("total", 0)
+        # Continue until stop signal AND all files transferred
+        while True:
+            await asyncio.sleep(1)
 
-                    if total > 0:
-                        progress = (transferred * 100) // total
-                        received = len(self.file_data)
-                        print(f"    Progress: {progress}% ({transferred}/{total} bytes, received: {received})", end='\r')
+            # Check if user requested stop (Enter pressed)
+            if self._stop_requested and not self._recording_stopped:
+                print("\n  [INFO] Stop requested, waiting for transfer to complete...", flush=True)
+                self._recording_stopped = True
+                # Don't break yet - continue to wait for files
 
-                    if transferred > 0 and transferred == total and total > 0:
-                        # All files downloaded
-                        print(f"\n  ✓ Download complete: {len(self.file_data)} bytes received (expected: {total})")
-                        # Split data into individual files (since we don't have file boundaries)
-                        # Save as single file for now
-                        filepath = session_dir / "merged.opus"
-                        file_bytes = bytes(self.file_data)  # Copy before clearing
-                        with open(filepath, "wb") as f:
-                            f.write(file_bytes)
-                        self.file_data = bytearray()
-                        self.downloading_file = False
-                        print(f"\n✓ Saved merged file to {filepath}")
+            # Check if we should exit after recording stopped
+            if self._recording_stopped:
+                # Check if we have received new files recently
+                current_file_count = len(self.completed_files)
+                if current_file_count > last_file_count:
+                    last_file_count = current_file_count
+                    no_new_files_count = 0
+                else:
+                    no_new_files_count += 1
+                    print(f"  Waiting for transfer... ({no_new_files_count}/5)", flush=True)
 
-                        # Try to decode Opus to WAV
-                        wav_path = session_dir / "merged.wav"
-                        if not self.decode_opus_to_wav(file_bytes, wav_path):
-                            print("  (Opus decoding skipped - raw file saved)")
-
-                        return True
-                    elif transferred == last_size and transferred > 0:
-                        no_progress_count += 1
-                        if no_progress_count > 10:
-                            print(f"\n  ✗ No progress, canceling")
-                            await self.send_command("AT+CANCEL")
-                            await asyncio.sleep(0.5)
-                            break
-                    else:
-                        last_size = transferred
-                        no_progress_count = 0
-
-        # Fall back to individual file download
-        print("  Session-level download not available, downloading individual files...")
-
-        total_downloaded = 0
-
-        for filename in files:
-            full_response = await self.send_command(f"AT+DOWNLOAD={session_id}/{filename}")
-
-            if not full_response.get("ok"):
-                print(f"  ✗ {filename}: {full_response.get('error')}")
-                continue
-
-            # Wait for file data
-            self.file_data = bytearray()
-            self.downloading_file = True
-            self.download_filename = filename
-
-            # Wait for download to complete (monitor PROGRESS)
-            timeout = 30  # seconds
-            start_time = asyncio.get_event_loop().time()
-            last_size = 0
-            no_progress_count = 0
-
-            while asyncio.get_event_loop().time() - start_time < timeout:
-                await asyncio.sleep(0.5)
-
-                # Check progress
-                progress_resp = await self.send_command("AT+PROGRESS")
-                if progress_resp.get("ok"):
-                    data = progress_resp.get("data", {})
-                    transferred = data.get("transferred", 0)
-                    total = data.get("total", 0)
-
-                    if transferred > 0 and transferred == total:
-                        # Download complete
-                        size = len(self.file_data)
-                        file_bytes = bytes(self.file_data)  # Copy before clearing
-                        filepath = session_dir / filename
-                        with open(filepath, "wb") as f:
-                            f.write(file_bytes)
-                        print(f"  ✓ {filename}: {size} bytes")
-                        total_downloaded += 1
-
-                        # Try to decode Opus to WAV
-                        if filename.endswith('.opus'):
-                            wav_filename = filename.replace('.opus', '.wav')
-                            wav_path = session_dir / wav_filename
-                            if not self.decode_opus_to_wav(file_bytes, wav_path):
-                                print("    (Opus decoding skipped)")
-
-                        self.file_data = bytearray()
-                        self.downloading_file = False
+                    # If 5 seconds (5 checks) with no new files, assume done
+                    if no_new_files_count >= 5:
+                        print("  ✓ All files transferred", flush=True)
                         break
-                    elif transferred == last_size:
-                        no_progress_count += 1
-                        if no_progress_count > 5:
-                            print(f"  ✗ {filename}: No progress, canceling transfer")
-                            # Cancel the stuck transfer
-                            await self.send_command("AT+CANCEL")
-                            await asyncio.sleep(0.5)  # Wait for cleanup
-                            break
-                    else:
-                        last_size = transferred
-                        no_progress_count = 0
 
-        print(f"\n✓ Downloaded {total_downloaded}/{len(files)} file(s) to {session_dir}")
-        return total_downloaded > 0
+        # Save all completed files
+        print(f"\n\n  Saving {len(self.completed_files)} files...")
+        for filename, file_data in self.completed_files:
+            filepath = session_dir / filename
+            with open(filepath, "wb") as f:
+                f.write(file_data)
+            print(f"  ✓ Saved: {filename} ({len(file_data)} bytes)")
+
+        # Save any remaining data (last file might still be recording)
+        if len(self.current_file_data) > 0:
+            # Get current file list to find the last file
+            list_resp = await self.send_command(f"AT+LIST={session_id}")
+            if list_resp.get("ok"):
+                current_files = list_resp.get("data", [])
+                if current_files:
+                    # Find which file we haven't saved yet
+                    saved_filenames = [f[0] for f in self.completed_files]
+                    for f in current_files:
+                        if f not in saved_filenames:
+                            filepath = session_dir / f
+                            with open(filepath, "wb") as f:
+                                f.write(self.current_file_data)
+                            print(f"  ✓ Saved: {f} ({len(self.current_file_data)} bytes)")
+                            break
+
+        print(f"\n  ✓ Download complete: {len(self.completed_files)} files saved")
+        self.downloading_file = False
+        return True
 
     async def run_test(self):
         """Run recording with simultaneous transfer - manual stop with Enter key"""
@@ -411,17 +410,25 @@ class ClipClient:
                 print(f"✗ Failed to start: {response.get('error')}")
                 return
 
+            print(f"  [DEBUG] Full response: {response}", flush=True)
             session = str(response.get("session", ""))
-            print(f"✓ Recording started, session: {session}")
+            print(f"  [DEBUG] Session value: {repr(session)}", flush=True)
+            print(f"✓ Recording started, session: {session}", flush=True)
 
             # Start transfer immediately in background
-            print("\n=== Starting simultaneous transfer ===")
-            print("Transfer will continue in background as you record...")
-            download_task = asyncio.create_task(self.download_session(session))
+            print("\n=== Starting simultaneous transfer ===", flush=True)
+            print("Transfer will continue in background as you record...", flush=True)
+            try:
+                download_task = asyncio.create_task(self.download_session(session))
+                print("  (Download task created)", flush=True)
+            except Exception as e:
+                print(f"  ✗ Failed to create download task: {e}")
+                import traceback
+                traceback.print_exc()
 
-            # Wait for user to press Enter to stop
-            print("\nRecording... Press Enter to stop:")
-            input()
+            # Wait for user to press Enter to stop (non-blocking)
+            print("\nRecording... Press Enter to stop:", flush=True)
+            await self.wait_for_enter()
 
             # Stop recording
             print("\n=== Stopping recording ===")
@@ -431,9 +438,12 @@ class ClipClient:
             else:
                 print(f"✗ Failed to stop: {response.get('error')}")
 
+            # Signal download to stop after recording stops
+            # Download will finish current files before exiting
+            print("\n=== Finishing transfer ===")
+            self.stop_download()
+
             # Wait for transfer to complete
-            print("\n=== Waiting for transfer to complete ===")
-            print("(This may take a while if you recorded for a long time)")
             await download_task
 
             print("\n" + "="*50)

@@ -221,23 +221,23 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
+	/* Wait for initial transfer start signal */
+	k_sem_take(&transfer_trigger_sem, K_FOREVER);
+
 	while (transfer_thread_running) {
-		/* Wait for transfer start signal */
-		k_sem_take(&transfer_trigger_sem, K_FOREVER);
-
-		LOG_INF("Transfer thread woken: state=%d, file_open=%d",
+		LOG_DBG("Transfer loop: state=%d, file_open=%d",
 		         current_transfer.state, transfer_file_open);
-
-		if (!transfer_thread_running) {
-			break;
-		}
 
 		/* Process transfer */
 		int ret;
 
+process_next_file:
+
 		/* Check if paused */
 		if (current_transfer.state == TRANSFER_STATE_PAUSED) {
-			continue;
+			/* Wait for resume signal */
+			k_sem_take(&transfer_trigger_sem, K_FOREVER);
+			goto process_next_file;
 		}
 
 		/* Open first file if not already open */
@@ -252,30 +252,44 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 						current_transfer.state = TRANSFER_STATE_COMPLETED;
 						LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
 						transfer_cleanup();
-						continue;  /* Wait for next transfer */
+						/* Wait for next transfer - go back to sem wait */
+						k_sem_take(&transfer_trigger_sem, K_FOREVER);
+						goto process_next_file;
 					} else {
-						/* Session still recording, wait for more files */
-						LOG_INF("Session still recording, waiting for new files...");
-						/* Refresh file list and try again */
+						/* Session still recording, refresh file list and try again */
 						ret = storage_list_session_files(current_transfer.session_id,
 						                                 current_transfer.file_list,
 						                                 TRANSFER_MAX_FILES);
 						if (ret > 0) {
-							/* Update total files and file index */
+							/* Update total files - don't reset file_index */
+							int old_total = current_transfer.total_files;
 							current_transfer.total_files = ret;
-							/* Reset file index to start from beginning */
-							current_transfer.file_index = 0;
-							LOG_INF("Found %d new files, continuing transfer", ret);
+							LOG_INF("Refreshed file list (total: %d, new: %d), continuing from index %u",
+							     ret, ret - old_total, current_transfer.file_index);
+
+							/* Check if we've reached the end of the list */
+							if (current_transfer.file_index >= current_transfer.total_files) {
+								/* All files transferred, wait for new files */
+								LOG_INF("All files transferred, waiting for new files...");
+								k_sleep(K_MSEC(500));
+								goto process_next_file;
+							}
+							/* Don't wait - immediately try to open the next file */
+							goto process_next_file;
+						} else {
+							/* No new files yet, wait a bit */
+							LOG_INF("Session still recording, waiting for new files...");
+							k_sleep(K_MSEC(500));
+							goto process_next_file;
 						}
-						/* Wait a bit before checking again */
-						k_sleep(K_MSEC(500));
-						continue;
 					}
 				} else {
 					current_transfer.state = TRANSFER_STATE_ERROR;
 					LOG_ERR("Transfer error: %d", ret);
 					transfer_cleanup();
-					continue;
+					/* Wait for next transfer - go back to sem wait */
+					k_sem_take(&transfer_trigger_sem, K_FOREVER);
+					goto process_next_file;
 				}
 			}
 		}
@@ -287,10 +301,17 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 			if (ret != 0) {
 				if (ret == -EOF) {
 					/* File complete, move to next file */
+					LOG_INF("File transfer complete: %s", current_transfer.current_file);
+
+					/* Notify client that file transfer is complete */
+					ble_svc_send_file_complete(current_transfer.current_file);
+
 					fs_close(&transfer_file);
 					transfer_file_open = false;
 					/* Clear current file to trigger next file load */
 					memset(&current_transfer.current_file, 0, sizeof(current_transfer.current_file));
+					/* Signal to continue with next file immediately */
+					k_sem_give(&transfer_trigger_sem);
 					/* Break to let outer loop handle next file */
 					break;
 				} else {
@@ -330,16 +351,15 @@ static int transfer_next_file(void)
 
 	/* If filename is already set, open it */
 	if (current_transfer.current_file[0] != '\0') {
-		/* Check if file is being written before opening */
-		if (storage_file_is_writing(current_transfer.session_id,
+		/* Wait for file to finish writing before opening */
+		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
-			LOG_WRN("File is being written, skipping: %s/%s",
-				 current_transfer.session_id, current_transfer.current_file);
-			/* Clear current file and signal next file */
-			current_transfer.current_file[0] = '\0';
-			/* Try to get next file */
-			return transfer_next_file();
+			LOG_INF("File %s is being written, waiting for it to complete...",
+			        current_transfer.current_file);
+			k_sleep(K_MSEC(500));
 		}
+		LOG_INF("File %s is ready, opening for transfer",
+		        current_transfer.current_file);
 
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 			 current_transfer.session_id, current_transfer.current_file);
@@ -355,6 +375,16 @@ static int transfer_next_file(void)
 		        current_transfer.file_list[current_transfer.file_index],
 		        sizeof(current_transfer.current_file) - 1);
 		current_transfer.file_index++;
+
+		/* Wait for the new file to finish writing before opening */
+		while (storage_file_is_writing(current_transfer.session_id,
+			current_transfer.current_file)) {
+			LOG_INF("File %s is being written, waiting for it to complete...",
+			        current_transfer.current_file);
+			k_sleep(K_MSEC(500));
+		}
+		LOG_INF("File %s is ready, opening for transfer",
+		        current_transfer.current_file);
 
 		/* Now open the file */
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
@@ -392,8 +422,22 @@ static int transfer_send_chunk(void)
 	ssize_t bytes_read;
 	int ret;
 
+	/* Check if any file is being written BEFORE reading */
+	if (storage_get_writing_file(NULL, NULL, NULL, NULL)) {
+		/* A file is being written, skip this chunk and wait */
+		k_sleep(K_MSEC(20));
+		return 0;  /* Return success but no data sent */
+	}
+
+	/* Lock SD card for read operation */
+	storage_lock_sd_card();
+
 	/* Read chunk from file */
 	bytes_read = fs_read(&transfer_file, chunk, TRANSFER_CHUNK_SIZE);
+
+	/* Unlock SD card immediately after read - BLE send can happen without lock */
+	storage_unlock_sd_card();
+
 	if (bytes_read < 0) {
 		LOG_ERR("File read error: %zd (file_open=%d, offset=%llu)",
 		        bytes_read, transfer_file_open, current_transfer.bytes_transferred);
@@ -406,7 +450,7 @@ static int transfer_send_chunk(void)
 		return -EOF;
 	}
 
-	/* Send via BLE */
+	/* Send via BLE (without SD card lock) */
 	ret = ble_svc_send_file_data(chunk, bytes_read);
 	if (ret != 0) {
 		LOG_ERR("BLE send error: %d (chunk size: %zd) - NOT COUNTED", ret, bytes_read);
@@ -416,6 +460,9 @@ static int transfer_send_chunk(void)
 	/* Only increment bytes_transferred if send actually succeeded */
 	current_transfer.bytes_transferred += bytes_read;
 	LOG_DBG("Sent chunk: %zd bytes, total: %llu", bytes_read, current_transfer.bytes_transferred);
+
+	/* Small delay to avoid overwhelming the system */
+	k_sleep(K_MSEC(10));
 
 	return 0;
 }

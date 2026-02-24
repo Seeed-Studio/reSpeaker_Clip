@@ -470,6 +470,36 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
     return 0;
 }
 
+int ble_svc_send_file_ready(const char *session_id, const char *filename, uint64_t size)
+{
+    char buffer[256];
+    int len;
+
+    len = snprintf(buffer, sizeof(buffer),
+                   "{\"ok\":true,\"event\":\"file_ready\",\"session\":\"%s\",\"filename\":\"%s\",\"size\":%llu}",
+                   session_id, filename, size);
+    if (len < 0 || len >= sizeof(buffer)) {
+        return -ENOMEM;
+    }
+
+    return ble_svc_send_response(buffer);
+}
+
+int ble_svc_send_file_complete(const char *filename)
+{
+    char buffer[256];
+    int len;
+
+    len = snprintf(buffer, sizeof(buffer),
+                   "{\"ok\":true,\"event\":\"file_complete\",\"filename\":\"%s\"}",
+                   filename);
+    if (len < 0 || len >= sizeof(buffer)) {
+        return -ENOMEM;
+    }
+
+    return ble_svc_send_response(buffer);
+}
+
 bool ble_svc_is_ready(void)
 {
     /* For small responses, we only need connection and notification enabled.

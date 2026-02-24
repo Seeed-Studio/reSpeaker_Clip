@@ -957,6 +957,43 @@ static int cmd_delete(const struct at_command *cmd, char **response)
     return json_create_success(data, response);
 }
 
+static int cmd_format(const struct at_command *cmd, char **response)
+{
+    int err;
+
+    LOG_INF("FORMAT command received");
+
+    /* Only allow EXEC type (no arguments) */
+    if (cmd->value) {
+        LOG_WRN("FORMAT: unexpected argument");
+        return json_create_error("FORMAT takes no arguments", response);
+    }
+
+    /* Check if recording is active */
+    if (audio_is_recording()) {
+        LOG_WRN("FORMAT: recording is active");
+        return json_create_error("Cannot format while recording", response);
+    }
+
+    /* Check if transfer is active */
+    if (transfer_is_active()) {
+        LOG_WRN("FORMAT: transfer is active");
+        return json_create_error("Cannot format while transferring", response);
+    }
+
+    LOG_INF("FORMAT: calling storage_format_card");
+
+    /* Format SD card */
+    err = storage_format_card();
+    if (err != 0) {
+        LOG_ERR("FORMAT: storage_format_card returned %d", err);
+        return json_create_error("Failed to format SD card", response);
+    }
+
+    LOG_INF("FORMAT: successful");
+    return json_create_success("{\"formatted\":true}", response);
+}
+
 static int cmd_marks(const struct at_command *cmd, char **response)
 {
     struct bookmark *bookmarks;
@@ -1204,6 +1241,7 @@ static const struct cmd_entry commands[] = {
     /* Session management commands */
     {"LIST",     cmd_list,         AT_CMD_EXEC | AT_CMD_SET},
     {"DELETE",   cmd_delete,       AT_CMD_SET},
+    {"FORMAT",   cmd_format,       AT_CMD_EXEC},
     {"MARKS",    cmd_marks,        AT_CMD_SET},
 
     /* Transfer commands */
