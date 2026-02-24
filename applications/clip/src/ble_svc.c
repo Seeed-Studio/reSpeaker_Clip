@@ -254,6 +254,19 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     LOG_INF("BLE connected");
 
+    /* Request better connection parameters
+     * Interval: 30-50 (37.5-62.5ms)
+     * Latency: 0
+     * Timeout: 600 (6 seconds)
+     */
+    const struct bt_le_conn_param param = {
+        .interval_min = 30,
+        .interval_max = 50,
+        .latency = 0,
+        .timeout = 600,
+    };
+    bt_conn_le_param_update(conn, &param);
+
     /* Delay MTU exchange */
     k_work_schedule(&mtu_work, K_MSEC(500));
 }

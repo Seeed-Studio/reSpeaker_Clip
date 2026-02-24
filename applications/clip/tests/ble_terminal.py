@@ -43,7 +43,7 @@ class BLETerminal:
         self.client = BleakClient(self.address, disconnected_callback=self._disconnect_callback)
         print(f"Connecting to {self.address}...")
         try:
-            await self.client.connect(timeout=20.0)
+            await self.client.connect(timeout=30.0)
             print("Connected!\n")
 
             await self.client.start_notify(RESP_SEND_UUID, self._notification_handler)
