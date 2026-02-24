@@ -5,11 +5,10 @@ Bluetooth AT Command Terminal
 Interactive terminal for testing AT commands over BLE.
 
 Usage:
-    python ble_terminal.py [--device MAC_ADDRESS]
+    python ble_terminal.py
 """
 
 import asyncio
-import argparse
 import sys
 from bleak import BleakClient, BleakScanner
 
@@ -22,23 +21,21 @@ DEVICE_NAME_FILTER = "reSpeaker"
 
 
 class BLETerminal:
-    def __init__(self, address=None):
-        self.address = address
+    def __init__(self):
         self.client = None
         self.last_response = None
         self.running = True
 
     async def connect(self):
-        if not self.address:
-            print("Scanning...")
-            device = await BleakScanner.find_device_by_filter(
-                lambda d, _: d.name and DEVICE_NAME_FILTER in d.name
-            )
-            if not device:
-                print(f"Device '{DEVICE_NAME_FILTER}' not found")
-                return False
-            self.address = device.address
-            print(f"Found: {device.name} ({self.address})")
+        print("Scanning...")
+        device = await BleakScanner.find_device_by_filter(
+            lambda d, _: d.name and DEVICE_NAME_FILTER in d.name
+        )
+        if not device:
+            print(f"Device '{DEVICE_NAME_FILTER}' not found")
+            return False
+        self.address = device.address
+        print(f"Found: {device.name} ({self.address})")
 
         self.client = BleakClient(self.address)
         print(f"Connecting to {self.address}...")
@@ -154,11 +151,7 @@ class BLETerminal:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Bluetooth AT Command Terminal")
-    parser.add_argument("--device", "-d", help="Device MAC address")
-    args = parser.parse_args()
-
-    terminal = BLETerminal(args.device)
+    terminal = BLETerminal()
     if not await terminal.connect():
         return 1
 
