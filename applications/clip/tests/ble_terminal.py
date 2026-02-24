@@ -47,6 +47,8 @@ class BLETerminal:
             print("Connected!\n")
 
             await self.client.start_notify(RESP_SEND_UUID, self._notification_handler)
+            # Small delay to ensure notifications are ready
+            await asyncio.sleep(0.2)
             return True
         except Exception as e:
             print(f"Connection failed: {e}")

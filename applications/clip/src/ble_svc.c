@@ -227,6 +227,10 @@ static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
     if (!err) {
         mtu_exchanged = true;
         LOG_INF("MTU exchanged(%u), ready for communication", bt_gatt_get_mtu(conn));
+    } else {
+        LOG_WRN("MTU exchange failed: %d, continuing with default MTU", err);
+        /* Mark as exchanged anyway so we can proceed with default MTU (23) */
+        mtu_exchanged = true;
     }
 }
 
@@ -367,6 +371,12 @@ int ble_svc_send_response(const char *json)
     uint16_t max_len;
 
     if (!ble_svc_is_ready()) {
+        LOG_ERR("Cannot send response: not ready");
+        return -ENOTCONN;
+    }
+
+    if (!resp_notify_enabled) {
+        LOG_ERR("Cannot send response: notify not enabled");
         return -ENOTCONN;
     }
 
@@ -376,10 +386,13 @@ int ble_svc_send_response(const char *json)
         LOG_WRN("Response too long: %u > %u", (uint32_t)strlen(json), max_len);
     }
 
+    LOG_INF("Sending notify: len=%u, data=%s", (uint32_t)strlen(json), json);
     err = bt_gatt_notify(current_conn, &clip_svc.attrs[4],
                           (const void *)json, strlen(json));
     if (err) {
         LOG_ERR("Notify failed: %d", err);
+    } else {
+        LOG_INF("Notify sent successfully");
     }
 
     return err;
@@ -411,7 +424,10 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
 
 bool ble_svc_is_ready(void)
 {
-    return (current_conn != NULL && resp_notify_enabled && mtu_exchanged);
+    /* For small responses, we only need connection and notification enabled.
+     * MTU exchange is optional for optimization.
+     */
+    return (current_conn != NULL && resp_notify_enabled);
 }
 
 struct bt_conn *ble_svc_get_connection(void)

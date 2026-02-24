@@ -533,122 +533,135 @@ static int cmd_pair(const struct at_command *cmd, char **response)
     return json_create_error("Invalid value (use reset/clear)", response);
 }
 
-static int cmd_bitrate_set(const struct at_command *cmd, char **response)
+/* Combined BITRATE command handler */
+static int cmd_bitrate(const struct at_command *cmd, char **response)
 {
-    int bitrate;
+    if (cmd->type == AT_CMD_SET) {
+        /* Set bitrate */
+        int bitrate;
 
-    if (!cmd->value) {
-        return json_create_error("Missing bitrate value", response);
-    }
+        if (!cmd->value) {
+            return json_create_error("Missing bitrate value", response);
+        }
 
-    if (extract_int(cmd->value, &bitrate) != 0) {
-        return json_create_error("Invalid bitrate format", response);
-    }
+        if (extract_int(cmd->value, &bitrate) != 0) {
+            return json_create_error("Invalid bitrate format", response);
+        }
 
-    /* Validate bitrate */
-    if (bitrate < 12000 || bitrate > 64000) {
-        return json_create_error("Bitrate out of range (12000-64000)", response);
-    }
+        /* Validate bitrate */
+        if (bitrate < 12000 || bitrate > 64000) {
+            return json_create_error("Bitrate out of range (12000-64000)", response);
+        }
 
-    g_config.bitrate = bitrate;
+        g_config.bitrate = bitrate;
 
-    return json_create_kv("value", cmd->value, response);
-}
-
-static int cmd_bitrate_get(const struct at_command *cmd, char **response)
-{
-    char buffer[16];
-    snprintf(buffer, sizeof(buffer), "%u", g_config.bitrate);
-    return json_create_kv("value", buffer, response);
-}
-
-static int cmd_complexity_set(const struct at_command *cmd, char **response)
-{
-    int complexity;
-
-    if (!cmd->value) {
-        return json_create_error("Missing complexity value", response);
-    }
-
-    if (extract_int(cmd->value, &complexity) != 0) {
-        return json_create_error("Invalid complexity format", response);
-    }
-
-    if (complexity < 0 || complexity > 10) {
-        return json_create_error("Complexity out of range (0-10)", response);
-    }
-
-    g_config.complexity = complexity;
-
-    return json_create_kv("value", cmd->value, response);
-}
-
-static int cmd_complexity_get(const struct at_command *cmd, char **response)
-{
-    char buffer[16];
-    snprintf(buffer, sizeof(buffer), "%u", g_config.complexity);
-    return json_create_kv("value", buffer, response);
-}
-
-static int cmd_mode_set(const struct at_command *cmd, char **response)
-{
-    char mode_str[32];
-
-    if (!cmd->value) {
-        return json_create_error("Missing mode value", response);
-    }
-
-    /* Copy and trim */
-    strncpy(mode_str, cmd->value, sizeof(mode_str) - 1);
-    mode_str[sizeof(mode_str) - 1] = '\0';
-    trim_whitespace(mode_str);
-
-    /* Convert to lowercase */
-    for (char *p = mode_str; *p; p++) {
-        *p = tolower((unsigned char)*p);
-    }
-
-    if (strcmp(mode_str, "normal") == 0) {
-        g_config.mode = MODE_NORMAL;
-    } else if (strcmp(mode_str, "enhanced") == 0) {
-        g_config.mode = MODE_ENHANCED;
+        return json_create_kv("value", cmd->value, response);
     } else {
-        return json_create_error("Invalid mode (use normal or enhanced)", response);
+        /* GET bitrate */
+        char buffer[16];
+        snprintf(buffer, sizeof(buffer), "%u", g_config.bitrate);
+        return json_create_kv("value", buffer, response);
     }
-
-    return json_create_kv("value", mode_str, response);
 }
 
-static int cmd_mode_get(const struct at_command *cmd, char **response)
+/* Combined COMPLEXITY command handler */
+static int cmd_complexity(const struct at_command *cmd, char **response)
 {
-    const char *mode = (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced";
-    return json_create_kv("value", mode, response);
+    if (cmd->type == AT_CMD_SET) {
+        /* Set complexity */
+        int complexity;
+
+        if (!cmd->value) {
+            return json_create_error("Missing complexity value", response);
+        }
+
+        if (extract_int(cmd->value, &complexity) != 0) {
+            return json_create_error("Invalid complexity format", response);
+        }
+
+        if (complexity < 0 || complexity > 10) {
+            return json_create_error("Complexity out of range (0-10)", response);
+        }
+
+        g_config.complexity = complexity;
+
+        return json_create_kv("value", cmd->value, response);
+    } else {
+        /* GET complexity */
+        char buffer[16];
+        snprintf(buffer, sizeof(buffer), "%u", g_config.complexity);
+        return json_create_kv("value", buffer, response);
+    }
 }
 
-static int cmd_chunksize_set(const struct at_command *cmd, char **response)
+/* Combined MODE command handler */
+static int cmd_mode(const struct at_command *cmd, char **response)
 {
-    uint32_t value;
-    char data[128];
+    if (cmd->type == AT_CMD_SET) {
+        /* Set mode */
+        char mode_str[32];
+        char quoted[36];
 
-    if (!cmd->value) {
-        /* Get current chunk size */
-        snprintf(data, sizeof(data), "{\"value\":%u}", g_config.chunk_size);
-        return json_create_success(data, response);
+        if (!cmd->value) {
+            return json_create_error("Missing mode value", response);
+        }
+
+        /* Copy and trim */
+        strncpy(mode_str, cmd->value, sizeof(mode_str) - 1);
+        mode_str[sizeof(mode_str) - 1] = '\0';
+        trim_whitespace(mode_str);
+
+        /* Convert to lowercase */
+        for (char *p = mode_str; *p; p++) {
+            *p = tolower((unsigned char)*p);
+        }
+
+        if (strcmp(mode_str, "normal") == 0) {
+            g_config.mode = MODE_NORMAL;
+        } else if (strcmp(mode_str, "enhanced") == 0) {
+            g_config.mode = MODE_ENHANCED;
+        } else {
+            return json_create_error("Invalid mode (use normal or enhanced)", response);
+        }
+
+        /* Add quotes for valid JSON string */
+        snprintf(quoted, sizeof(quoted), "\"%s\"", mode_str);
+        return json_create_kv("value", quoted, response);
+    } else {
+        /* GET mode - return quoted string */
+        const char *mode = (g_config.mode == MODE_NORMAL) ? "\"normal\"" : "\"enhanced\"";
+        return json_create_kv("value", mode, response);
+    }
+}
+
+/* Combined CHUNKSIZE command handler */
+static int cmd_chunksize(const struct at_command *cmd, char **response)
+{
+    char buffer[16];
+
+    if (cmd->type == AT_CMD_SET) {
+        /* Set chunk size */
+        uint32_t value;
+
+        if (!cmd->value) {
+            return json_create_error("Missing chunk size value", response);
+        }
+
+        value = atoi(cmd->value);
+
+        if (value < 100 || value > 4096) {
+            return json_create_error("Invalid chunk size (100-4096)", response);
+        }
+
+        g_config.chunk_size = value;
+
+        snprintf(buffer, sizeof(buffer), "%u", value);
+    } else {
+        /* GET chunk size */
+        snprintf(buffer, sizeof(buffer), "%u", g_config.chunk_size);
     }
 
-    /* Parse chunk size value */
-    value = atoi(cmd->value);
-
-    /* Validate range */
-    if (value < 100 || value > 4096) {
-        return json_create_error("Invalid chunk size (100-4096)", response);
-    }
-
-    /* Set chunk size */
-    g_config.chunk_size = value;
-
-    snprintf(data, sizeof(data), "{\"value\":%u}", value);
-    return json_create_success(data, response);
+    return json_create_kv("value", buffer, response);
 }
 
 static int cmd_start(const struct at_command *cmd, char **response)
@@ -1073,10 +1086,10 @@ static const struct cmd_entry commands[] = {
     {"PAIR",     cmd_pair,         AT_CMD_SET | AT_CMD_GET},
 
     /* Configuration commands */
-    {"BITRATE",  cmd_bitrate_set,  AT_CMD_SET | AT_CMD_GET},
-    {"COMPLEXITY", cmd_complexity_set, AT_CMD_SET | AT_CMD_GET},
-    {"MODE",     cmd_mode_set,     AT_CMD_SET | AT_CMD_GET},
-    {"CHUNKSIZE", cmd_chunksize_set, AT_CMD_SET | AT_CMD_GET},
+    {"BITRATE",  cmd_bitrate,      AT_CMD_SET | AT_CMD_GET},
+    {"COMPLEXITY", cmd_complexity, AT_CMD_SET | AT_CMD_GET},
+    {"MODE",     cmd_mode,         AT_CMD_SET | AT_CMD_GET},
+    {"CHUNKSIZE", cmd_chunksize,   AT_CMD_SET | AT_CMD_GET},
 
     /* Audio processing commands */
     {"NOISE",    cmd_noise_set,     AT_CMD_SET | AT_CMD_GET},

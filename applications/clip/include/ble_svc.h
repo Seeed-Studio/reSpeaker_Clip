@@ -12,34 +12,22 @@
 
 /* Service UUID: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E */
 #define BT_UUID_CLIP_SVC \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E, 0xCC, 0x4D, 0x24, \
-                                                0x0E, 0xE5, 0xA9, 0xE0, \
-                                                0x93, 0xF3, 0xA3, 0xB5, \
-                                                0x01, 0x00, 0x40, 0x6E))
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400001, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))
 
 /* Characteristic UUID: Command Receive (Write) */
 /* UUID: 6E400002-B5A3-F393-E0A9-E50E24DCCA9E */
 #define BT_UUID_CLIP_CMD_RECV \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E, 0xCC, 0x4D, 0x24, \
-                                                0x0E, 0xE5, 0xA9, 0xE0, \
-                                                0x93, 0xF3, 0xA3, 0xB5, \
-                                                0x02, 0x00, 0x40, 0x6E))
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400002, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))
 
 /* Characteristic UUID: Response Send (Notify) */
 /* UUID: 6E400003-B5A3-F393-E0A9-E50E24DCCA9E */
 #define BT_UUID_CLIP_RESP_SEND \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E, 0xCC, 0x4D, 0x24, \
-                                                0x0E, 0xE5, 0xA9, 0xE0, \
-                                                0x93, 0xF3, 0xA3, 0xB5, \
-                                                0x03, 0x00, 0x40, 0x6E))
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400003, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))
 
 /* Characteristic UUID: File Data (Notify) */
 /* UUID: 6E400004-B5A3-F393-E0A9-E50E24DCCA9E */
 #define BT_UUID_CLIP_FILE_DATA \
-    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x9E, 0xCC, 0x4D, 0x24, \
-                                                0x0E, 0xE5, 0xA9, 0xE0, \
-                                                0x93, 0xF3, 0xA3, 0xB5, \
-                                                0x04, 0x00, 0x40, 0x6E))
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))
 
 /**
  * @brief Initialize BLE service for AT commands
