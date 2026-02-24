@@ -13,12 +13,33 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <string.h>
 #include "ble_svc.h"
+#include "at_cmd.h"
 
 LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 #define MTU_SIZE 247
+
+/* Command queue configuration */
+#define CMD_QUEUE_SIZE 8
+#define CMD_MAX_LEN 256
+
+/* Command queue item */
+struct cmd_queue_item {
+    char data[CMD_MAX_LEN];
+    uint16_t len;
+};
+
+/* Command queue */
+K_MSGQ_DEFINE(cmd_msgq, sizeof(struct cmd_queue_item), CMD_QUEUE_SIZE, 4);
+
+/* AT command processor thread */
+#define AT_THREAD_STACK_SIZE 8192
+#define AT_THREAD_PRIORITY 5
+static K_THREAD_STACK_DEFINE(at_thread_stack, AT_THREAD_STACK_SIZE);
+static struct k_thread at_thread_data;
+static k_tid_t at_thread_id;
 
 /* Service UUID: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E */
 static const struct bt_uuid_128 svc_uuid = BT_UUID_INIT_128(
@@ -42,9 +63,6 @@ static struct bt_conn *current_conn;
 static volatile bool resp_notify_enabled;
 static volatile bool file_data_notify_enabled;
 static volatile bool mtu_exchanged;
-
-/* External AT command handler */
-extern int at_cmd_execute(const char *cmd_str, char **response);
 
 /* Forward declarations */
 static ssize_t cmd_recv_write(struct bt_conn *conn,
@@ -94,39 +112,86 @@ static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t 
     LOG_INF("File data notify %s", file_data_notify_enabled ? "enabled" : "disabled");
 }
 
-/* Write callback for command receive */
+/* AT command processor thread */
+static void at_thread_main(void *p1, void *p2, void *p3)
+{
+    struct cmd_queue_item item;
+    struct at_command cmd;
+    char *response = NULL;
+    int err;
+
+    ARG_UNUSED(p1);
+    ARG_UNUSED(p2);
+    ARG_UNUSED(p3);
+
+    LOG_INF("AT command thread started");
+
+    while (1) {
+        /* Wait for command from queue */
+        if (k_msgq_get(&cmd_msgq, &item, K_FOREVER) != 0) {
+            continue;
+        }
+
+        LOG_INF("Processing command: [%s]", item.data);
+
+        /* Parse AT command */
+        memset(&cmd, 0, sizeof(cmd));
+        err = at_cmd_parse(item.data, &cmd);
+        if (err != 0) {
+            LOG_ERR("Failed to parse command: %d", err);
+            continue;
+        }
+
+        /* Execute command */
+        err = at_cmd_execute(&cmd, &response);
+
+        /* Send response if available */
+        if (response) {
+            ble_svc_send_response(response);
+            k_free(response);
+            response = NULL;
+        }
+
+        /* Cleanup parsed command */
+        at_cmd_cleanup(&cmd);
+    }
+}
+
+/* Write callback for command receive - runs in BLE context, minimal work */
 static ssize_t cmd_recv_write(struct bt_conn *conn,
                              const struct bt_gatt_attr *attr,
                              const void *buf, uint16_t len,
                              uint16_t offset, uint8_t flags)
 {
-    char *cmd_str;
-    char *response = NULL;
-    int err;
+    struct cmd_queue_item item;
 
-    LOG_DBG("Received command: %.*s", len, (char *)buf);
+    ARG_UNUSED(conn);
+    ARG_UNUSED(attr);
+    ARG_UNUSED(flags);
 
-    /* Copy command string */
-    cmd_str = k_malloc(len + 1);
-    if (!cmd_str) {
+    /* Ignore offset for now - we expect complete commands in one write */
+    if (offset != 0) {
+        LOG_WRN("Unexpected offset: %u", offset);
+    }
+
+    /* Validate length */
+    if (len == 0 || len >= CMD_MAX_LEN) {
+        LOG_WRN("Invalid command length: %u", len);
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_PDU);
+    }
+
+    /* Copy to queue item */
+    memcpy(item.data, buf, len);
+    item.data[len] = '\0';
+    item.len = len;
+
+    /* Send to queue (non-blocking) */
+    if (k_msgq_put(&cmd_msgq, &item, K_NO_WAIT) != 0) {
+        LOG_WRN("Command queue full, dropping command");
         return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
     }
 
-    memcpy(cmd_str, buf, len);
-    cmd_str[len] = '\0';
-
-    /* Execute command */
-    err = at_cmd_execute(cmd_str, &response);
-
-    /* Send response if available */
-    if (response) {
-        ble_svc_send_response(response);
-        k_free(response);
-    }
-
-    k_free(cmd_str);
-
-    return (err == 0) ? len : BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+    return len;
 }
 
 /* Advertising data */
@@ -158,7 +223,7 @@ static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
 {
     if (!err) {
         mtu_exchanged = true;
-        LOG_INF("MTU exchanged, ready for communication");
+        LOG_INF("MTU exchanged(%u), ready for communication", bt_gatt_get_mtu(conn));
     }
 }
 
@@ -208,6 +273,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 static void le_param_updated(struct bt_conn *conn, uint16_t interval,
                              uint16_t latency, uint16_t timeout)
 {
+    LOG_INF("LE params: interval=%u, latency=%u, timeout=%u",
+            interval, latency, timeout);
+
     if (!mtu_exchanged && current_conn == conn) {
         bt_gatt_exchange_mtu(conn, &mtu_params);
     }
@@ -250,27 +318,67 @@ int ble_svc_init(void)
 
     LOG_INF("Advertising started as '%s'", DEVICE_NAME);
 
+    /* Start AT command processor thread */
+    at_thread_id = k_thread_create(&at_thread_data, at_thread_stack,
+                                   AT_THREAD_STACK_SIZE,
+                                   at_thread_main, NULL, NULL, NULL,
+                                   AT_THREAD_PRIORITY, 0, K_NO_WAIT);
+    if (at_thread_id == NULL) {
+        LOG_ERR("Failed to create AT command thread");
+        return -ENOMEM;
+    }
+
+    LOG_INF("AT command thread started");
+
     return 0;
 }
 
 int ble_svc_send_response(const char *json)
 {
+    int err;
+    uint16_t max_len;
+
     if (!ble_svc_is_ready()) {
         return -ENOTCONN;
     }
 
-    return bt_gatt_notify(current_conn, &clip_svc.attrs[4],
+    /* MTU - 3 bytes ATT header = max notify payload */
+    max_len = bt_gatt_get_mtu(current_conn) - 3;
+    if (strlen(json) > max_len) {
+        LOG_WRN("Response too long: %u > %u", (uint32_t)strlen(json), max_len);
+    }
+
+    err = bt_gatt_notify(current_conn, &clip_svc.attrs[4],
                           (const void *)json, strlen(json));
+    if (err) {
+        LOG_ERR("Notify failed: %d", err);
+    }
+
+    return err;
 }
 
 int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
 {
+    int err;
+    uint16_t max_len;
+
     if (!file_data_notify_enabled || !current_conn) {
         return -ENOTCONN;
     }
 
-    return bt_gatt_notify(current_conn, &clip_svc.attrs[7],
+    /* MTU - 3 bytes ATT header = max notify payload */
+    max_len = bt_gatt_get_mtu(current_conn) - 3;
+    if (len > max_len) {
+        LOG_WRN("File data too long: %u > %u", len, max_len);
+    }
+
+    err = bt_gatt_notify(current_conn, &clip_svc.attrs[7],
                           data, len);
+    if (err) {
+        LOG_ERR("File notify failed: %d", err);
+    }
+
+    return err;
 }
 
 bool ble_svc_is_ready(void)

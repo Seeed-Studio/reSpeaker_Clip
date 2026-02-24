@@ -8,12 +8,12 @@
 #define AT_CMD_H
 
 /**
- * @brief AT command types
+ * @brief AT command types (bitmask values for allowed_types checking)
  */
 enum at_cmd_type {
-    AT_CMD_EXEC = 0,    /* Execute without parameters: AT+XX */
-    AT_CMD_SET,         /* Set parameter: AT+XX=<value> */
-    AT_CMD_GET,         /* Query parameter: AT+XX? */
+    AT_CMD_EXEC = 0x01,    /* Execute without parameters: AT+XX */
+    AT_CMD_SET  = 0x02,    /* Set parameter: AT+XX=<value> */
+    AT_CMD_GET  = 0x04,    /* Query parameter: AT+XX? */
 };
 
 /**

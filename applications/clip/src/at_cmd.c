@@ -131,10 +131,12 @@ int at_cmd_parse(const char *cmd_str, struct at_command *cmd)
             trim_whitespace(value_start);
 
             if (strlen(value_start) > 0) {
-                cmd->value = k_strdup(value_start);
+                size_t val_len = strlen(value_start) + 1;
+                cmd->value = k_malloc(val_len);
                 if (!cmd->value) {
                     return -ENOMEM;
                 }
+                strcpy(cmd->value, value_start);
             } else {
                 cmd->value = NULL;
             }
@@ -1098,7 +1100,9 @@ int at_cmd_execute(const struct at_command *cmd, char **response)
     for (entry = commands; entry->name; entry++) {
         if (strcmp(cmd->name, entry->name) == 0) {
             /* Check if command type is allowed */
+            LOG_INF("Found handler for command: %s (allowed types: %d)", entry->name, entry->allowed_types);
             if (!(entry->allowed_types & cmd->type)) {
+                LOG_ERR("Command type %d not supported for %s", cmd->type, entry->name);
                 return json_create_error("Command type not supported", response);
             }
 
