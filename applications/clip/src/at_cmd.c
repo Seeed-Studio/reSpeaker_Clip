@@ -25,6 +25,9 @@
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
+/* Shared JSON response buffer to reduce stack usage */
+static char json_buffer[1024];
+
 /* Helper function to trim whitespace */
 static void trim_whitespace(char *str)
 {
@@ -720,11 +723,11 @@ static int cmd_start(const struct at_command *cmd, char **response)
     LOG_INF("Recording started in %s mode",
            rec_mode == MODE_NORMAL ? "normal" : "enhanced");
 
-    /* Generate session ID based on uptime */
-    char session_id[32];
-    snprintf(session_id, sizeof(session_id), "\"%08u_%s\"",
-             (uint32_t)(k_uptime_get() / 1000),
-             rec_mode == MODE_NORMAL ? "normal" : "enhanced");
+    /* Get session ID from audio module (uses time-based format) */
+    const char *session_id = audio_get_session_id();
+    if (!session_id) {
+        return json_create_error("No active session", response);
+    }
 
     return json_create_kv("session", session_id, response);
 }
@@ -804,22 +807,28 @@ static int cmd_mark(const struct at_command *cmd, char **response)
 
 static int cmd_list(const struct at_command *cmd, char **response)
 {
-    struct storage_session_info sessions[32];
-    char data[1024];
+    struct storage_session_info *sessions;
     int count;
+
+    /* Allocate buffer for sessions on heap (only when LIST command is used) */
+    sessions = k_malloc(32 * sizeof(struct storage_session_info));
+    if (!sessions) {
+        return json_create_error("Out of memory", response);
+    }
 
     /* List all sessions */
     count = storage_list_sessions(sessions, 32);
     if (count < 0) {
+        k_free(sessions);
         return json_create_error("Failed to list sessions", response);
     }
 
-    /* Build JSON response */
-    char *ptr = data;
-    int remaining = sizeof(data);
+    /* Build JSON response in shared buffer */
+    char *ptr = json_buffer;
+    int remaining = sizeof(json_buffer);
 
     ptr += snprintf(ptr, remaining, "[");
-    remaining = sizeof(data) - (ptr - data);
+    remaining = sizeof(json_buffer) - (ptr - json_buffer);
 
     for (int i = 0; i < count && remaining > 100; i++) {
         int len = snprintf(ptr, remaining,
@@ -834,7 +843,8 @@ static int cmd_list(const struct at_command *cmd, char **response)
 
     snprintf(ptr, remaining, "]");
 
-    return json_create_success(data, response);
+    k_free(sessions);
+    return json_create_success(json_buffer, response);
 }
 
 static int cmd_delete(const struct at_command *cmd, char **response)
@@ -864,8 +874,7 @@ static int cmd_delete(const struct at_command *cmd, char **response)
 
 static int cmd_marks(const struct at_command *cmd, char **response)
 {
-    struct bookmark bookmarks[BOOKMARKS_MAX_COUNT];
-    char data[1024];
+    struct bookmark *bookmarks;
     int count;
 
     if (!cmd->value) {
@@ -877,18 +886,25 @@ static int cmd_marks(const struct at_command *cmd, char **response)
         return json_create_error("Session not found", response);
     }
 
+    /* Allocate buffer for bookmarks on heap */
+    bookmarks = k_malloc(32 * sizeof(struct bookmark));
+    if (!bookmarks) {
+        return json_create_error("Out of memory", response);
+    }
+
     /* Get bookmarks for session */
-    count = bookmarks_get_all(cmd->value, bookmarks, BOOKMARKS_MAX_COUNT);
+    count = bookmarks_get_all(cmd->value, bookmarks, 32);
     if (count < 0) {
+        k_free(bookmarks);
         return json_create_error("Failed to get bookmarks", response);
     }
 
-    /* Build JSON response */
-    char *ptr = data;
-    int remaining = sizeof(data);
+    /* Build JSON response in shared buffer */
+    char *ptr = json_buffer;
+    int remaining = sizeof(json_buffer);
 
     ptr += snprintf(ptr, remaining, "{\"bookmarks\":[");
-    remaining = sizeof(data) - (ptr - data);
+    remaining = sizeof(json_buffer) - (ptr - json_buffer);
 
     for (int i = 0; i < count && remaining > 100; i++) {
         int len = snprintf(ptr, remaining,
@@ -906,7 +922,8 @@ static int cmd_marks(const struct at_command *cmd, char **response)
 
     snprintf(ptr, remaining, "]}");
 
-    return json_create_success(data, response);
+    k_free(bookmarks);
+    return json_create_success(json_buffer, response);
 }
 
 static int cmd_download(const struct at_command *cmd, char **response)

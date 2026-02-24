@@ -89,7 +89,6 @@ static bool storage_enabled = true;
 #define SEGMENT_DURATION_SEC 60  /* 1 minute per file for testing */
 static uint32_t recording_frame_count = 0;
 static uint32_t current_file_index = 1;
-static uint32_t session_counter = 0;  /* Fallback counter for session ID */
 
 /* Current session ID for bookmarks */
 static char current_session_id[32] = {0};
@@ -236,17 +235,19 @@ int audio_start_recording(enum audio_mode mode)
 	current_file_index = 1;
 	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
 
-	/* Generate session ID using current synchronized time */
+	/* Generate session ID: always 14 digits */
 	uint16_t year, month, day, hour, min, sec;
 	if (clip_get_current_time(&year, &month, &day, &hour, &min, &sec)) {
-		/* Use synchronized time: YYYYMMDDHHMMSS (14 digits) */
+		/* Time synchronized: YYYYMMDDHHMMSS (14 digits) */
 		snprintf(current_session_id, sizeof(current_session_id),
 			"%04d%02d%02d%02d%02d%02d",
 			year, month, day, hour, min, sec);
 	} else {
-		/* Fallback: use incrementing counter */
+		/* Time not set: use 0 + uptime (14 digits total) */
+		uint32_t uptime_sec = (uint32_t)(k_uptime_get() / 1000);
 		snprintf(current_session_id, sizeof(current_session_id),
-			"REC_%06u", session_counter++);
+			"0%013u", uptime_sec);  /* 0 + 13-digit uptime = 14 digits */
+		LOG_WRN("Time not synchronized, using uptime-based session ID");
 	}
 
 	LOG_INF("Session ID: %s", current_session_id);
