@@ -26,6 +26,9 @@ class ClipClient:
         self.client = None
         self.last_response = None
 
+    def _disconnect_callback(self, client):
+        print(f"\n[!] Device disconnected")
+
     async def connect(self):
         if not self.address:
             print("Scanning...")
@@ -38,13 +41,17 @@ class ClipClient:
             self.address = device.address
             print(f"Found: {device.name} ({self.address})")
 
-        self.client = BleakClient(self.address)
+        self.client = BleakClient(self.address, disconnected_callback=self._disconnect_callback)
         print(f"Connecting to {self.address}...")
-        await self.client.connect()
-        print("Connected!")
+        try:
+            await self.client.connect(timeout=20.0)
+            print("Connected!")
 
-        await self.client.start_notify(RESP_SEND_UUID, self._notification_handler)
-        return True
+            await self.client.start_notify(RESP_SEND_UUID, self._notification_handler)
+            return True
+        except Exception as e:
+            print(f"Connection failed: {e}")
+            return False
 
     async def disconnect(self):
         if self.client and self.client.is_connected:
