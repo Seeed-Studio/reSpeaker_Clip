@@ -20,9 +20,22 @@ LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
 /* Button device from device tree */
 static const struct device *button_dev = DEVICE_DT_GET(DT_NODELABEL(usr_btn));
 
+/* Work queue for deferred button actions (needs larger stack for audio operations) */
+#define BUTTON_WORK_STACK_SIZE 16384
+#define BUTTON_WORK_PRIORITY 5
+
+static K_THREAD_STACK_DEFINE(button_work_stack, BUTTON_WORK_STACK_SIZE);
+static struct k_work_q button_work_q;
+static struct k_work button_start_work;
+static struct k_work button_stop_work;
+static struct k_work button_bookmark_work;
+
 /* Forward declarations */
 static void button_event_callback(const struct device *dev,
 				   enum button_action action);
+static void button_start_work_handler(struct k_work *work);
+static void button_stop_work_handler(struct k_work *work);
+static void button_bookmark_work_handler(struct k_work *work);
 
 int button_handler_init(void)
 {
@@ -35,6 +48,15 @@ int button_handler_init(void)
 
 	LOG_INF("Initializing button handler...");
 
+	/* Initialize work queue for button actions */
+	k_work_queue_start(&button_work_q, button_work_stack,
+			   BUTTON_WORK_STACK_SIZE, BUTTON_WORK_PRIORITY, NULL);
+
+	/* Initialize work items */
+	k_work_init(&button_start_work, button_start_work_handler);
+	k_work_init(&button_stop_work, button_stop_work_handler);
+	k_work_init(&button_bookmark_work, button_bookmark_work_handler);
+
 	/* Register callback for all button events */
 	ret = button_callback_register(button_dev, button_event_callback);
 	if (ret < 0) {
@@ -43,10 +65,8 @@ int button_handler_init(void)
 	}
 
 	LOG_INF("Button handler initialized");
-	LOG_INF("Short press: Toggle recording");
-	LOG_INF("Long press (1s): Toggle mode (normal/enhanced)");
-	LOG_INF("Long press (3s): Factory reset");
-	LOG_INF("Double click: Stop recording");
+	LOG_INF("Short press: Add bookmark (during recording)");
+	LOG_INF("Long press (1s): Toggle recording start/stop");
 
 	return 0;
 }
@@ -56,6 +76,55 @@ bool button_handler_is_ready(void)
 	return device_is_ready(button_dev);
 }
 
+/* Work handlers - run in work queue with larger stack */
+static void button_start_work_handler(struct k_work *work)
+{
+	enum audio_mode mode;
+	int err;
+
+	ARG_UNUSED(work);
+
+	mode = (g_config.mode == MODE_ENHANCED) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
+	err = audio_start_recording(mode);
+	if (err == 0) {
+		state_transition(CLIP_STATE_RECORDING);
+		LOG_INF("Button: Started recording");
+	} else {
+		LOG_ERR("Button: Failed to start recording: %d", err);
+	}
+}
+
+static void button_stop_work_handler(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+
+	err = audio_stop_recording();
+	if (err == 0) {
+		state_transition(CLIP_STATE_IDLE);
+		LOG_INF("Button: Stopped recording");
+	} else {
+		LOG_ERR("Button: Failed to stop recording: %d", err);
+	}
+}
+
+static void button_bookmark_work_handler(struct k_work *work)
+{
+	int err;
+
+	ARG_UNUSED(work);
+
+	err = audio_add_bookmark(NULL);
+	if (err == 0) {
+		LOG_INF("Button: Bookmark added");
+	} else {
+		LOG_ERR("Button: Failed to add bookmark: %d", err);
+	}
+}
+
+/* Button callback - runs in button driver thread with small stack */
+/* Only submit work items here, do not call audio functions directly */
 static void button_event_callback(const struct device *dev,
 				   enum button_action action)
 {
@@ -68,61 +137,29 @@ static void button_event_callback(const struct device *dev,
 
 	switch (action) {
 	case BUTTON_SINGLE_CLICK:
-		/* Short press: Toggle recording */
-		if (current_state == CLIP_STATE_IDLE || current_state == CLIP_STATE_PAUSED) {
-			/* Start recording */
-			enum audio_mode mode = (g_config.mode == MODE_ENHANCED) ?
-					       AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
-			int err = audio_start_recording(mode);
-			if (err == 0) {
-				state_transition(CLIP_STATE_RECORDING);
-				LOG_INF("Button: Started recording");
-			} else {
-				LOG_ERR("Button: Failed to start recording: %d", err);
-			}
-		} else if (current_state == CLIP_STATE_RECORDING) {
-			/* Pause/stop recording */
-			int err = audio_stop_recording();
-			if (err == 0) {
-				state_transition(CLIP_STATE_IDLE);
-				LOG_INF("Button: Stopped recording");
-			}
-		}
-		break;
-
-	case BUTTON_DOUBLE_CLICK:
-		/* Double click: Stop recording immediately */
+		/* Short press: Add bookmark (only during recording) */
 		if (current_state == CLIP_STATE_RECORDING) {
-			int err = audio_stop_recording();
-			if (err == 0) {
-				state_transition(CLIP_STATE_IDLE);
-				LOG_INF("Button: Stopped recording (double-click)");
-			}
+			LOG_INF("Button: Single click - submitting bookmark work");
+			k_work_submit_to_queue(&button_work_q, &button_bookmark_work);
+		} else {
+			LOG_INF("Button: Short press ignored (state=%d, not recording)", current_state);
 		}
 		break;
 
 	case BUTTON_LONG_PRESS:
-		/* First level long press (1s): Toggle mode */
+		/* Long press: Toggle recording */
 		if (current_state == CLIP_STATE_IDLE || current_state == CLIP_STATE_PAUSED) {
-			/* Toggle between normal and enhanced mode */
-			enum recording_mode new_mode = (g_config.mode == MODE_NORMAL) ?
-						    MODE_ENHANCED : MODE_NORMAL;
-
-			g_config.mode = new_mode;
-			config_save();  /* Save to NVS */
-
-			LOG_INF("Button: Mode changed to %s",
-			       new_mode == MODE_NORMAL ? "normal" : "enhanced");
-
-			/* TODO: Add haptic feedback */
+			/* Start recording - defer to work queue */
+			k_work_submit_to_queue(&button_work_q, &button_start_work);
+		} else if (current_state == CLIP_STATE_RECORDING) {
+			/* Stop recording - defer to work queue */
+			k_work_submit_to_queue(&button_work_q, &button_stop_work);
 		}
 		break;
 
-	case BUTTON_LONG_PRESS + 1:
-		/* Second level long press (3s): Factory reset */
-		LOG_WRN("Button: Factory reset requested!");
-		/* TODO: Implement factory reset */
-		/* config_factory_reset(); */
+	case BUTTON_DOUBLE_CLICK:
+		/* Double click: Disabled - ignore */
+		LOG_DBG("Button: Double-click ignored (feature disabled)");
 		break;
 
 	default:
