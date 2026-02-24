@@ -145,6 +145,9 @@ static void at_thread_main(void *p1, void *p2, void *p3)
         /* Execute command */
         err = at_cmd_execute(&cmd, &response);
 
+        LOG_INF("Command executed with result: %d", err);
+        LOG_INF("Response: %s", response ? response : "NULL");
+
         /* Send response if available */
         if (response) {
             ble_svc_send_response(response);

@@ -8,6 +8,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/logging/log.h>
+#include <time.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
@@ -192,46 +193,63 @@ static int cmd_version(const struct at_command *cmd, char **response)
     return json_create_kv("firmware", "\"1.0.0\"", response);
 }
 
-static int cmd_time_get(const struct at_command *cmd, char **response)
+/* Combined TIME command handler for GET and SET */
+static int cmd_time(const struct at_command *cmd, char **response)
 {
-    return json_create_kv("value", "\"2024-02-03T10:00:00Z\"", response);
-}
+    if (cmd->type == AT_CMD_SET) {
+        /* Set time from Unix timestamp */
+        char data[128];
+        time_t unix_time;
+        struct tm tm;
 
-static int cmd_settime(const struct at_command *cmd, char **response)
-{
-    char data[128];
+        if (!cmd->value) {
+            return json_create_error("Missing time value", response);
+        }
 
-    if (!cmd->value) {
-        return json_create_error("Missing time value", response);
+        /* Parse Unix timestamp */
+        unix_time = (time_t)atoi(cmd->value);
+        if (unix_time < 0) {
+            return json_create_error("Invalid timestamp", response);
+        }
+
+        /* Convert Unix timestamp to broken-down time */
+        gmtime_r(&unix_time, &tm);
+
+        /* Validate year range */
+        if (tm.tm_year + 1900 < 2020 || tm.tm_year + 1900 > 2099) {
+            return json_create_error("Year out of range (2020-2099)", response);
+        }
+
+        /* Store synchronized time */
+        g_synced_time.year = tm.tm_year + 1900;
+        g_synced_time.month = tm.tm_mon + 1;
+        g_synced_time.day = tm.tm_mday;
+        g_synced_time.hour = tm.tm_hour;
+        g_synced_time.min = tm.tm_min;
+        g_synced_time.sec = tm.tm_sec;
+        g_synced_time.base_uptime_ms = k_uptime_get();
+        g_synced_time.valid = true;
+
+        LOG_INF("Time synchronized: %04d-%02d-%02d %02d:%02d:%02d (unix: %lld, base uptime: %lld ms)",
+                g_synced_time.year, g_synced_time.month, g_synced_time.day,
+                g_synced_time.hour, g_synced_time.min, g_synced_time.sec,
+                (int64_t)unix_time, g_synced_time.base_uptime_ms);
+
+        snprintf(data, sizeof(data), "\"%lld\"", (int64_t)unix_time);
+        return json_create_kv("time", data, response);
+    } else {
+        /* Get time - return current synced time or error */
+        if (g_synced_time.valid) {
+            char time_buf[64];
+            snprintf(time_buf, sizeof(time_buf),
+                "\"%04d-%02d-%02dT%02d:%02d:%02dZ\"",
+                g_synced_time.year, g_synced_time.month, g_synced_time.day,
+                g_synced_time.hour, g_synced_time.min, g_synced_time.sec);
+            return json_create_kv("time", time_buf, response);
+        } else {
+            return json_create_error("Time not set (use AT+TIME=<timestamp>)", response);
+        }
     }
-
-    /* Parse ISO 8601 format: 2025-02-24T14:30:00Z */
-    int year, month, day, hour, min, sec;
-    if (sscanf(cmd->value, "%d-%d-%dT%d:%d:%d",
-               &year, &month, &day, &hour, &min, &sec) != 6) {
-        return json_create_error("Invalid time format (use YYYY-MM-DDTHH:MM:SSZ)", response);
-    }
-
-    /* Validate values */
-    if (year < 2020 || year > 2099 || month < 1 || month > 12 ||
-        day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59) {
-        return json_create_error("Invalid time values", response);
-    }
-
-    /* Store synchronized time */
-    g_synced_time.year = year;
-    g_synced_time.month = month;
-    g_synced_time.day = day;
-    g_synced_time.hour = hour;
-    g_synced_time.min = min;
-    g_synced_time.sec = sec;
-    g_synced_time.valid = true;
-
-    LOG_INF("Time synchronized: %04d-%02d-%02d %02d:%02d:%02d",
-            year, month, day, hour, min, sec);
-
-    snprintf(data, sizeof(data), "\"%s\"", cmd->value);
-    return json_create_kv("time", data, response);
 }
 
 static int cmd_battery_get(const struct at_command *cmd, char **response)
@@ -1048,8 +1066,7 @@ static const struct cmd_entry commands[] = {
 
     /* System commands */
     {"VERSION",  cmd_version,      AT_CMD_EXEC},
-    {"TIME",     cmd_time_get,     AT_CMD_GET},
-    {"SETTIME",  cmd_settime,      AT_CMD_SET},
+    {"TIME",     cmd_time,         AT_CMD_GET | AT_CMD_SET},
     {"PURGE",    cmd_purge,        AT_CMD_EXEC},
     {"BATTERY",  cmd_battery_set,  AT_CMD_SET | AT_CMD_GET},
     {"CHARGING", cmd_charging_set, AT_CMD_SET | AT_CMD_GET},

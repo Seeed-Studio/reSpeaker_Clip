@@ -581,9 +581,15 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 			continue;
 		}
 
-		/* Check if directory name matches session format (YYYYMMDDHHMMSS or REC_XXXXXX) */
+		/* Check if directory name matches session format:
+		 * - YYYYMMDDHHMMSS (14 chars, all digits)
+		 * - REC_XXXXXX (starts with "REC_", 7+ chars)
+		 */
 		size_t len = strlen(entry.name);
-		if (len != 14 && len != 13) {  /* YYYYMMDDHHMMSS=14 or REC_XXXXXX=13 */
+		bool is_timestamp = (len == 14);
+		bool is_rec_prefix = (len >= 7 && strncmp(entry.name, "REC_", 4) == 0);
+
+		if (!is_timestamp && !is_rec_prefix) {
 			continue;
 		}
 

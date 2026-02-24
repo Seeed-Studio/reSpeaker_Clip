@@ -50,7 +50,8 @@ struct synced_time {
     uint8_t hour;
     uint8_t min;
     uint8_t sec;
-    bool valid;         /* True if time has been synchronized */
+    int64_t base_uptime_ms;  /* Uptime when time was set */
+    bool valid;              /* True if time has been synchronized */
 };
 
 /**
@@ -91,6 +92,20 @@ extern uint32_t g_recording_time;
 
 /* Synchronized time from BLE */
 extern struct synced_time g_synced_time;
+
+/**
+ * @brief Get current synchronized time
+ *
+ * @param out_year Output year
+ * @param out_month Output month
+ * @param out_day Output day
+ * @param out_hour Output hour
+ * @param out_min Output minute
+ * @param out_sec Output second
+ * @return true if time is valid, false otherwise
+ */
+bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_day,
+                           uint8_t *out_hour, uint8_t *out_min, uint8_t *out_sec);
 
 /**
  * @brief Initialize clip recorder application

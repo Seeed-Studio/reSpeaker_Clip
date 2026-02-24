@@ -236,13 +236,13 @@ int audio_start_recording(enum audio_mode mode)
 	current_file_index = 1;
 	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
 
-	/* Generate session ID */
-	if (g_synced_time.valid) {
-		/* Use BLE synchronized time: YYYYMMDDHHMMSS */
+	/* Generate session ID using current synchronized time */
+	uint16_t year, month, day, hour, min, sec;
+	if (clip_get_current_time(&year, &month, &day, &hour, &min, &sec)) {
+		/* Use synchronized time: YYYYMMDDHHMMSS (14 digits) */
 		snprintf(current_session_id, sizeof(current_session_id),
 			"%04d%02d%02d%02d%02d%02d",
-			g_synced_time.year, g_synced_time.month, g_synced_time.day,
-			g_synced_time.hour, g_synced_time.min, g_synced_time.sec);
+			year, month, day, hour, min, sec);
 	} else {
 		/* Fallback: use incrementing counter */
 		snprintf(current_session_id, sizeof(current_session_id),

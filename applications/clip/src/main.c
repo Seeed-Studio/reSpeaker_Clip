@@ -30,6 +30,78 @@ struct device_status g_status;
 uint32_t g_recording_time = 0;
 struct synced_time g_synced_time = {0};
 
+/* Get current synchronized time based on uptime offset */
+bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_day,
+                           uint8_t *out_hour, uint8_t *out_min, uint8_t *out_sec)
+{
+    uint32_t sec;
+
+    if (!g_synced_time.valid) {
+        return false;
+    }
+
+    /* Calculate elapsed time since sync */
+    int64_t current_uptime = k_uptime_get();
+    int64_t elapsed_ms = current_uptime - g_synced_time.base_uptime_ms;
+
+    if (elapsed_ms < 0) {
+        elapsed_ms = 0;
+    }
+
+    /* Convert to seconds */
+    uint32_t elapsed_sec = (uint32_t)(elapsed_ms / 1000);
+
+    /* Start from synced time */
+    uint16_t year = g_synced_time.year;
+    uint8_t month = g_synced_time.month;
+    uint8_t day = g_synced_time.day;
+    uint8_t hour = g_synced_time.hour;
+    uint8_t min = g_synced_time.min;
+    sec = g_synced_time.sec;
+
+    /* Add elapsed seconds */
+    sec += elapsed_sec;
+
+    /* Handle overflow */
+    while (sec >= 60) {
+        sec -= 60;
+        min++;
+    }
+    while (min >= 60) {
+        min -= 60;
+        hour++;
+    }
+    while (hour >= 24) {
+        hour -= 24;
+        day++;
+    }
+
+    /* Simple day overflow handling (assumes 30 days per month for simplicity) */
+    uint8_t days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    /* Simple leap year check */
+    if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
+        days_in_month[1] = 29;
+    }
+
+    while (day > days_in_month[month - 1]) {
+        day -= days_in_month[month - 1];
+        month++;
+        if (month > 12) {
+            month = 1;
+            year++;
+        }
+    }
+
+    *out_year = year;
+    *out_month = month;
+    *out_day = day;
+    *out_hour = hour;
+    *out_min = min;
+    *out_sec = (uint8_t)sec;
+
+    return true;
+}
+
 /* Audio recording thread */
 #define AUDIO_STACK_SIZE 32768
 #define AUDIO_PRIORITY 5
