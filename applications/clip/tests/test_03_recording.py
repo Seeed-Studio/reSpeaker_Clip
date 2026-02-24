@@ -393,37 +393,58 @@ class ClipClient:
         return total_downloaded > 0
 
     async def run_test(self):
-        """Run recording and download test"""
+        """Run recording with simultaneous transfer - manual stop with Enter key"""
         try:
             print("\n" + "="*50)
-            print("Recording and File Transfer Test")
+            print("Recording and Simultaneous Transfer Test")
             print("="*50)
 
             # Set time first
             if not await self.set_time():
                 return
 
-            # Start recording (5 seconds)
-            success, session = await self.start_recording(duration=5)
-            if not success:
+            # Start recording (no time limit - wait for user to stop)
+            print("\n=== Starting recording ===")
+            print("Note: Recording will continue until you press Enter")
+            response = await self.send_command("AT+START", timeout=10)
+            if not response.get("ok"):
+                print(f"✗ Failed to start: {response.get('error')}")
                 return
 
-            # List sessions
-            sessions = await self.list_sessions()
+            session = str(response.get("session", ""))
+            print(f"✓ Recording started, session: {session}")
 
-            # Download the session we just recorded
-            if session:
-                await self.download_session(session)
+            # Start transfer immediately in background
+            print("\n=== Starting simultaneous transfer ===")
+            print("Transfer will continue in background as you record...")
+            download_task = asyncio.create_task(self.download_session(session))
+
+            # Wait for user to press Enter to stop
+            print("\nRecording... Press Enter to stop:")
+            input()
+
+            # Stop recording
+            print("\n=== Stopping recording ===")
+            response = await self.send_command("AT+STOP")
+            if response.get("ok"):
+                print("✓ Recording stopped")
+            else:
+                print(f"✗ Failed to stop: {response.get('error')}")
+
+            # Wait for transfer to complete
+            print("\n=== Waiting for transfer to complete ===")
+            print("(This may take a while if you recorded for a long time)")
+            await download_task
 
             print("\n" + "="*50)
-            print("Download complete!")
+            print("Test complete!")
             print("="*50)
             print(f"\nFiles saved to: {DOWNLOAD_DIR.absolute()}/")
 
             if HAS_OPUSLIB:
                 print("Note: Opus files have been automatically decoded to WAV.")
             else:
-                print("\nTo decode Opus files to WAV:")
+                print("\nTo decode Opus files manually:")
                 print("  ffmpeg -f opus -i merged.opus -ar 16000 output.wav")
                 print("  (Windows users: download ffmpeg from https://ffmpeg.org/)")
 

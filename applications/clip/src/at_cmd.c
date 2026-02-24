@@ -1045,12 +1045,7 @@ static int cmd_download(const struct at_command *cmd, char **response)
         return json_create_error("Failed to start transfer", response);
     }
 
-    /* Transition to transmitting state */
-    err = state_transition(CLIP_STATE_TRANSMITTING);
-    if (err != 0) {
-        return json_create_error("State transition failed", response);
-    }
-
+    /* Note: Transfer is a background operation, does not change state */
     return json_create_success(NULL, response);
 }
 

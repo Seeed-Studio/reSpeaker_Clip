@@ -245,11 +245,32 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 			ret = transfer_next_file();
 			if (ret != 0) {
 				if (ret == -ENOENT) {
-					/* No more files, transfer complete */
-					current_transfer.state = TRANSFER_STATE_COMPLETED;
-					LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
-					transfer_cleanup();
-					continue;  /* Wait for next transfer */
+					/* No more files at this moment */
+					/* Check if session is closed (recording stopped) */
+					if (storage_session_is_closed(current_transfer.session_id)) {
+						/* Session closed, transfer complete */
+						current_transfer.state = TRANSFER_STATE_COMPLETED;
+						LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
+						transfer_cleanup();
+						continue;  /* Wait for next transfer */
+					} else {
+						/* Session still recording, wait for more files */
+						LOG_INF("Session still recording, waiting for new files...");
+						/* Refresh file list and try again */
+						ret = storage_list_session_files(current_transfer.session_id,
+						                                 current_transfer.file_list,
+						                                 TRANSFER_MAX_FILES);
+						if (ret > 0) {
+							/* Update total files and file index */
+							current_transfer.total_files = ret;
+							/* Reset file index to start from beginning */
+							current_transfer.file_index = 0;
+							LOG_INF("Found %d new files, continuing transfer", ret);
+						}
+						/* Wait a bit before checking again */
+						k_sleep(K_MSEC(500));
+						continue;
+					}
 				} else {
 					current_transfer.state = TRANSFER_STATE_ERROR;
 					LOG_ERR("Transfer error: %d", ret);

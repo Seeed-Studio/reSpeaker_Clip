@@ -252,9 +252,6 @@ int audio_start_recording(enum audio_mode mode)
 
 	LOG_INF("Session ID: %s", current_session_id);
 
-	/* Initialize bookmarks for this session */
-	bookmarks_init(current_session_id);
-
 	/* Create session directory and first file */
 	if (storage_enabled && storage_is_mounted()) {
 		/* Create session directory */
@@ -262,6 +259,9 @@ int audio_start_recording(enum audio_mode mode)
 		if (ret != 0) {
 			LOG_WRN("Failed to create session directory: %d", ret);
 		} else {
+			/* Initialize bookmarks for this session AFTER directory exists */
+			bookmarks_init(current_session_id);
+
 			/* Create first file */
 			ret = storage_create_file(&current_storage_file,
 				current_session_id, current_file_index);
@@ -274,6 +274,9 @@ int audio_start_recording(enum audio_mode mode)
 					current_storage_file.filename);
 			}
 		}
+	} else {
+		/* Initialize bookmarks even without storage */
+		bookmarks_init(current_session_id);
 	}
 
 	/* Start DMIC */

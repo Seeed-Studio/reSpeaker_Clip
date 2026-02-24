@@ -219,4 +219,14 @@ bool storage_get_writing_file(char *out_session, char *out_filename,
  */
 void storage_set_writing_file(const char *session_id, const char *filename);
 
+/**
+ * @brief Check if session is closed (recording stopped)
+ *
+ * Session is considered closed if session.json exists.
+ *
+ * @param session_id Session ID to check
+ * @return true if session is closed, false if still recording
+ */
+bool storage_session_is_closed(const char *session_id);
+
 #endif /* STORAGE_H */

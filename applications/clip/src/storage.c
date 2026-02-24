@@ -802,3 +802,20 @@ bool storage_get_writing_file(char *out_session, char *out_filename,
 
 	return is_writing;
 }
+
+bool storage_session_is_closed(const char *session_id)
+{
+	char filepath[128];
+	struct fs_dirent entry;
+	int rc;
+
+	if (!sd_mounted || !session_id) {
+		return false;
+	}
+
+	/* Session is closed if session.json exists */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	rc = fs_stat(filepath, &entry);
+
+	return (rc == 0);
+}
