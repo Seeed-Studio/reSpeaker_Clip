@@ -19,36 +19,37 @@ source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
 
 ## Building
 
-To properly load custom board definitions, libraries, and drivers, use `ZEPHYR_EXTRA_MODULES` environment variable.
+Set the `ZEPHYR_EXTRA_MODULES` environment variable to enable Kconfig to discover custom modules (board, lib, drivers). This must be an environment variable, not a CMake parameter, because Kconfig module discovery happens before CMake configuration.
 
-### Method 1: Using the build script (Recommended)
-
-```sh
-./build.sh samples/hello_world
-```
-
-### Method 2: Using environment variables
-
-Set environment variable once per terminal session:
+### Building the Main Application
 
 ```sh
-# Set module path
+# Set environment (once per terminal session)
+source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
 export ZEPHYR_EXTRA_MODULES=$(pwd)
 
-# Build
-source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
-west build --build-dir build --pristine --board clip/nrf5340/cpuapp samples/hello_world
+# Build main application
+west build --build-dir build-clip --board clip/nrf5340/cpuapp applications/clip
+
+# Clean build
+west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applications/clip
+```
+
+### Building Sample Applications
+
+```sh
+# Build a sample
+west build --build-dir build --board clip/nrf5340/cpuapp samples/hello_world
 ```
 
 ### Build Parameters
 
-| Method | Purpose |
-|--------|---------|
-| `export ZEPHYR_EXTRA_MODULES` | **Environment variable** - enables Kconfig to discover custom modules (board, lib, drivers) |
+| Parameter | Purpose |
+|-----------|---------|
+| `export ZEPHYR_EXTRA_MODULES=$(pwd)` | Enables Kconfig to discover custom modules |
+| `--board clip/nrf5340/cpuapp` | Board identifier (NOT `respeaker/...`) |
 
-**Note**: The `zephyr/module.yml` already configures `board_root` and `dts_root`, so only `ZEPHYR_EXTRA_MODULES` environment variable is needed. It must be set as environment variable (not `-DZEPHYR_EXTRA_MODULES`) because Kconfig module discovery happens before CMake.
-
-**Board Name**: The correct board identifier is `clip/nrf5340/cpuapp` (not `respeaker/nrf5340/cpuapp`).
+**Note**: The `zephyr/module.yml` already configures `board_root` and `dts_root`.
 
 ### Flash to device
 
@@ -56,7 +57,7 @@ west build --build-dir build --pristine --board clip/nrf5340/cpuapp samples/hell
 
 ```sh
 # Flash and reset in one command
-west flash && nrfutil device reset
+west flash --build-dir build-clip && nrfutil device reset
 ```
 
 **Note**: `west flash --reset` does NOT work on this board. Use `nrfutil device reset` which communicates via USB/serial with the bootloader.
@@ -75,12 +76,12 @@ When writing code, building, flashing, and testing:
 
 3. **Build**:
    ```sh
-   west build --build-dir build --board clip/nrf5340/cpuapp samples/<app_name>
+   west build --build-dir build-clip --board clip/nrf5340/cpuapp applications/clip
    ```
 
 4. **Flash and reset**:
    ```sh
-   west flash && nrfutil device reset
+   west flash --build-dir build-clip && nrfutil device reset
    ```
 
 5. **Test and verify**
@@ -91,16 +92,19 @@ When writing code, building, flashing, and testing:
 
 ```sh
 # Incremental build (faster)
-west build
+west build --build-dir build-clip
 
 # Clean build
-west build --pristine
+west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applications/clip
 
 # Flash only (no reset)
-west flash
+west flash --build-dir build-clip
 
 # Reset only
 nrfutil device reset
+
+# Flash and reset in one command
+west flash --build-dir build-clip && nrfutil device reset
 
 # View serial output
 minicom -D /dev/ttyACM0 -b 115200
@@ -109,6 +113,8 @@ screen /dev/ttyACM0 115200
 ```
 
 ## Testing
+
+### Hardware Tests (Zephyr sysbuild)
 
 The project includes a multi-image test suite using Zephyr's sysbuild framework:
 
@@ -119,6 +125,55 @@ west flash --build-dir build-test && nrfutil device reset
 ```
 
 Test coverage includes BLE, WiFi, button input, SD card, and microphone functionality.
+
+### BLE Protocol Tests (Python)
+
+Use the Python test script for BLE AT command protocol testing:
+
+```sh
+# Install dependencies
+pip install -r tests/requirements.txt
+
+# Run automated tests
+python tests/ble_test.py
+
+# Interactive mode for manual testing
+python tests/ble_test.py --interactive
+
+# Test specific device
+python tests/ble_test.py --device AA:BB:CC:DD:EE:FF
+```
+
+## Documentation
+
+- `docs/protocol.md` - Complete BLE AT command protocol specification (command reference, response formats, error codes, state machines)
+- `docs/architecture.md` - System architecture design (layered architecture, module decomposition, data flow, thread architecture)
+- `docs/requirements.md` - Product requirements document
+- `docs/development.md` - Development log with implementation progress and notes
+
+## Main Application Architecture
+
+The main application (`applications/clip/`) implements a BLE audio recording device with AT command control:
+
+**Core Modules:**
+- `ble_svc.c` - BLE GATT service with AT command protocol
+- `at_cmd.c` - AT command parser and handlers (GSTAT, VERSION, START, STOP, MARK, BITRATE, MODE, DOWNLOAD, etc.)
+- `state_machine.c` - Device state management (IDLE, RECORDING, TRANSMITTING, PAUSED, ERROR)
+- `config.c` - NVS-based persistent configuration
+
+**Audio Pipeline:**
+- `audio.c` - PDM microphone capture, Opus encoding, SpeexDSP preprocessing
+- Audio modes: mono (L channel), merge (L+R mixed), stereo
+
+**Storage & Transfer:**
+- `storage.c` - SD card file management (FAT filesystem)
+- `transfer.c` - BLE file transfer with pause/resume/cancel support
+- `bookmarks.c` - Binary bookmark storage (marks.bin format)
+
+**User Interface:**
+- `button_handler.c` - Button input with multi-press support
+- `display_ctrl.c` - Display control
+- `battery.c` - Battery monitoring via NPM1300 PMIC
 
 ## Architecture
 
@@ -207,12 +262,17 @@ CONFIG_LUA=y
 ## Project Structure
 
 - `boards/seeed/clip/` - Board Support Package (device trees, Kconfig, CMake)
-- `samples/` - Example applications
-- `applications/` - Main application code (currently empty)
-- `drivers/` - Custom device drivers (input, display)
+- `applications/clip/` - Main application (BLE recording with AT command protocol)
+  - `src/` - Source files: main.c, ble_svc.c, at_cmd.c, audio.c, storage.c, transfer.c, bookmarks.c, battery.c, button_handler.c, display_ctrl.c, state_machine.c, config.c, json_helper.c
+  - `include/` - Headers for each module
+  - `prj.conf` - Application-specific Kconfig
+- `samples/` - Example applications (hello_world, button_demo, lua_repl, opus_encode, t5838)
+- `drivers/` - Custom device drivers (input)
 - `lib/` - Third-party libraries (opus, speexdsp, lua)
 - `dts/` - Additional device tree overlays
-- `tests/clip/` - Multi-image test suite
+- `tests/clip/` - Multi-image test suite (BLE, WiFi, button, SD card, microphone)
+- `tests/ble_test.py` - Python BLE protocol test script
+- `docs/` - Protocol specification (`protocol.md`), architecture (`architecture.md`), requirements (`requirements.md`), development log (`development.md`)
 
 ## Adding New Code
 

@@ -13,9 +13,9 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 
 /* Factory default configuration */
 static const struct clip_config factory_config = {
-    .bitrate = 24000,
-    .complexity = 5,
-    .mode = MODE_NORMAL,
+    .bitrate = 48000,  /* Enhanced mode uses higher bitrate */
+    .complexity = 1,   /* Lower complexity for better performance */
+    .mode = MODE_ENHANCED,  /* Default to enhanced (stereo) mode */
     .noise_suppress = 0,
     .chunk_size = 500,
     .auto_delete_days = -1,  /* Disabled by default */

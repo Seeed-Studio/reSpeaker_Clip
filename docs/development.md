@@ -1,3 +1,89 @@
+## 2025-02-24 - Fix Recording File Storage Structure
+
+### Completed Tasks
+
+#### 1. Storage Module Updates (storage.c/h)
+- ✅ Added `storage_create_session()` - Creates `/SD:/REC/<session_id>/` directory
+- ✅ Modified `storage_create_file()` - New signature: `(file, session_id, file_index)`
+  - File path: `/SD:/REC/<session_id>/NNN.opus`
+- ✅ Added `storage_close_session()` - Creates `session.json` and `files.lst`
+- ✅ Updated `storage_list_sessions()` - Scans `/SD:/REC/` directory
+- ✅ Updated all session-related functions with new path structure
+
+#### 2. Audio Module Updates (audio.c)
+- ✅ Modified session ID generation:
+  - With BLE time sync: `YYYYMMDDHHMMSS` (14 digits)
+  - Fallback: `REC_XXXXXX` (incrementing counter)
+- ✅ Added `session_counter` for fallback IDs
+- ✅ Calls `storage_create_session()` on recording start
+- ✅ Calls `storage_close_session()` on recording stop
+- ✅ Updated segmentation logic with new file naming
+
+#### 3. Bookmarks Module Updates (bookmarks.c)
+- ✅ Updated bookmark storage path to `/SD:/REC/<session_id>/marks.bin`
+
+#### 4. AT Command Updates (at_cmd.c)
+- ✅ Added `AT+SETTIME` command - Sets synchronized time from phone
+  - Format: `AT+SETTIME=2025-02-24T14:30:00Z`
+  - Stores time in `g_synced_time` global variable
+
+#### 5. Transfer Module Updates (transfer.c)
+- ✅ Updated file path to `/SD:/REC/<session_id>/<filename>`
+
+#### 6. Global Variables (main.c, clip.h)
+- ✅ Added `struct synced_time` definition
+- ✅ Added `g_synced_time` global variable
+
+### New File Structure
+
+```
+/SD:/REC/YYYYMMDDHHMMSS/    <- Session directory
+├── session.json            <- Session metadata
+├── files.lst               <- File list with sizes
+├── marks.bin               <- Bookmark data
+├── 001.opus                <- Audio segments
+├── 002.opus
+└── ...
+```
+
+### Fallback Behavior
+
+When BLE time not synchronized:
+- Session ID: `REC_XXXXXX` (incrementing counter)
+- Same directory structure applies
+
+### Problem Analysis (Original)
+
+**Previous Implementation:**
+```
+/SD:/
+├── rec_00000009_normal.opus  <- Directly in root directory
+├── rec_00000000_segment.opus
+└── ...
+```
+
+**Issues Fixed:**
+1. ✅ Files now stored in session directories
+2. ✅ File naming: `NNN.opus` (001.opus, 002.opus, etc.)
+3. ✅ Session ID format: `YYYYMMDDHHMMSS` (14 digits)
+4. ✅ Added session metadata files
+5. ✅ Bookmark storage in session directory
+
+### Testing Required
+
+1. Start recording -> Check `/SD:/REC/YYYYMMDDHHMMSS/` directory created
+2. Recording exceeds 60 seconds -> Check `002.opus` created
+3. Stop recording -> Check `session.json` and `files.lst` created
+4. Add bookmark -> Check `marks.bin` created
+5. AT+LIST -> Check correct session list returned
+
+### Build Status
+
+- Memory: 308 KB FLASH / 224 KB RAM
+- Build: ✅ Successful
+
+---
+
 ## 2025-02-20 - Phase 2: Audio Recording Implementation
 
 ### Completed Tasks

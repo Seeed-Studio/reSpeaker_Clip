@@ -9,3 +9,8 @@
 / {
     /* Reserved for future use - can add aliases or properties here */
 };
+
+
+&uart0 {
+	current-speed = <921600>;
+};
