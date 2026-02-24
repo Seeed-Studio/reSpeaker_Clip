@@ -746,3 +746,53 @@ bool storage_session_exists(const char *session_id)
 
 	return (rc == 0 && entry.type == FS_DIR_ENTRY_DIR);
 }
+
+/* Track current writing file info */
+static char writing_session[32] = {0};
+static char writing_filename[32] = {0};
+
+void storage_set_writing_file(const char *session_id, const char *filename)
+{
+	if (session_id && filename) {
+		strncpy(writing_session, session_id, sizeof(writing_session) - 1);
+		writing_session[sizeof(writing_session) - 1] = '\0';
+		strncpy(writing_filename, filename, sizeof(writing_filename) - 1);
+		writing_filename[sizeof(writing_filename) - 1] = '\0';
+		LOG_DBG("Writing file set: %s/%s", writing_session, writing_filename);
+	} else {
+		/* Clear writing file info */
+		writing_session[0] = '\0';
+		writing_filename[0] = '\0';
+		LOG_DBG("Writing file cleared");
+	}
+}
+
+bool storage_file_is_writing(const char *session_id, const char *filename)
+{
+	if (!session_id || !filename) {
+		return false;
+	}
+
+	/* Check if session and filename match current writing file */
+	return (strcmp(writing_session, session_id) == 0 &&
+	        strcmp(writing_filename, filename) == 0);
+}
+
+bool storage_get_writing_file(char *out_session, char *out_filename,
+                              size_t session_size, size_t filename_size)
+{
+	bool is_writing = (writing_session[0] != '\0');
+
+	if (is_writing) {
+		if (out_session && session_size > 0) {
+			strncpy(out_session, writing_session, session_size - 1);
+			out_session[session_size - 1] = '\0';
+		}
+		if (out_filename && filename_size > 0) {
+			strncpy(out_filename, writing_filename, filename_size - 1);
+			out_filename[filename_size - 1] = '\0';
+		}
+	}
+
+	return is_writing;
+}

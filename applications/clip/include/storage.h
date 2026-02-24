@@ -188,4 +188,35 @@ int storage_delete_session(const char *session_id);
  */
 bool storage_session_exists(const char *session_id);
 
+/**
+ * @brief Check if file is currently being written
+ *
+ * @param session_id Session ID
+ * @param filename File name (e.g., "001.opus")
+ * @return true if file is open/writing, false otherwise
+ */
+bool storage_file_is_writing(const char *session_id, const char *filename);
+
+/**
+ * @brief Get currently writing file info (if any)
+ *
+ * @param out_session Output session ID buffer (can be NULL)
+ * @param out_filename Output filename buffer (can be NULL)
+ * @param session_size Size of session_id buffer
+ * @param filename_size Size of filename buffer
+ * @return true if file is being written, false otherwise
+ */
+bool storage_get_writing_file(char *out_session, char *out_filename,
+                              size_t session_size, size_t filename_size);
+
+/**
+ * @brief Set current writing file info
+ *
+ * Called by audio module to track which file is being written.
+ *
+ * @param session_id Session ID
+ * @param filename Filename (e.g., "001.opus")
+ */
+void storage_set_writing_file(const char *session_id, const char *filename);
+
 #endif /* STORAGE_H */

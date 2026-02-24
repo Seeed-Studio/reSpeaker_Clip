@@ -71,6 +71,11 @@ int transfer_start(const char *session_id, const char *filename)
 	strncpy(current_transfer.session_id, session_id, sizeof(current_transfer.session_id) - 1);
 
 	if (filename) {
+		/* Transfer single file - check if file is being written */
+		if (storage_file_is_writing(session_id, filename)) {
+			LOG_ERR("File is currently being written: %s/%s", session_id, filename);
+			return -EBUSY;
+		}
 		/* Transfer single file */
 		strncpy(current_transfer.current_file, filename, sizeof(current_transfer.current_file) - 1);
 		current_transfer.total_files = 1;
@@ -221,6 +226,17 @@ static int transfer_next_file(void)
 
 	/* If filename is already set, open it */
 	if (current_transfer.current_file[0] != '\0') {
+		/* Check if file is being written before opening */
+		if (storage_file_is_writing(current_transfer.session_id,
+			current_transfer.current_file)) {
+			LOG_WRN("File is being written, skipping: %s/%s",
+				 current_transfer.session_id, current_transfer.current_file);
+			/* Clear current file and signal next file */
+			current_transfer.current_file[0] = '\0';
+			/* Try to get next file */
+			return transfer_next_file();
+		}
+
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 			 current_transfer.session_id, current_transfer.current_file);
 	} else {

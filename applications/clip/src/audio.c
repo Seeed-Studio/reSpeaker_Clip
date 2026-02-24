@@ -268,6 +268,9 @@ int audio_start_recording(enum audio_mode mode)
 				LOG_WRN("Failed to create storage file: %d", ret);
 			} else {
 				LOG_INF("Recording to: %s", current_storage_file.filename);
+				/* Mark this file as being written */
+				storage_set_writing_file(current_session_id,
+					current_storage_file.filename);
 			}
 		}
 	}
@@ -279,6 +282,7 @@ int audio_start_recording(enum audio_mode mode)
 		/* Close file if opened */
 		if (current_storage_file.is_open) {
 			storage_close_file(&current_storage_file);
+			storage_set_writing_file(NULL, NULL);
 		}
 		return ret;
 	}
@@ -314,6 +318,8 @@ int audio_stop_recording(void)
 		if (ret != 0) {
 			LOG_WRN("Failed to close storage file: %d", ret);
 		}
+		/* Clear writing file mark */
+		storage_set_writing_file(NULL, NULL);
 		memset(&current_storage_file, 0, sizeof(current_storage_file));
 	}
 
@@ -563,6 +569,8 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 					current_storage_file.filename,
 					current_storage_file.bytes_written);
 				storage_close_file(&current_storage_file);
+				/* Clear old writing file mark */
+				storage_set_writing_file(NULL, NULL);
 			}
 
 			/* Create new file with incremented index */
