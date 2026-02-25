@@ -15,6 +15,7 @@
 #include <stdlib.h>
 
 #include "storage.h"
+#include "json_helper.h"
 
 LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
 
@@ -332,7 +333,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 	if (rc == 0) {
 		char json_buf[256];
 		int len = snprintf(json_buf, sizeof(json_buf),
-			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u}\n",
+			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u,\"synced\":0}\n",
 			session_id, duration_sec, file_count);
 		fs_write(&file, json_buf, len);
 		fs_close(&file);
@@ -756,6 +757,57 @@ int storage_list_session_files(const char *session_id, char (*files)[32], int ma
 	return count;
 }
 
+int storage_get_session_info(const char *session_id, struct storage_session_info *info)
+{
+	char session_path[64];
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id || !info) {
+		return -EINVAL;
+	}
+
+	/* Initialize output */
+	memset(info, 0, sizeof(*info));
+	strncpy(info->session_id, session_id, sizeof(info->session_id) - 1);
+
+	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
+
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, session_path);
+	if (rc != 0) {
+		LOG_ERR("Failed to open session directory: %d", rc);
+		return -ENOENT;
+	}
+
+	/* Count files and calculate total size */
+	while (true) {
+		rc = fs_readdir(&dirp, &entry);
+		if (rc != 0 || entry.name[0] == 0) {
+			break;
+		}
+
+		/* Only count .opus files */
+		if (entry.type == FS_DIR_ENTRY_FILE &&
+		    strstr(entry.name, ".opus") != NULL) {
+			info->file_count++;
+			info->total_bytes += entry.size;
+		}
+	}
+
+	fs_closedir(&dirp);
+
+	/* Get synced files count */
+	info->synced_files = (uint32_t)storage_get_synced_files(session_id);
+
+	return 0;
+}
+
 int storage_delete_session(const char *session_id)
 {
 	char session_path[64];
@@ -886,4 +938,172 @@ bool storage_session_is_closed(const char *session_id)
 	rc = fs_stat(filepath, &entry);
 
 	return (rc == 0);
+}
+
+int storage_set_synced_files(const char *session_id, uint32_t count)
+{
+	char filepath[128];
+	struct fs_file_t file;
+	int rc;
+	char json_buf[256];
+	int json_len;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	/* Read existing session.json */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_READ);
+	if (rc != 0) {
+		return -ENOENT;
+	}
+
+	json_len = fs_read(&file, json_buf, sizeof(json_buf) - 1);
+	fs_close(&file);
+	if (json_len <= 0) {
+		return -EIO;
+	}
+	json_buf[json_len] = '\0';
+
+	/* Parse and update synced field */
+	char synced_str[32];
+	if (json_parse_helper(json_buf, "synced", synced_str, sizeof(synced_str))) {
+		/* Field exists, update in-place */
+		uint32_t synced = atoi(synced_str);
+		if (count > synced) {
+			/* Only update if new value is greater */
+			char new_synced_str[16];
+			snprintf(new_synced_str, sizeof(new_synced_str), "%u", count);
+
+			/* Find and replace "synced":XXX */
+			char *synced_pos = strstr(json_buf, "\"synced\":");
+			if (synced_pos) {
+				char *value_start = strchr(synced_pos, ':');
+				if (value_start) {
+					value_start++;  /* Skip ':' */
+					char *value_end = strchr(value_start, ',');
+					char *end = strchr(value_start, '}');
+
+					if (value_end) {
+						/* Found comma, replace value */
+						int prefix_len = value_start - json_buf;
+						int suffix_len = strlen(value_end);
+						char new_json[256];
+
+						snprintf(new_json, sizeof(new_json),
+							"%.*s%s%.*s",
+							prefix_len, json_buf,
+							new_synced_str,
+							suffix_len, value_end);
+						json_len = strlen(new_json);
+
+						/* Write updated file */
+						fs_file_t_init(&file);
+						rc = fs_open(&file, filepath, FS_O_WRITE | FS_O_TRUNC);
+						if (rc == 0) {
+							fs_write(&file, new_json, json_len);
+							fs_close(&file);
+							LOG_INF("Updated synced files: %s -> %u", session_id, count);
+							return 0;
+						}
+					} else if (end) {
+						/* End of object, replace value */
+						int prefix_len = value_start - json_buf;
+						char new_json[256];
+
+						snprintf(new_json, sizeof(new_json),
+							"%.*s%s}",
+							prefix_len, json_buf,
+							new_synced_str);
+						json_len = strlen(new_json);
+
+						/* Write updated file */
+						fs_file_t_init(&file);
+						rc = fs_open(&file, filepath, FS_O_WRITE | FS_O_TRUNC);
+						if (rc == 0) {
+							fs_write(&file, new_json, json_len);
+							fs_close(&file);
+							LOG_INF("Updated synced files: %s -> %u", session_id, count);
+							return 0;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/* Field doesn't exist or parse failed, recreate file */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
+	if (rc == 0) {
+		/* Keep existing fields, add synced */
+		char new_json[256];
+		snprintf(new_json, sizeof(new_json),
+			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u,\"synced\":%u}\n",
+			session_id, 0, 0, count);
+		json_len = strlen(new_json);
+		fs_write(&file, new_json, json_len);
+		fs_close(&file);
+		return 0;
+	}
+
+	return -EIO;
+}
+
+int storage_get_synced_files(const char *session_id)
+{
+	char filepath[128];
+	struct fs_dirent entry;
+	int rc;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	/* Check if session.json exists */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	rc = fs_stat(filepath, &entry);
+	if (rc != 0) {
+		return 0;  /* No synced files if session.json doesn't exist */
+	}
+
+	/* Read session.json and parse synced field */
+	struct fs_file_t file;
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_READ);
+	if (rc == 0) {
+		char json_buf[256];
+		char synced_str[32];
+		int json_len = fs_read(&file, json_buf, sizeof(json_buf) - 1);
+		fs_close(&file);
+		if (json_len > 0) {
+			json_buf[json_len] = '\0';
+			if (json_parse_helper(json_buf, "synced", synced_str, sizeof(synced_str))) {
+				uint32_t synced = atoi(synced_str);
+				return (int)synced;
+			}
+		}
+	}
+
+	return 0;  /* Default to 0 if field not found */
+}
+
+int storage_increment_synced(const char *session_id)
+{
+	int current = storage_get_synced_files(session_id);
+	if (current < 0) {
+		return current;
+	}
+	return storage_set_synced_files(session_id, (uint32_t)(current + 1));
 }

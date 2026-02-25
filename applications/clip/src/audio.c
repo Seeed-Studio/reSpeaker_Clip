@@ -27,6 +27,7 @@
 #include "storage.h"
 #include "bookmarks.h"
 #include "ble_svc.h"
+#include "transfer.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
@@ -87,9 +88,10 @@ static struct storage_file current_storage_file = {0};
 static bool storage_enabled = true;
 
 /* Recording segmentation */
-#define SEGMENT_DURATION_SEC 10  /* 10 seconds per file for testing */
 static uint32_t recording_frame_count = 0;
 static uint32_t current_file_index = 1;
+static uint32_t file_start_frame_count = 0;  /* Frame count when current file started */
+static bool was_transferring = false;  /* Track previous transfer state */
 
 /* Current session ID for bookmarks */
 static char current_session_id[32] = {0};
@@ -234,6 +236,8 @@ int audio_start_recording(enum audio_mode mode)
 	/* Reset recording counters */
 	recording_frame_count = 0;
 	current_file_index = 1;
+	file_start_frame_count = 0;
+	was_transferring = false;
 	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
 
 	/* Generate session ID: always 14 digits */
@@ -573,13 +577,47 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		stats.total_bytes += encoded_bytes;
 		recording_frame_count++;
 
-		/* Check if we need to create a new file (segmentation) */
-		/* Only create new file after SEGMENT_DURATION_SEC, not on first frame */
-		uint32_t frames_per_file = SEGMENT_DURATION_SEC * (1000 / AUDIO_FRAME_MS);
-		if (recording_frame_count > 1 && recording_frame_count % frames_per_file == 1) {
+		/* Check if we need to create a new file (segmentation)
+		 * Use different segment durations based on transfer state:
+		 * - When transferring: shorter segments (CLIP_AUDIO_SEGMENT_DURATION_SYNC)
+		 * - When not transferring: longer segments (CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC)
+		 */
+		bool is_transferring = transfer_is_active();
+		uint32_t segment_duration_sec;
+
+		if (is_transferring) {
+			segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_SYNC;
+		} else {
+			segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC;
+		}
+
+		/* Calculate frames per file based on current segment duration */
+		uint32_t frames_per_file = segment_duration_sec * (1000 / AUDIO_FRAME_MS);
+
+		/* Check for state transition: not transferring -> transferring
+		 * If current file duration exceeds sync segment duration, slice immediately
+		 */
+		if (was_transferring == false && is_transferring == true && recording_frame_count > 1) {
+			uint32_t current_file_frames = recording_frame_count - file_start_frame_count;
+			uint32_t sync_frames_per_file = CLIP_AUDIO_SEGMENT_DURATION_SYNC * (1000 / AUDIO_FRAME_MS);
+
+			if (current_file_frames >= sync_frames_per_file) {
+				/* File exceeds sync duration, slice immediately */
+				LOG_INF("Transfer started, slicing current file (%u frames >= %u sync frames)",
+					current_file_frames, sync_frames_per_file);
+				goto create_new_segment;
+			}
+		}
+
+		/* Update transfer state tracking */
+		was_transferring = is_transferring;
+
+		/* Regular segment check based on current segment duration */
+		if (recording_frame_count > 1 && (recording_frame_count - file_start_frame_count) >= frames_per_file) {
+create_new_segment:
 			/* Time to create a new segment file */
-			LOG_INF("Segment switch: frame %u, creating file #%u",
-				recording_frame_count, current_file_index + 1);
+			LOG_INF("Segment switch: frame %u, creating file #%u (duration: %us, transferring: %d)",
+				recording_frame_count, current_file_index + 1, segment_duration_sec, is_transferring);
 
 			if (current_storage_file.is_open) {
 				LOG_INF("Closing current segment: %s (%u bytes)",
@@ -611,6 +649,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 				/* Continue recording without storage */
 			} else {
 				LOG_INF("Created new segment: %s", current_storage_file.filename);
+				file_start_frame_count = recording_frame_count;
 			}
 		}
 

@@ -119,4 +119,74 @@ int clip_init(void);
  */
 void clip_main_loop(void);
 
+/* Thread configuration - configurable via prj.conf or Kconfig */
+#ifndef CONFIG_AUDIO_THREAD_PRIORITY
+#define CLIP_AUDIO_THREAD_PRIORITY        0
+#else
+#define CLIP_AUDIO_THREAD_PRIORITY        CONFIG_AUDIO_THREAD_PRIORITY
+#endif
+
+#ifndef CONFIG_TRANSFER_THREAD_PRIORITY
+#define CLIP_TRANSFER_THREAD_PRIORITY     7
+#else
+#define CLIP_TRANSFER_THREAD_PRIORITY     CONFIG_TRANSFER_THREAD_PRIORITY
+#endif
+
+#ifndef CONFIG_AT_CMD_THREAD_PRIORITY
+#define CLIP_AT_CMD_THREAD_PRIORITY       5
+#else
+#define CLIP_AT_CMD_THREAD_PRIORITY       CONFIG_AT_CMD_THREAD_PRIORITY
+#endif
+
+#ifndef CONFIG_BUTTON_WORK_PRIORITY
+#define CLIP_BUTTON_WORK_PRIORITY         5
+#else
+#define CLIP_BUTTON_WORK_PRIORITY         CONFIG_BUTTON_WORK_PRIORITY
+#endif
+
+/* Thread stack sizes */
+#ifndef CONFIG_AUDIO_STACK_SIZE
+#define CLIP_AUDIO_STACK_SIZE             32768
+#else
+#define CLIP_AUDIO_STACK_SIZE             CONFIG_AUDIO_STACK_SIZE
+#endif
+
+#ifndef CONFIG_TRANSFER_STACK_SIZE
+#define CLIP_TRANSFER_STACK_SIZE          4096
+#else
+#define CLIP_TRANSFER_STACK_SIZE          CONFIG_TRANSFER_STACK_SIZE
+#endif
+
+#ifndef CONFIG_AT_CMD_STACK_SIZE
+#define CLIP_AT_CMD_STACK_SIZE            8192
+#else
+#define CLIP_AT_CMD_STACK_SIZE            CONFIG_AT_CMD_STACK_SIZE
+#endif
+
+#ifndef CONFIG_BUTTON_WORK_STACK_SIZE
+#define CLIP_BUTTON_WORK_STACK_SIZE       16384
+#else
+#define CLIP_BUTTON_WORK_STACK_SIZE       CONFIG_BUTTON_WORK_STACK_SIZE
+#endif
+
+/* Audio segmentation - configurable via prj.conf or Kconfig */
+#ifndef CONFIG_AUDIO_SEGMENT_DURATION_SYNC
+#define CLIP_AUDIO_SEGMENT_DURATION_SYNC      60  /* seconds during sync */
+#else
+#define CLIP_AUDIO_SEGMENT_DURATION_SYNC      CONFIG_AUDIO_SEGMENT_DURATION_SYNC
+#endif
+
+#ifndef CONFIG_AUDIO_SEGMENT_DURATION_NO_SYNC
+#define CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC   600 /* seconds when not syncing */
+#else
+#define CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC   CONFIG_AUDIO_SEGMENT_DURATION_NO_SYNC
+#endif
+
+/* Transfer configuration - supports up to 2000 files for 18+ hours recording */
+#ifndef CONFIG_TRANSFER_MAX_FILES
+#define CLIP_TRANSFER_MAX_FILES            2000
+#else
+#define CLIP_TRANSFER_MAX_FILES            CONFIG_TRANSFER_MAX_FILES
+#endif
+
 #endif /* CLIP_H */

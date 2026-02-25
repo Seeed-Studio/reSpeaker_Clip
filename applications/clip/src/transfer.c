@@ -14,6 +14,7 @@
 #include "transfer.h"
 #include "storage.h"
 #include "ble_svc.h"
+#include "clip.h"
 
 LOG_MODULE_REGISTER(transfer, LOG_LEVEL_INF);
 
@@ -29,12 +30,9 @@ static char last_transferred_file[32] = {0};
 /* Transfer configuration */
 /* 240 bytes = 1 BLE notification (MTU 247 - 3 ATT header) for optimal throughput */
 #define TRANSFER_CHUNK_SIZE 240
-#define TRANSFER_THREAD_STACK_SIZE 4096
-/* Lower priority than audio thread (5) to prevent PDM RX queue overflow */
-#define TRANSFER_THREAD_PRIORITY 7
 
 /* Transfer thread stack */
-K_THREAD_STACK_DEFINE(transfer_thread_stack, TRANSFER_THREAD_STACK_SIZE);
+K_THREAD_STACK_DEFINE(transfer_thread_stack, CLIP_TRANSFER_STACK_SIZE);
 
 /* Transfer thread state */
 static struct k_thread transfer_thread_data;
@@ -61,10 +59,10 @@ int transfer_init(void)
 	/* Create transfer thread */
 	transfer_thread_id = k_thread_create(&transfer_thread_data,
 	                                     transfer_thread_stack,
-	                                     TRANSFER_THREAD_STACK_SIZE,
+	                                     CLIP_TRANSFER_STACK_SIZE,
 	                                     transfer_thread_main,
 	                                     NULL, NULL, NULL,
-                                     TRANSFER_THREAD_PRIORITY,
+                                     CLIP_TRANSFER_THREAD_PRIORITY,
 	                                     0, K_NO_WAIT);
 	if (transfer_thread_id == NULL) {
 		LOG_ERR("Failed to create transfer thread");
@@ -660,6 +658,9 @@ process_next_file:
 
 					/* Notify client that file transfer is complete */
 					ble_svc_send_file_complete(current_transfer.current_file);
+
+					/* Update synced files counter */
+					storage_increment_synced(current_transfer.session_id);
 
 					/* Close file */
 					fs_close(&transfer_file);

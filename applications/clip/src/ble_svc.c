@@ -14,6 +14,7 @@
 #include <string.h>
 #include "ble_svc.h"
 #include "at_cmd.h"
+#include "clip.h"
 
 LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
 
@@ -35,9 +36,7 @@ struct cmd_queue_item {
 K_MSGQ_DEFINE(cmd_msgq, sizeof(struct cmd_queue_item), CMD_QUEUE_SIZE, 4);
 
 /* AT command processor thread */
-#define AT_THREAD_STACK_SIZE 8192
-#define AT_THREAD_PRIORITY 5
-static K_THREAD_STACK_DEFINE(at_thread_stack, AT_THREAD_STACK_SIZE);
+static K_THREAD_STACK_DEFINE(at_thread_stack, CLIP_AT_CMD_STACK_SIZE);
 static struct k_thread at_thread_data;
 static k_tid_t at_thread_id;
 
@@ -367,9 +366,9 @@ int ble_svc_init(void)
 
     /* Start AT command processor thread */
     at_thread_id = k_thread_create(&at_thread_data, at_thread_stack,
-                                   AT_THREAD_STACK_SIZE,
+                                   CLIP_AT_CMD_STACK_SIZE,
                                    at_thread_main, NULL, NULL, NULL,
-                                   AT_THREAD_PRIORITY, 0, K_NO_WAIT);
+                                   CLIP_AT_CMD_THREAD_PRIORITY, 0, K_NO_WAIT);
     if (at_thread_id == NULL) {
         LOG_ERR("Failed to create AT command thread");
         return -ENOMEM;

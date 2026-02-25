@@ -21,10 +21,7 @@ LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
 static const struct device *button_dev = DEVICE_DT_GET(DT_NODELABEL(usr_btn));
 
 /* Work queue for deferred button actions (needs larger stack for audio operations) */
-#define BUTTON_WORK_STACK_SIZE 16384
-#define BUTTON_WORK_PRIORITY 5
-
-static K_THREAD_STACK_DEFINE(button_work_stack, BUTTON_WORK_STACK_SIZE);
+static K_THREAD_STACK_DEFINE(button_work_stack, CLIP_BUTTON_WORK_STACK_SIZE);
 static struct k_work_q button_work_q;
 static struct k_work button_start_work;
 static struct k_work button_stop_work;
@@ -50,7 +47,7 @@ int button_handler_init(void)
 
 	/* Initialize work queue for button actions */
 	k_work_queue_start(&button_work_q, button_work_stack,
-			   BUTTON_WORK_STACK_SIZE, BUTTON_WORK_PRIORITY, NULL);
+			   CLIP_BUTTON_WORK_STACK_SIZE, CLIP_BUTTON_WORK_PRIORITY, NULL);
 
 	/* Initialize work items */
 	k_work_init(&button_start_work, button_start_work_handler);

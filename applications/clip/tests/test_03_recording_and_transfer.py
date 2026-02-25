@@ -72,6 +72,7 @@ class ClipClient:
         self._progress_bar = None  # tqdm progress bar
         self._progress_lock = threading.Lock()  # Thread-safe progress updates
         self._last_progress_update = 0  # For throttling progress updates
+        self._transfer_complete = False  # Flag for transfer_complete event
 
     def stop_download(self):
         """Signal the download to stop after current file completes"""
@@ -161,6 +162,14 @@ class ClipClient:
                             self._last_filename = None
                         else:
                             print(f"\n  [DEBUG] Skipping save: match={filename == self._last_filename}, data_size={len(self.current_file_data)}", flush=True)
+
+                    elif event_type == "transfer_complete":
+                        # All files in session have been transferred
+                        session_id = event_data.get("session_id", "")
+                        files_count = event_data.get("files", 0)
+                        print(f"\n  [TRANSFER COMPLETE] Session: {session_id}, Files: {files_count}", flush=True)
+                        # Set a flag to indicate transfer is complete
+                        self._transfer_complete = True
 
                     elif event_type == "file_ready":
                         filename = event_data.get("filename", "")
@@ -397,6 +406,7 @@ class ClipClient:
         self.file_data = bytearray()
         self._stop_requested = False  # User pressed Enter
         self._recording_stopped = False  # AT+STOP was sent
+        self._transfer_complete = False  # Reset transfer complete flag
 
         # Start download
         print("  Starting download...", flush=True)
@@ -417,6 +427,11 @@ class ClipClient:
             # Continue until stop signal AND all files transferred
             while True:
                 await asyncio.sleep(1)
+
+                # Check if transfer is complete (all files transferred)
+                if self._transfer_complete:
+                    print("  ✓ All files transferred (received transfer_complete event)", flush=True)
+                    break
 
                 # Check if user requested stop (Enter pressed)
                 if self._stop_requested and not self._recording_stopped:
@@ -538,6 +553,7 @@ class ClipClient:
             self.file_data = bytearray()
             self._stop_requested = False
             self._recording_stopped = False
+            self._transfer_complete = False  # Reset transfer complete flag
 
             # Start or resume download
             if start_file:
@@ -569,6 +585,11 @@ class ClipClient:
             try:
                 while True:
                     await asyncio.sleep(1)
+
+                    # Check if transfer is complete (all files transferred)
+                    if self._transfer_complete:
+                        print("  ✓ All files transferred (received transfer_complete event)")
+                        break
 
                     # Check if connection is still alive by checking client status
                     if not self.client or not self.client.is_connected:

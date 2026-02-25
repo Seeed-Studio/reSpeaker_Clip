@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <zephyr/kernel.h>
+#include "clip.h"  /* For CLIP_TRANSFER_MAX_FILES */
 
 /* Transfer states */
 enum transfer_state {
@@ -27,7 +28,7 @@ enum transfer_direction {
 	TRANSFER_DIR_DOWNLOAD  /* App -> Device (upload) */
 };
 
-#define TRANSFER_MAX_FILES 64
+#define TRANSFER_MAX_FILES CLIP_TRANSFER_MAX_FILES
 
 /* Transfer information */
 struct transfer_info {

@@ -807,57 +807,23 @@ static int cmd_mark(const struct at_command *cmd, char **response)
 
 static int cmd_list(const struct at_command *cmd, char **response)
 {
-    /* If value provided, list files in that session */
+    /* If value provided, return session summary (files count, total size)
+     * File names are sequential (001.opus, 002.opus...), so no need to list them all
+     */
     if (cmd->value) {
-        char (*files)[32];
-        int count;
+        struct storage_session_info session;
+        int ret;
 
-        /* Allocate buffer for files on heap */
-        files = k_malloc(64 * sizeof(char[32]));
-        if (!files) {
-            return json_create_error("Out of memory", response);
+        /* Get session info */
+        ret = storage_get_session_info(cmd->value, &session);
+        if (ret != 0) {
+            return json_create_error("Session not found", response);
         }
 
-        /* List files in session */
-        count = storage_list_session_files(cmd->value, files, 64);
-        if (count < 0) {
-            k_free(files);
-            return json_create_error("Failed to list files", response);
-        }
-
-        /* Build complete JSON response in shared buffer (no nested allocation) */
-        char *ptr = json_buffer;
-        int remaining = sizeof(json_buffer);
-
-        /* Start with {"ok":true,"data":[ */
-        ptr += snprintf(ptr, remaining, "{\"ok\":true,\"data\":[");
-        remaining = sizeof(json_buffer) - (ptr - json_buffer);
-
-        for (int i = 0; i < count && remaining > 100; i++) {
-            int len = snprintf(ptr, remaining,
-                              "%s\"%s\"",
-                              i > 0 ? "," : "",
-                              files[i]);
-
-            /* Check if snprintf was truncated */
-            if (len < 0 || len >= remaining) {
-                /* Not enough space, stop adding files */
-                break;
-            }
-            ptr += len;
-            remaining -= len;
-        }
-
-        /* Close with ]} - check space first */
-        if (remaining > 10) {
-            snprintf(ptr, remaining, "]}");
-        } else {
-            /* Buffer too small, go back and close properly */
-            ptr[-1] = '\0';  /* Remove trailing comma */
-            snprintf(ptr - 1, remaining + 1, "]}");
-        }
-
-        k_free(files);
+        /* Return summary: {"ok":true,"data":{"files":N,"size":S,"synced":M}} */
+        snprintf(json_buffer, sizeof(json_buffer),
+                "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u}}",
+                session.file_count, (uint32_t)session.total_bytes, session.synced_files);
 
         /* Allocate and copy response */
         *response = k_malloc(strlen(json_buffer) + 1);

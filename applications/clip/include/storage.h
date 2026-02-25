@@ -150,6 +150,7 @@ struct storage_session_info {
 	char session_id[32];      /* Session ID (YYYYMMDD_HHMMSS) */
 	uint32_t file_count;      /* Number of files in session */
 	uint64_t total_bytes;     /* Total bytes in session */
+	uint32_t synced_files;    /* Number of files successfully synced */
 	uint32_t duration_sec;    /* Duration in seconds */
 };
 
@@ -171,6 +172,18 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
  * @return Number of files found, or negative error code
  */
 int storage_list_session_files(const char *session_id, char (*files)[32], int max_files);
+
+/**
+ * @brief Get session summary info (file count, total size)
+ *
+ * Returns summary information for a session without listing all file names.
+ * More efficient than storage_list_session_files when only counts are needed.
+ *
+ * @param session_id Session ID
+ * @param info Output session info structure
+ * @return 0 on success, negative error code on failure
+ */
+int storage_get_session_info(const char *session_id, struct storage_session_info *info);
 
 /**
  * @brief Delete a session
@@ -228,5 +241,34 @@ void storage_set_writing_file(const char *session_id, const char *filename);
  * @return true if session is closed, false if still recording
  */
 bool storage_session_is_closed(const char *session_id);
+
+/**
+ * @brief Set the number of synced files for a session
+ *
+ * Updates the synced_files counter in session metadata.
+ *
+ * @param session_id Session ID
+ * @param count Number of files that have been synced
+ * @return 0 on success, negative error code on failure
+ */
+int storage_set_synced_files(const char *session_id, uint32_t count);
+
+/**
+ * @brief Get the number of synced files for a session
+ *
+ * @param session_id Session ID
+ * @return Number of synced files, or negative error code on failure
+ */
+int storage_get_synced_files(const char *session_id);
+
+/**
+ * @brief Increment synced file counter
+ *
+ * Called after a file is successfully transferred.
+ *
+ * @param session_id Session ID
+ * @return 0 on success, negative error code on failure
+ */
+int storage_increment_synced(const char *session_id);
 
 #endif /* STORAGE_H */

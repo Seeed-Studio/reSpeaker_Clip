@@ -58,4 +58,15 @@ void json_free(char *json);
 int json_build_response(bool ok, const char *key, const char *value,
                        const char *error, char **output);
 
+/**
+ * @brief Parse JSON string to extract field value
+ *
+ * @param json JSON string to parse
+ * @param key Field name to extract
+ * @param output Output buffer for value
+ * @param size Size of output buffer
+ * @return true if field found, false otherwise
+ */
+bool json_parse_helper(const char *json, const char *key, char *output, size_t size);
+
 #endif /* JSON_HELPER_H */

@@ -76,3 +76,51 @@ void json_free(char *json)
         k_free(json);
     }
 }
+
+/**
+ * @brief Parse JSON string to extract field value
+ *
+ * @param json JSON string to parse
+ * @param key Field name to extract
+ * @param output Output buffer for value
+ * @param size Size of output buffer
+ * @return true if field found, false otherwise
+ */
+bool json_parse_helper(const char *json, const char *key, char *output, size_t size)
+{
+	char search[64];
+	int len;
+
+	if (!json || !key || !output || size == 0) {
+		return false;
+	}
+
+	/* Search for "key":"value" pattern */
+	len = snprintf(search, sizeof(search), "\"%s\":\"", key);
+	if (len < 0 || len >= sizeof(search)) {
+		return false;
+	}
+
+	const char *pos = strstr(json, search);
+	if (!pos) {
+		return false;
+	}
+
+	pos += len;  /* Skip "key":" */
+
+	/* Find closing quote */
+	const char *end = strchr(pos, '"');
+	if (!end) {
+		return false;
+	}
+
+	/* Copy value to output */
+	size_t copy_len = end - pos;
+	if (copy_len >= size) {
+		copy_len = size - 1;
+	}
+	memcpy(output, pos, copy_len);
+	output[copy_len] = '\0';
+
+	return true;
+}

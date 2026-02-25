@@ -321,6 +321,25 @@ class ReSpeakerSync:
             print(f"Error: {response.get('error')}")
             return []
 
+    async def get_session_info(self, session_id: str):
+        """Get session info (file count, total size, synced count)"""
+        response = await self.send_command(f"AT+LIST={session_id}")
+
+        if response.get("ok"):
+            data = response.get("data", {})
+            return {
+                'files': data.get('files', 0),
+                'size': data.get('size', 0),
+                'synced': data.get('synced', 0)
+            }
+        else:
+            return None
+
+    async def delete_session(self, session_id: str):
+        """Delete a session from device after successful sync"""
+        response = await self.send_command(f"AT+DELETE={session_id}")
+        return response.get("ok", False)
+
     async def get_latest_session(self):
         """Get the latest (most recent) session"""
         sessions = await self.list_sessions()
@@ -351,42 +370,49 @@ class ReSpeakerSync:
             local_files = sorted([f.name for f in self.session_dir.glob("*.opus")])
 
         # Get session info from device to know total file count
-        sessions = await self.list_sessions()
-        session_info = None
-        total_files = 0
-        for sess in sessions:
-            if sess['id'] == session_id:
-                session_info = sess
-                total_files = sess.get('files', 0)
-                break
+        session_info = await self.get_session_info(session_id)
+        total_files = session_info['files'] if session_info else 0
+        total_size = session_info['size'] if session_info else 0
+        synced_files = session_info['synced'] if session_info else 0
 
         if local_files:
             print(f"\nFound {len(local_files)} existing local files")
             print(f"  Local: {', '.join(local_files[:5])}{'...' if len(local_files) > 5 else ''}")
 
         if total_files > 0:
-            print(f"  Device reports: {total_files} files in session")
-            remaining = max(0, total_files - len(local_files))
+            print(f"  Device reports: {total_files} files in session ({total_size:,} bytes)")
+            if synced_files > 0:
+                print(f"  Synced progress: {synced_files}/{total_files} files")
+            remaining = max(0, total_files - synced_files)
             print(f"  Remaining to sync: ~{remaining} files")
 
-        # Determine starting file
+        # Determine starting file - use synced_files as reference
         start_file = None
 
         # Check if already synced all files
-        if total_files > 0 and len(local_files) >= total_files:
+        if total_files > 0 and synced_files >= total_files:
             print(f"\n{'='*60}")
             print(f"✓ Sync Complete!")
             print(f"  Session: {session_id}")
-            print(f"  Files: {len(local_files)}/{total_files} already synced locally")
+            print(f"  Files: {synced_files}/{total_files} already synced")
             print(f"  Status: All files up to date")
             print(f"{'='*60}")
+            # Optionally delete session from device after successful sync
+            print("\nDeleting session from device...")
+            if await self.delete_session(session_id):
+                print(f"✓ Session {session_id} deleted from device")
             # Close progress bar if it was created
             if self._overall_progress:
                 self._overall_progress.close()
                 self._overall_progress = None
             return True
 
-        if local_files:
+        # Start from the file after the last synced file
+        if synced_files > 0 and synced_files < total_files:
+            next_num = synced_files + 1
+            start_file = f"{next_num:03d}.opus"
+        elif local_files:
+            # Fallback to local files if synced_files is 0
             try:
                 last_num = int(local_files[-1].split('.')[0])
                 next_num = last_num + 1
@@ -394,6 +420,13 @@ class ReSpeakerSync:
 
                 # Don't request files beyond the device's total count
                 if total_files > 0 and next_num > total_files:
+                    print(f"\n{'='*60}")
+                    print(f"✓ Sync Complete!")
+                    print(f"  Session: {session_id}")
+                    print(f"  Files: {len(local_files)}/{total_files} already synced")
+                    print(f"  Status: All files up to date")
+                    print(f"{'='*60}")
+                    if self._overall_progress:
                     print(f"\n{'='*60}")
                     print(f"✓ Sync Complete!")
                     print(f"  Session: {session_id}")
@@ -595,6 +628,11 @@ class ReSpeakerSync:
 
         print(f"✓ Merged: {merged_file.name} ({total_size} bytes)")
         print(f"✓ Files saved to: {session_dir.absolute()}")
+
+        # Delete session from device after successful sync
+        print(f"\nDeleting session {session_id} from device...")
+        if await self.delete_session(session_id):
+            print(f"✓ Session deleted from device")
 
 
     async def sync_all_sessions(self, continuous: bool = False):
