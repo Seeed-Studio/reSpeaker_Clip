@@ -241,7 +241,8 @@ int audio_start_recording(enum audio_mode mode)
 	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
 
 	/* Generate session ID: always 14 digits */
-	uint16_t year, month, day, hour, min, sec;
+	uint16_t year;
+	uint8_t month, day, hour, min, sec;
 	if (clip_get_current_time(&year, &month, &day, &hour, &min, &sec)) {
 		/* Time synchronized: YYYYMMDDHHMMSS (14 digits) */
 		snprintf(current_session_id, sizeof(current_session_id),

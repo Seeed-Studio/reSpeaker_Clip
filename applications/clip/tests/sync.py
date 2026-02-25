@@ -181,7 +181,7 @@ class ReSpeakerSync:
                                 self.completed_files.append((save_filename, bytes(self.current_file_data)))
 
                         # Update overall progress (only count newly downloaded files)
-                        if self._overall_progress and not skip_save:
+                        if self._overall_progress is not None and not skip_save:
                             self._overall_progress.update(1)
 
                         # Clear for next file
@@ -246,7 +246,7 @@ class ReSpeakerSync:
     def _create_progress_bar(self, filename, total_size):
         if not self.has_tqdm:
             return
-        if self._progress_bar:
+        if self._progress_bar is not None:
             self._progress_bar.close()
         self._progress_bar = self.tqdm(
             total=total_size,
@@ -409,7 +409,7 @@ class ReSpeakerSync:
             if await self.delete_session(session_id):
                 print(f"✓ Session {session_id} deleted from device")
             # Close progress bar if it was created
-            if self._overall_progress:
+            if self._overall_progress is not None:
                 self._overall_progress.close()
                 self._overall_progress = None
             return True
@@ -433,7 +433,7 @@ class ReSpeakerSync:
                     print(f"  Files: {len(local_files)}/{total_files} already synced")
                     print(f"  Status: All files up to date")
                     print(f"{'='*60}")
-                    if self._overall_progress:
+                    if self._overall_progress is not None:
                         self._overall_progress.close()
                         self._overall_progress = None
                     # Delete session from device after successful sync
@@ -505,7 +505,7 @@ class ReSpeakerSync:
                 print(f"    - Keep local files: Do nothing (files are already downloaded)")
                 print(f"    - Delete local files: Remove the directory manually")
                 print(f"      {self.session_dir}")
-                if self._overall_progress:
+                if self._overall_progress is not None:
                     self._overall_progress.close()
                 return False
 
@@ -523,7 +523,7 @@ class ReSpeakerSync:
 
                 if not response.get("ok"):
                     print(f"Error: Failed to start after 5 retries")
-                    if self._overall_progress:
+                    if self._overall_progress is not None:
                         self._overall_progress.close()
                     return False
 
@@ -605,7 +605,7 @@ class ReSpeakerSync:
             print("\n[!] Interrupted by user")
 
         # Close overall progress bar
-        if self._overall_progress:
+        if self._overall_progress is not None:
             self._overall_progress.close()
             self._overall_progress = None
 
