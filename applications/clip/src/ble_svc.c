@@ -554,6 +554,51 @@ int ble_svc_send_file_complete(const char *filename)
     return err;
 }
 
+int ble_svc_send_transfer_complete(const char *session_id, int files_count)
+{
+    char buffer[256];
+    int len;
+    int err;
+    int retry_count = 0;
+    const int max_retries = 5;
+
+    len = snprintf(buffer, sizeof(buffer),
+                   "{\"ok\":true,\"event\":\"transfer_complete\",\"session_id\":\"%s\",\"files\":%d}",
+                   session_id, files_count);
+    if (len < 0 || len >= sizeof(buffer)) {
+        return -ENOMEM;
+    }
+
+    /* Retry with delay for critical transfer_complete notification
+     * This ensures Python client knows the session is complete immediately
+     */
+    do {
+        err = ble_svc_send_response(buffer);
+        if (err == 0) {
+            LOG_INF("Sent transfer_complete event: session=%s, files=%d", session_id, files_count);
+            return 0;  /* Success */
+        }
+
+        /* Retry on temporary errors */
+        if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY || err == -12) {
+            retry_count++;
+            if (retry_count < max_retries) {
+                LOG_DBG("transfer_complete notify failed (err=%d), retrying %d/%d",
+                        err, retry_count, max_retries);
+                k_sleep(K_MSEC(50));
+                continue;
+            }
+        }
+
+        /* Fatal error or retries exhausted */
+        LOG_ERR("transfer_complete notify failed: %d (retries: %d)", err, retry_count);
+        return err;
+
+    } while (retry_count < max_retries);
+
+    return err;
+}
+
 bool ble_svc_is_ready(void)
 {
     /* For small responses, we only need connection and notification enabled.

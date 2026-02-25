@@ -72,6 +72,15 @@ int ble_svc_send_file_ready(const char *session_id, const char *filename, uint64
 int ble_svc_send_file_complete(const char *filename);
 
 /**
+ * @brief Send session transfer complete event (all files in session transferred)
+ *
+ * @param session_id Session ID that completed
+ * @param files_count Number of files transferred
+ * @return 0 on success, negative error code on failure
+ */
+int ble_svc_send_transfer_complete(const char *session_id, int files_count);
+
+/**
  * @brief Check if BLE is connected and ready
  *
  * @return true if ready, false otherwise

@@ -41,6 +41,8 @@ static struct k_thread transfer_thread_data;
 static k_tid_t transfer_thread_id;
 static K_SEM_DEFINE(transfer_trigger_sem, 0, 1);
 static volatile bool transfer_thread_running = false;
+static volatile bool transfer_thread_waiting = false;  /* Thread is waiting on semaphore */
+static volatile bool transfer_is_resume = false;  /* Is this a resume transfer (not for current recording)? */
 
 /* Forward declarations */
 static void transfer_thread_main(void *, void *, void *);
@@ -79,8 +81,50 @@ int transfer_start(const char *session_id, const char *filename)
 {
 	int err;
 
+	/* Check if transfer is already active and sending data */
+	if (transfer_is_active() && transfer_file_open) {
+		LOG_WRN("Transfer already in progress (sending data)");
+		return -EBUSY;
+	}
+
+	/* Wait for any previous transfer to complete and clean up
+	 * This handles the case where transfer thread is between files
+	 */
+	int retry_count = 0;
+	while (current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
+		if (transfer_file_open) {
+			/* Still sending data, don't wait */
+			LOG_WRN("Transfer already in progress (sending data)");
+			return -EBUSY;
+		}
+
+		/* No file open - check if all files transferred */
+		if (current_transfer.total_files > 0 &&
+		    current_transfer.file_index >= current_transfer.total_files) {
+			if (retry_count == 0) {
+				LOG_INF("Previous transfer complete (index=%u, total=%u), waiting for cleanup...",
+				        current_transfer.file_index, current_transfer.total_files);
+			}
+			if (++retry_count > 20) {
+				LOG_WRN("Timeout waiting for cleanup, forcing cleanup");
+				transfer_cleanup();
+				break;
+			}
+			k_sleep(K_MSEC(50));
+		} else {
+			/* Not all files transferred, might be waiting for next file */
+			LOG_INF("Waiting for previous transfer to finish...");
+			k_sleep(K_MSEC(100));
+			if (++retry_count > 50) {
+				LOG_WRN("Timeout waiting for transfer, forcing cleanup");
+				transfer_cleanup();
+				break;
+			}
+		}
+	}
+
 	if (transfer_is_active()) {
-		LOG_WRN("Transfer already in progress");
+		LOG_WRN("Transfer still active after waiting");
 		return -EBUSY;
 	}
 
@@ -94,6 +138,9 @@ int transfer_start(const char *session_id, const char *filename)
 		LOG_ERR("Session not found: %s", session_id);
 		return -ENOENT;
 	}
+
+	/* Clear resume flag - this is a normal transfer, not a resume */
+	transfer_is_resume = false;
 
 	/* Initialize transfer state */
 	memset(&current_transfer, 0, sizeof(current_transfer));
@@ -160,10 +207,62 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 {
 	int err;
 
+	/* Wait for any previous transfer to complete and clean up */
+	int retry_count = 0;
+	while (current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
+		if (transfer_file_open) {
+			LOG_WRN("Transfer already in progress (sending data)");
+			return -EBUSY;
+		}
+
+		/* No file open - check if all files transferred */
+		if (current_transfer.total_files > 0 &&
+		    current_transfer.file_index >= current_transfer.total_files) {
+			if (retry_count == 0) {
+				LOG_INF("Previous transfer complete (index=%u, total=%u), waiting for cleanup...",
+				        current_transfer.file_index, current_transfer.total_files);
+			}
+			if (++retry_count > 20) {
+				LOG_WRN("Timeout waiting for cleanup, forcing cleanup");
+				transfer_cleanup();
+				break;
+			}
+			k_sleep(K_MSEC(50));
+		} else {
+			/* Not all files transferred, might be waiting for next file */
+			LOG_INF("Waiting for previous transfer to finish...");
+			k_sleep(K_MSEC(100));
+			if (++retry_count > 50) {
+				LOG_WRN("Timeout waiting for transfer, forcing cleanup");
+				transfer_cleanup();
+				break;
+			}
+		}
+	}
+
 	if (transfer_is_active()) {
-		LOG_WRN("Transfer already in progress");
+		LOG_WRN("Transfer still active after waiting");
 		return -EBUSY;
 	}
+
+	/* Wait for transfer thread to be fully blocked on semaphore
+	 * This prevents race condition where thread is still executing
+	 * code after transfer_cleanup() but before blocking on sem
+	 */
+	retry_count = 0;
+	while (!transfer_thread_waiting) {
+		if (++retry_count > 100) {
+			LOG_WRN("Timeout waiting for thread to block");
+			return -ETIMEDOUT;
+		}
+		k_sleep(K_MSEC(10));
+	}
+
+	/* Small delay to ensure thread is fully blocked */
+	k_sleep(K_MSEC(10));
+
+	/* Mark this as a resume transfer - should complete when all requested files are done */
+	transfer_is_resume = true;
 
 	if (!storage_is_mounted()) {
 		LOG_ERR("SD card not mounted");
@@ -343,7 +442,9 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p3);
 
 	/* Wait for initial transfer start signal */
+	transfer_thread_waiting = true;
 	k_sem_take(&transfer_trigger_sem, K_FOREVER);
+	transfer_thread_waiting = false;
 
 	while (transfer_thread_running) {
 		LOG_DBG("Transfer loop: state=%d, file_open=%d",
@@ -351,6 +452,7 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 
 		/* Process transfer */
 		int ret;
+		static int consecutive_file_errors = 0;  /* Track repeated file open failures */
 
 process_next_file:
 
@@ -377,18 +479,38 @@ process_next_file:
 
 		/* Open first file if not already open */
 		if (!transfer_file_open) {
+			LOG_INF("About to call transfer_next_file(), file_open=%d", transfer_file_open);
 			ret = transfer_next_file();
+			LOG_INF("transfer_next_file() returned: %d, file_open=%d", ret, transfer_file_open);
+			if (ret == 0) {
+				/* File opened successfully, reset error counter */
+				LOG_INF("File opened, entering send loop (file_open=%d)", transfer_file_open);
+				consecutive_file_errors = 0;
+			}
 			if (ret != 0) {
+				LOG_INF("File open failed (%d), checking error type", ret);
 				if (ret == -ENOENT) {
-					/* No more files at this moment */
+					/* No more files at this moment - could be:
+					 * 1. Empty file was deleted (transfer_next_file deletes 0-byte files)
+					 * 2. End of file list reached
+					 * 3. Session directory not found
+					 * Refresh file list to check for more files after deletion
+					 */
 					/* Check if session is closed (recording stopped) */
 					if (storage_session_is_closed(current_transfer.session_id)) {
 						/* Session closed, transfer complete */
 						current_transfer.state = TRANSFER_STATE_COMPLETED;
 						LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
+
+						/* Notify Python that transfer is complete */
+						ble_svc_send_transfer_complete(current_transfer.session_id,
+						                               (int)current_transfer.file_index);
+
 						transfer_cleanup();
 						/* Wait for next transfer - go back to sem wait */
+						transfer_thread_waiting = true;
 						k_sem_take(&transfer_trigger_sem, K_FOREVER);
+						transfer_thread_waiting = false;
 						goto process_next_file;
 					} else {
 						/* Session still recording, refresh file list and try again */
@@ -401,16 +523,14 @@ process_next_file:
 							current_transfer.total_files = ret;
 							LOG_DBG("Refreshed file list: %d files (old:%d, new:%d), last_transferred=%s",
 							     ret, old_total, ret - old_total, last_transferred_file);
-							LOG_DBG("File list: %s, %s, %s, %s, %s...",
-							     current_transfer.file_list[0],
-							     ret > 1 ? current_transfer.file_list[1] : "",
-							     ret > 2 ? current_transfer.file_list[2] : "",
-							     ret > 3 ? current_transfer.file_list[3] : "",
-							     ret > 4 ? current_transfer.file_list[4] : "");
 
 							/* Find first file that hasn't been transferred yet */
 							bool found_next = false;
 							for (int i = 0; i < ret; i++) {
+								if (current_transfer.file_list[i][0] == '\0') {
+									/* Empty filename - end of list */
+									break;
+								}
 								if (strcmp(current_transfer.file_list[i], last_transferred_file) > 0) {
 									/* Found first file after last_transferred_file */
 									current_transfer.file_index = i;
@@ -422,8 +542,42 @@ process_next_file:
 							}
 
 							if (!found_next) {
-								/* All files transferred, wait for new files */
-								LOG_INF("All files transferred, waiting for new files...");
+								/* All files in list transferred
+								 * Check if we should complete the transfer:
+								 * 1. Device not recording -> complete immediately
+								 * 2. Downloading old session (not current recording) -> complete immediately
+								 * 3. All files for current recording session transferred -> complete immediately
+								 */
+								extern bool audio_is_recording(void);
+								extern const char *audio_get_session_id(void);
+
+								bool is_recording = audio_is_recording();
+								bool is_current_session = false;
+
+								if (is_recording) {
+									const char *recording_session = audio_get_session_id();
+									is_current_session = (strcmp(current_transfer.session_id, recording_session) == 0);
+								}
+
+								if (!is_recording || !is_current_session) {
+									/* Not recording or not current session -> complete immediately */
+									LOG_INF("All files transferred (recording=%d, is_current=%d), completing transfer",
+									        is_recording, is_current_session);
+									current_transfer.state = TRANSFER_STATE_COMPLETED;
+
+									/* Notify Python that transfer is complete */
+									ble_svc_send_transfer_complete(current_transfer.session_id,
+									                               (int)current_transfer.file_index);
+
+									transfer_cleanup();
+									transfer_thread_waiting = true;
+									k_sem_take(&transfer_trigger_sem, K_FOREVER);
+									transfer_thread_waiting = false;
+									goto process_next_file;
+								}
+
+								/* Currently recording this session, wait briefly for new files */
+								LOG_DBG("Waiting for new files in current recording session...");
 								k_sleep(K_MSEC(500));
 								goto process_next_file;
 							}
@@ -431,23 +585,42 @@ process_next_file:
 							goto process_next_file;
 						} else {
 							/* No new files yet, wait a bit */
-							LOG_INF("Session still recording, waiting for new files...");
+							LOG_DBG("No files found, waiting...");
 							k_sleep(K_MSEC(500));
 							goto process_next_file;
 						}
 					}
 				} else {
-					current_transfer.state = TRANSFER_STATE_ERROR;
-					LOG_ERR("Transfer error: %d", ret);
-					transfer_cleanup();
-					/* Wait for next transfer - go back to sem wait */
-					k_sem_take(&transfer_trigger_sem, K_FOREVER);
+					/* Non-ENOENT error (e.g., file open failed) */
+					consecutive_file_errors++;
+					LOG_ERR("Transfer error: %d (consecutive errors: %d)", ret, consecutive_file_errors);
+
+					/* If too many consecutive file errors, abort transfer */
+					if (consecutive_file_errors > 10) {
+						LOG_ERR("Too many consecutive file errors (%d), aborting transfer",
+						        consecutive_file_errors);
+						current_transfer.state = TRANSFER_STATE_ERROR;
+						transfer_cleanup();
+						transfer_thread_waiting = true;
+						k_sem_take(&transfer_trigger_sem, K_FOREVER);
+						transfer_thread_waiting = false;
+						consecutive_file_errors = 0;  /* Reset for next transfer */
+						goto process_next_file;
+					}
+
+					/* Wait a bit before retry */
+					k_sleep(K_MSEC(100));
 					goto process_next_file;
 				}
 			}
 		}
 
+		LOG_INF("After transfer_next_file(), about to check send loop (file_open=%d, ret=%d)",
+		        transfer_file_open, ret);
+
 		/* Send data chunks - FATFS handles thread safety internally */
+		LOG_INF("Entering send loop: file_open=%d, state=%d",
+		        transfer_file_open, current_transfer.state);
 		while (transfer_thread_running &&
 		       current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
 
@@ -558,10 +731,20 @@ static int transfer_next_file(void)
 			 current_transfer.session_id, current_transfer.current_file);
 	} else {
 		/* Get next file from file list */
+		LOG_INF("Opening next file: current_file='%s', file_index=%u, total_files=%u",
+		        current_transfer.current_file, current_transfer.file_index, current_transfer.total_files);
+
 		if (current_transfer.file_index >= current_transfer.total_files) {
 			/* No more files */
 			LOG_DBG("No more files: index=%u >= total=%u",
 			        current_transfer.file_index, current_transfer.total_files);
+			return -ENOENT;
+		}
+
+		/* Check if the filename is empty */
+		if (current_transfer.file_list[current_transfer.file_index][0] == '\0') {
+			/* Empty filename - no more files */
+			LOG_DBG("Empty filename at index %u, no more files", current_transfer.file_index);
 			return -ENOENT;
 		}
 
@@ -571,13 +754,17 @@ static int transfer_next_file(void)
 		        sizeof(current_transfer.current_file) - 1);
 		current_transfer.file_index++;
 
+		LOG_INF("Selected file for transfer: %s (new file_index=%u)",
+		        current_transfer.current_file, current_transfer.file_index);
+
 		/* Wait for the new file to finish writing before opening */
+		LOG_INF("Checking if file %s is being written...", current_transfer.current_file);
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
-			LOG_DBG("File %s is being written, waiting...", current_transfer.current_file);
+			LOG_INF("File %s is being written, waiting...", current_transfer.current_file);
 			k_sleep(K_MSEC(500));
 		}
-		LOG_DBG("File %s is ready, opening for transfer", current_transfer.current_file);
+		LOG_INF("File %s is ready, attempting fs_open...", current_transfer.current_file);
 
 		/* Now open the file */
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
@@ -588,14 +775,16 @@ static int transfer_next_file(void)
 	fs_file_t_init(&transfer_file);
 	ret = fs_open(&transfer_file, filepath, FS_O_READ);
 	if (ret != 0) {
-		LOG_ERR("Failed to open file: %s (%d)", filepath, ret);
+		LOG_INF("FAILED to open file: %s (error=%d), file_index=%u, total_files=%u",
+		        filepath, ret, current_transfer.file_index, current_transfer.total_files);
 		/* Clear current file to trigger retry */
 		current_transfer.current_file[0] = '\0';
+		/* Don't increment file_index again - it was already incremented */
 		return ret;
 	}
 
 	transfer_file_open = true;
-	LOG_DBG("Successfully opened %s for transfer", current_transfer.current_file);
+	LOG_INF("Successfully opened %s for transfer", current_transfer.current_file);
 
 	/* Get file size */
 	struct fs_dirent entry;
@@ -606,14 +795,24 @@ static int transfer_next_file(void)
 
 		/* Check if file is empty - skip it if so */
 		if (entry.size == 0) {
-			LOG_DBG("File is empty (0 bytes), skipping - may still be writing");
-			/* Close and skip this file */
+			LOG_INF("File is empty (0 bytes), deleting: %s", current_transfer.current_file);
+			/* Close the file first */
 			fs_close(&transfer_file);
 			transfer_file_open = false;
+
+			/* Delete the empty file */
+			int del_ret = fs_unlink(filepath);
+			if (del_ret == 0) {
+				LOG_INF("Deleted empty file: %s", filepath);
+			} else {
+				LOG_WRN("Failed to delete empty file %s: %d", filepath, del_ret);
+			}
+
 			/* Clear current file to try next file */
 			current_transfer.current_file[0] = '\0';
-			/* Don't increment file_index since we didn't actually transfer */
-			return -ENOENT;  /* Use ENOENT to signal "skip this file" */
+			/* Return -ENOENT to trigger file list refresh and check for more files */
+			LOG_INF("Empty file deleted, will refresh file list to check for more files");
+			return -ENOENT;
 		}
 
 		/* Reset total_bytes for this file (not cumulative) */

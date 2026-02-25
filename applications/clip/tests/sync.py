@@ -57,6 +57,7 @@ class ReSpeakerSync:
             self.has_tqdm = False
         self._progress_bar = None
         self._overall_progress = None  # Overall progress bar for all files
+        self.transfer_complete = False  # Flag for transfer_complete event
 
     async def connect(self) -> bool:
         """Connect to the device"""
@@ -205,6 +206,14 @@ class ReSpeakerSync:
                             self._update_progress(len(self._early_data_buffer))
                             self._early_data_buffer.clear()
                     # else: ignore duplicate file_ready for different file
+
+                elif event_type == "transfer_complete":
+                    # All files in session have been transferred
+                    session_id = event_data.get("session_id", "")
+                    files_count = event_data.get("files", 0)
+                    # Set a flag to signal the main loop to exit
+                    self.transfer_complete = True
+
                 else:
                     self.last_response = json_str
 
@@ -244,8 +253,9 @@ class ReSpeakerSync:
             unit_scale=True,
             unit_divisor=1024,
             desc=f"  {filename}",
-            ncols=60,
+            ncols=70,
             leave=False,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
         )
 
     def _update_progress(self, chunk_size):
@@ -405,6 +415,7 @@ class ReSpeakerSync:
         self._early_data_buffer = bytearray()
         self.downloading_file = True
         self._last_filename = None
+        self.transfer_complete = False  # Reset transfer complete flag
 
         # Create overall progress bar (starting from existing file count)
         if self.has_tqdm and total_files > 0:
@@ -413,9 +424,10 @@ class ReSpeakerSync:
                 total=total_files,
                 unit='file',
                 desc=overall_desc,
-                ncols=60,
+                ncols=70,
                 leave=True,
                 initial=len(local_files),  # Start from existing file count
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
             )
         else:
             self._overall_progress = None
@@ -423,33 +435,34 @@ class ReSpeakerSync:
         # Start download
         if start_file:
             cmd = f"AT+DOWNLOAD={session_id}:{start_file}"
-            print(f"\nStarting sync from: {start_file}")
+            print(f"\nStarting sync from: {start_file} (session: {session_id})")
         else:
             cmd = f"AT+DOWNLOAD={session_id}"
-            print(f"\nStarting sync from: beginning")
+            print(f"\nStarting sync from: beginning (session: {session_id})")
 
         response = await self.send_command(cmd)
         if not response.get("ok"):
             error = response.get("error", "")
-            print(f"Error starting download: {error}")
 
-            # If error is about busy transfer, try to cancel first
-            if "busy" in error.lower() or "already in progress" in error.lower():
-                print("\nTransfer already in progress, cancelling...")
-                cancel_response = await self.send_command("AT+CANCEL")
-                print(f"Cancel response: {cancel_response}")
+            # If error is about busy transfer, wait and retry
+            if "busy" in error.lower() or "already in progress" in error.lower() or "failed to start transfer" in error.lower():
+                print(f"\n  [!] Device busy, waiting for previous transfer to finish...")
+                # Retry up to 5 times with increasing delay
+                for retry in range(5):
+                    await asyncio.sleep(1 + retry)  # 1s, 2s, 3s, 4s, 5s
+                    response = await self.send_command(cmd)
+                    if response.get("ok"):
+                        print(f"  [+] Started after {retry + 1} retry(ies)")
+                        break
+                    print(f"  [-] Retry {retry + 1}/5 failed: {response.get('error')}")
 
-                # Wait a bit and try again
-                await asyncio.sleep(1)
-                response = await self.send_command(cmd)
                 if not response.get("ok"):
-                    print(f"Still failed: {response.get('error')}")
+                    print(f"Error: Failed to start after 5 retries")
                     if self._overall_progress:
                         self._overall_progress.close()
                     return False
-                else:
-                    print("Successfully started after cancel")
             else:
+                print(f"Error starting download: {error}")
                 if self._overall_progress:
                     self._overall_progress.close()
                 return False
@@ -467,6 +480,11 @@ class ReSpeakerSync:
                 # Check connection
                 if not self.client.is_connected:
                     print("\n[!] Connection lost!")
+                    break
+
+                # Check if transfer_complete event was received
+                if self.transfer_complete:
+                    print(f"\n✓ All files transferred (session complete)")
                     break
 
                 # Check progress
@@ -613,8 +631,9 @@ class ReSpeakerSync:
                 total=len(sessions),
                 unit='session',
                 desc="  All sessions",
-                ncols=60,
+                ncols=70,
                 leave=True,
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
             )
         else:
             all_sessions_pbar = None
@@ -643,6 +662,11 @@ class ReSpeakerSync:
             except Exception as e:
                 print(f"  ✗ Error syncing session: {e}")
                 failed_sessions.append(session_id)
+
+            # Wait between sessions to let device fully clean up
+            # This prevents "Transfer already in progress" errors
+            if i < len(sessions) - 1:  # Don't wait after last session
+                await asyncio.sleep(1.0)
 
             # Update overall progress
             if all_sessions_pbar:
