@@ -60,6 +60,18 @@ int transfer_init(void);
 int transfer_start(const char *session_id, const char *filename);
 
 /**
+ * @brief Resume transfer starting from a specific file
+ *
+ * Used for reconnect scenarios - starts transfer from the specified file
+ * and continues with all subsequent files in the session.
+ *
+ * @param session_id Session ID to transfer
+ * @param start_file Filename to start from (this file and after will be transferred)
+ * @return 0 on success, negative error code on failure
+ */
+int transfer_resume_from(const char *session_id, const char *start_file);
+
+/**
  * @brief Pause ongoing transfer
  *
  * @return 0 on success, negative error code on failure

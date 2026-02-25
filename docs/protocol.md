@@ -568,16 +568,33 @@ AT+MARKS=20240203_100000
 
 ##### AT+DOWNLOAD - Download File
 
-Start file transfer from device to app.
+Start file transfer from device to app. Supports three modes:
 
 **Request (Entire Session):**
 ```
-AT+DOWNLOAD=20240203_100000
+AT+DOWNLOAD=<session_id>
 ```
 
 **Request (Single File):**
 ```
-AT+DOWNLOAD=20240203_100000/001.opus
+AT+DOWNLOAD=<session_id>/<filename>
+```
+
+**Request (Resume from File):**
+```
+AT+DOWNLOAD=<session_id>:<start_file>
+```
+
+**Examples:**
+```
+# Download all files from session
+AT+DOWNLOAD=20250225_143000
+
+# Download single file
+AT+DOWNLOAD=20250225_143000/015.opus
+
+# Resume from specific file (skip files before this)
+AT+DOWNLOAD=20250225_143000:020.opus
 ```
 
 **Response (Start):**
@@ -587,25 +604,66 @@ AT+DOWNLOAD=20240203_100000/001.opus
 }
 ```
 
-**Response (Complete):**
+**Events During Transfer:**
+
+File Ready Event:
 ```json
 {
   "ok": true,
-  "done": true,
-  "size": 720000
+  "event": "file_ready",
+  "filename": "001.opus",
+  "size": 52598
+}
+```
+
+File Complete Event:
+```json
+{
+  "ok": true,
+  "event": "file_complete",
+  "filename": "001.opus"
 }
 ```
 
 **Data Flow:**
 1. Device sends start response
-2. Device streams file data via File Data characteristic
-3. Device sends periodic progress notifications
-4. Device sends complete response
+2. For each file:
+   - Device sends `file_ready` event (optional, may be lost)
+   - Device streams file data via File Data characteristic
+   - Device sends `file_complete` event
+3. Client can resume by sending `AT+DOWNLOAD=session:next_file`
+4. Transfer continues until all files transferred
+
+**Disconnect/Resume Flow:**
+1. During transfer, BLE disconnects
+2. Device automatically cancels transfer
+3. Device continues recording (if in RECORDING state)
+4. Client reconnects
+5. Client sends `AT+DOWNLOAD=session:last_received_file`
+6. Transfer resumes from next file
+
+**Example Session:**
+```
+# Initial transfer start
+AT+DOWNLOAD=20250225_143000
+
+# ... transfer progresses ...
+
+# [BLE disconnects - file 015.opus was last sent]
+
+# [Client reconnects]
+
+# Resume from next file (016.opus)
+AT+DOWNLOAD=20250225_143000:016.opus
+
+# Transfer continues from 016.opus onwards
+```
 
 **Error Cases:**
-- `5001`: File not found
+- `5001`: Session not found
 - `5002`: Transfer already in progress
-- `5003`: Transfer canceled
+- `5003`: SD card not mounted
+- `5004`: Invalid file format
 
 **State Change:** IDLE → TRANSMITTING
 

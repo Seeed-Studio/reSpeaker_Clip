@@ -277,6 +277,12 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
         LOG_INF("BLE disconnected (reason: %u)", reason);
 
+        /* Clean up any ongoing transfer - client will reconnect and resume */
+        if (transfer_is_active() || transfer_is_paused()) {
+            LOG_INF("Cleaning up transfer due to disconnect");
+            transfer_cancel();
+        }
+
         /* Restart advertising */
         k_work_submit(&adv_work);
     }
@@ -507,6 +513,9 @@ int ble_svc_send_file_complete(const char *filename)
 {
     char buffer[256];
     int len;
+    int err;
+    int retry_count = 0;
+    const int max_retries = 5;
 
     len = snprintf(buffer, sizeof(buffer),
                    "{\"ok\":true,\"event\":\"file_complete\",\"filename\":\"%s\"}",
@@ -515,7 +524,34 @@ int ble_svc_send_file_complete(const char *filename)
         return -ENOMEM;
     }
 
-    return ble_svc_send_response(buffer);
+    /* Retry with delay for critical file_complete notification
+     * This ensures the final completion event gets through even if
+     * BLE stack is busy (e.g., when recording just stopped)
+     */
+    do {
+        err = ble_svc_send_response(buffer);
+        if (err == 0) {
+            return 0;  /* Success */
+        }
+
+        /* Retry on temporary errors */
+        if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY || err == -12) {
+            retry_count++;
+            if (retry_count < max_retries) {
+                LOG_DBG("file_complete notify failed (err=%d), retrying %d/%d",
+                        err, retry_count, max_retries);
+                k_sleep(K_MSEC(50));  /* Wait before retry */
+                continue;
+            }
+        }
+
+        /* Fatal error or retries exhausted */
+        LOG_ERR("file_complete notify failed: %d (retries: %d)", err, retry_count);
+        return err;
+
+    } while (retry_count < max_retries);
+
+    return err;
 }
 
 bool ble_svc_is_ready(void)

@@ -1052,22 +1052,31 @@ static int cmd_download(const struct at_command *cmd, char **response)
 {
     char session_id[32] = {0};
     char filename[64] = {0};
+    char start_file[32] = {0};  /* For resume: start from this file */
     char *slash;
+    char *colon;
     int err;
 
     if (!cmd->value) {
         return json_create_error("Missing session ID", response);
     }
 
-    /* Parse session/filename or just session */
+    /* Parse session/filename or session:start_file or just session */
     slash = strchr(cmd->value, '/');
+    colon = strchr(cmd->value, ':');
+
     if (slash) {
-        /* Session/filename format */
+        /* Session/filename format - download single file */
         *slash = '\0';
         strncpy(session_id, cmd->value, sizeof(session_id) - 1);
         strncpy(filename, slash + 1, sizeof(filename) - 1);
+    } else if (colon) {
+        /* Session:start_file format - resume from this file */
+        *colon = '\0';
+        strncpy(session_id, cmd->value, sizeof(session_id) - 1);
+        strncpy(start_file, colon + 1, sizeof(start_file) - 1);
     } else {
-        /* Just session ID */
+        /* Just session ID - download all files */
         strncpy(session_id, cmd->value, sizeof(session_id) - 1);
     }
 
@@ -1077,7 +1086,17 @@ static int cmd_download(const struct at_command *cmd, char **response)
     }
 
     /* Start transfer */
-    err = transfer_start(session_id, filename[0] ? filename : NULL);
+    if (filename[0]) {
+        /* Download single file */
+        err = transfer_start(session_id, filename);
+    } else if (start_file[0]) {
+        /* Resume transfer from start_file */
+        err = transfer_resume_from(session_id, start_file);
+    } else {
+        /* Download all files from session */
+        err = transfer_start(session_id, NULL);
+    }
+
     if (err != 0) {
         return json_create_error("Failed to start transfer", response);
     }

@@ -1,3 +1,253 @@
+## 2025-02-25 - Simultaneous Recording and BLE Transfer
+
+### Completed Tasks
+
+#### 1. Transfer Module Enhancements (transfer.c/h)
+- ✅ Added `transfer_resume_from()` - Resume transfer from specific file
+  - Format: `AT+DOWNLOAD=session:start_file` (e.g., `AT+DOWNLOAD=20250225_143000:015.opus`)
+  - Direct numeric index based file selection for faster resume
+- ✅ Simultaneous recording and transfer - Records and transfers at same time
+  - Transfer starts immediately when recording begins
+  - New files are automatically queued for transfer
+  - Thread-safe file operations (CONFIG_FS_FATFS_REENTRANT)
+- ✅ Connection event handling - Proper cleanup on BLE disconnect
+  - Calls `transfer_cancel()` on disconnect
+  - Client can resume with `AT+DOWNLOAD=session:start_file`
+- ✅ Retry logic with reduced log verbosity
+  - Reduced `LOG_INF` to `LOG_DBG` for retry messages
+  - Cleaner console output during transfer
+
+#### 2. BLE Service Enhancements (ble_svc.c/h)
+- ✅ Disconnect callback cleanup
+  ```c
+  static void disconnected(struct bt_conn *conn, uint8_t reason)
+  {
+      if (current_conn == conn) {
+          // Cancel any ongoing transfer
+          if (transfer_is_active() || transfer_is_paused()) {
+              transfer_cancel();
+          }
+          // Restart advertising
+          k_work_submit(&adv_work);
+      }
+  }
+  ```
+- ✅ `ble_svc_send_file_complete()` with retry logic
+  - Retries up to 5 times with 50ms delay on BLE errors
+  - Handles error -12 (ENOMEM) and other temporary failures
+
+#### 3. AT Command Updates (at_cmd.c)
+- ✅ Extended `AT+DOWNLOAD` command syntax
+  - `AT+DOWNLOAD=session` - Download all files from session
+  - `AT+DOWNLOAD=session/filename` - Download single file
+  - `AT+DOWNLOAD=session:start_file` - Resume from specific file
+
+#### 4. Python Sync Tool (tests/sync.py)
+- ✅ Standalone sync tool for easy file synchronization
+  ```bash
+  python sync.py [--device MAC] [--session SESSION_ID]
+  ```
+- ✅ Features:
+  - Automatic device scanning and connection
+  - Session listing and status query
+  - Resume support - skips already downloaded files
+  - Progress bars with tqdm (file-level and overall)
+  - Auto-detection of recording state
+  - File merging - combines all segments into single `.opus` file
+- ✅ Usage modes:
+  - **Continuous mode** (default for active recordings) - Keeps waiting for new files
+  - **One-shot mode** (`--oneshot`) - Exits when no new files for 10 seconds
+  - **Status query** (`--status`) - Shows device state and exits
+- ✅ Smart resume logic:
+  - Compares local files with device session
+  - Only transfers missing or newer files
+  - Skips existing files with matching size
+
+#### 5. Test Scripts Renamed
+- ✅ `test_01_basic.py` → `test_01_basic_at_commands.py`
+- ✅ `test_02_config.py` → `test_02_config_nvs.py`
+- ✅ `test_03_recording.py` → `test_03_recording_and_transfer.py`
+
+### New AT Commands
+
+#### AT+DOWNLOAD (Extended)
+```
+AT+DOWNLOAD=session_id
+AT+DOWNLOAD=session_id:filename
+AT+DOWNLOAD=session_id:start_file
+
+# Examples:
+AT+DOWNLOAD=20250225_143000              # All files from session
+AT+DOWNLOAD=20250225_143000:015.opus      # Single file
+AT+DOWNLOAD=20250225_143000:020.opus      # Resume from 020.opus
+```
+
+### Sync Tool Usage
+
+```bash
+# Sync latest session (auto-detects recording state)
+python sync.py
+
+# Sync specific session
+python sync.py --session 20250225_143000
+
+# Show device status only
+python sync.py --status
+
+# Use specific device
+python sync.py --device AA:BB:CC:DD:EE:FF
+
+# One-shot mode (exit when no new files)
+python sync.py --oneshot --session 20250225_143000
+```
+
+### Transfer Flow
+
+#### Recording + Transfer (Simultaneous)
+```
+1. User presses button → Recording starts
+2. Device creates session directory (e.g., /SD:/REC/20250225_143000/)
+3. Transfer starts automatically
+4. As each file completes (60 seconds):
+   - File closed on SD card
+   - Transfer picks up new file
+   - Client receives file_ready event
+   - Data transfer begins
+5. On BLE disconnect:
+   - Transfer is cancelled
+   - Device continues recording
+6. On reconnect:
+   - Client sends AT+DOWNLOAD=session:last_file
+   - Transfer resumes from next file
+```
+
+#### Sync Tool Flow
+```
+1. Connect to device
+2. Query device state (AT+GSTAT)
+3. List sessions (AT+LIST)
+4. Compare local files with device session
+5. Calculate resume point (first missing file)
+6. Start transfer from resume point
+7. For each file:
+   - Receive file_ready event
+   - Receive file data via BLE notifications
+   - Receive file_complete event
+   - Save to disk (skip if exists with same size)
+8. Merge all files into single .opus file
+9. Display completion summary
+```
+
+### Known Issues & Solutions
+
+#### Issue: File Complete Event Loss
+**Problem**: `file_complete` notification fails with error -12 when BLE stack is busy
+
+**Solution**: Added retry logic with delay
+```c
+// ble_svc.c - ble_svc_send_file_complete()
+do {
+    err = ble_svc_send_response(buffer);
+    if (err == 0) break;
+    if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY || err == -12) {
+        k_sleep(K_MSEC(50));
+        continue;
+    }
+} while (retry_count < max_retries);
+```
+
+#### Issue: Data Arrives Before file_ready Event
+**Problem**: File data notifications arrive before `file_ready` event is processed
+
+**Solution**: Client-side early buffer
+```python
+# sync.py
+if self.downloading_file:
+    if self._last_filename:
+        self.current_file_data.extend(data)
+    else:
+        self._early_data_buffer.extend(data)  # Buffer until file_ready
+
+# When file_ready arrives:
+if len(self._early_data_buffer) > 0:
+    self.current_file_data.extend(self._early_data_buffer)
+    self._early_data_buffer.clear()
+```
+
+#### Issue: Resume Parameter Not Working
+**Problem**: Device was using string comparison to find start file in unsorted list
+
+**Solution**: Direct numeric index
+```c
+// transfer.c - transfer_resume_from()
+int start_num = atoi(start_file);  // "023.opus" → 23
+current_transfer.file_index = start_num - 1;  // 0-based index
+```
+
+### Performance
+
+#### Transfer Speed
+- **MTU**: 247 bytes (after negotiation)
+- **Effective throughput**: ~150-200 KB/s
+- **File size**: ~45-50 KB per 60-second segment
+- **Transfer time per file**: ~0.25 seconds
+- **Total sync time**: ~5-6 seconds for 22 files
+
+#### Memory Usage
+- **Current**: 319 KB FLASH / 242 KB RAM (31.15% / 52.72%)
+- **Transfer thread stack**: 8 KB
+- **AT command processor stack**: 8 KB
+- **Audio buffer**: 32 KB
+
+### Testing
+
+#### Test Scripts
+```bash
+# 1. Basic AT commands test
+python test_01_basic_at_commands.py
+
+# 2. NVS config test
+python test_02_config_nvs.py
+
+# 3. Recording and transfer test (with disconnect/reconnect)
+python test_03_recording_and_transfer.py
+
+# 4. Sync tool test
+python sync.py --status
+python sync.py --session <SESSION_ID>
+```
+
+#### Sync Tool Test Cases
+1. **Sync completed session** - Should skip all existing files
+2. **Sync active recording** - Should continuously wait for new files
+3. **Resume after disconnect** - Should skip already transferred files
+4. **Empty session** - Should handle gracefully with appropriate message
+
+### File Operations
+
+#### Session Structure
+```
+/SD:/REC/YYYYMMDDHHMMSS/    <- Session directory (with time sync)
+├── session.json             <- Session metadata
+├── files.lst                <- File list with sizes
+├── marks.bin                <- Bookmark data
+├── 001.opus                 <- Audio segments (60 sec each)
+├── 002.opus
+└── ...
+```
+
+#### Merged Output
+```
+downloads/
+├── YYYYMMDDHHMMSS/          <- Individual segments
+│   ├── 001.opus
+│   ├── 002.opus
+│   └── ...
+└── YYYYMMDDHHMMSS.opus      <- Merged complete recording
+```
+
+---
+
 ## 2025-02-24 - Fix Recording File Storage Structure
 
 ### Completed Tasks

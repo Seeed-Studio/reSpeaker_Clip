@@ -479,6 +479,227 @@ class ClipClient:
 
         print(f"  ✓ Merged: {merged_file.name} ({total_size} bytes)", flush=True)
 
+    async def get_local_files(self, session_id):
+        """Get list of files already downloaded locally"""
+        session_dir = DOWNLOAD_DIR / session_id
+        if not session_dir.exists():
+            return []
+
+        local_files = []
+        for f in sorted(session_dir.glob("*.opus")):
+            local_files.append(f.name)
+        return local_files
+
+    async def download_session_with_resume(self, session_id, auto_reconnect=True):
+        """
+        Download session with automatic reconnection and resume support.
+
+        If disconnected, will:
+        1. Reconnect to device
+        2. List files on device
+        3. Compare with local files
+        4. Resume from first missing file
+        """
+        print(f"\n=== Downloading session: {session_id} (with resume support) ===")
+
+        session_id = str(session_id)
+
+        # Create download directory
+        self.session_dir = DOWNLOAD_DIR / session_id
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get existing local files
+        local_files = await self.get_local_files(session_id)
+        if local_files:
+            print(f"  Found {len(local_files)} existing local files")
+            print(f"  Local files: {', '.join(local_files[:5])}{'...' if len(local_files) > 5 else ''}")
+
+        # Start download from first missing file
+        start_file = None
+        if local_files:
+            # Find the last local file, we'll start from the next one
+            # Files are named 001.opus, 002.opus, etc.
+            try:
+                last_num = int(local_files[-1].split('.')[0])
+                next_num = last_num + 1
+                start_file = f"{next_num:03d}.opus"
+                print(f"  Resuming from: {start_file}")
+            except (ValueError, IndexError):
+                print(f"  Warning: Could not determine resume point, starting from beginning")
+                start_file = None
+
+        max_retries = 10 if auto_reconnect else 0
+        retry_count = 0
+
+        while retry_count <= max_retries:
+            # Clear state for this attempt
+            self.completed_files = []
+            self.current_file_data = bytearray()
+            self.file_data = bytearray()
+            self._stop_requested = False
+            self._recording_stopped = False
+
+            # Start or resume download
+            if start_file:
+                cmd = f"AT+DOWNLOAD={session_id}:{start_file}"
+                print(f"  Sending: {cmd}")
+            else:
+                cmd = f"AT+DOWNLOAD={session_id}"
+                print(f"  Sending: {cmd}")
+
+            response = await self.send_command(cmd)
+            if not response.get("ok"):
+                print(f"  ✗ Failed to start: {response.get('error')}")
+                # If failed and not first attempt, might be disconnected
+                if retry_count > 0:
+                    connection_lost = True
+                else:
+                    return False
+
+            self.downloading_file = True
+
+            print("  Downloading... (files will be saved as they complete)", flush=True)
+
+            # Wait for transfer with timeout for each file
+            last_file_count = len(self.completed_files)
+            no_new_files_count = 0
+            connection_lost = False
+            no_response_count = 0
+
+            try:
+                while True:
+                    await asyncio.sleep(1)
+
+                    # Check if connection is still alive by checking client status
+                    if not self.client or not self.client.is_connected:
+                        print("\n  [!] Connection lost (is_connected=False)!")
+                        connection_lost = True
+                        break
+
+                    # Also try to detect disconnect by checking if we can send a command
+                    # Do a simple ping check
+                    try:
+                        # Send a quick GSTAT to verify connection is alive
+                        gstat_response = await self.send_command("AT+GSTAT", timeout=2)
+                        if gstat_response is None:
+                            no_response_count += 1
+                            if no_response_count >= 3:
+                                print("\n  [!] No response from device (disconnected?)")
+                                connection_lost = True
+                                break
+                        else:
+                            no_response_count = 0  # Reset counter on successful response
+                    except Exception as e:
+                        no_response_count += 1
+                        if no_response_count >= 3:
+                            print(f"\n  [!] Connection check failed: {e}")
+                            connection_lost = True
+                            break
+
+                    # Check if we have received new files
+                    current_file_count = len(self.completed_files)
+                    if current_file_count > last_file_count:
+                        last_file_count = current_file_count
+                        no_new_files_count = 0
+                        no_response_count = 0  # Reset on progress
+                        # Update start_file for potential resume
+                        if self.completed_files:
+                            last_filename = self.completed_files[-1][0]
+                            try:
+                                last_num = int(last_filename.split('.')[0])
+                                next_num = last_num + 1
+                                start_file = f"{next_num:03d}.opus"
+                            except (ValueError, IndexError):
+                                pass
+                    else:
+                        no_new_files_count += 1
+
+                    # If no new files for 10 seconds and recording stopped, we're done
+                    if self._recording_stopped and no_new_files_count >= 10:
+                        print("  ✓ All files transferred")
+                        break
+
+                    # If just waiting for more files, continue
+                    if no_new_files_count < 30:  # 30 second timeout
+                        continue
+
+                    # Check if session is closed
+                    try:
+                        gstat_resp = await self.send_command("AT+GSTAT", timeout=5)
+                        if gstat_resp and gstat_resp.get("ok"):
+                            state = gstat_resp["data"].get("state")
+                            if state == "IDLE":
+                                print("  Session closed, transfer complete")
+                                break
+                    except:
+                        pass  # Ignore errors, continue
+
+            except asyncio.CancelledError:
+                print("\n  [!] Download cancelled")
+                connection_lost = True
+            except Exception as e:
+                print(f"\n  [!] Error: {e}")
+                connection_lost = True
+
+            # Save received files before reconnecting
+            if self.completed_files:
+                print(f"\n  [*] Saving {len(self.completed_files)} received files before reconnect...")
+                for filename, data in self.completed_files:
+                    filepath = self.session_dir / filename
+                    if not filepath.exists():
+                        with open(filepath, "wb") as f:
+                            f.write(data)
+                        print(f"    + {filename}")
+
+            if not connection_lost:
+                # Success, no reconnection needed
+                await self._save_and_merge_files(session_id)
+                self.downloading_file = False
+                return True
+
+            # Connection lost - try to reconnect
+            if retry_count >= max_retries:
+                print(f"\n  [!] Max retries ({max_retries}) reached")
+                self.downloading_file = False
+                await self._save_and_merge_files(session_id)
+                return False
+
+            retry_count += 1
+            print(f"\n  [*] Attempting to reconnect... (retry {retry_count}/{max_retries})")
+
+            # Disconnect properly first
+            try:
+                await self.disconnect()
+            except:
+                pass  # Ignore errors during disconnect
+
+            # Wait before reconnecting
+            await asyncio.sleep(2)
+
+            # Try to reconnect - use the same address if we have it
+            print(f"  [*] Connecting to {self.address if self.address else 'device (scanning)'}...")
+            if await self.connect():
+                print("  ✓ Reconnected!")
+
+                # Restart notifications after reconnect
+                try:
+                    await self.client.start_notify(RESP_SEND_UUID, self._notification_handler)
+                    await self.client.start_notify(FILE_DATA_UUID, self._file_data_handler)
+                    await asyncio.sleep(0.2)
+                    print("  ✓ Notifications restarted")
+                except Exception as e:
+                    print(f"  ✗ Failed to restart notifications: {e}")
+                    await self._save_and_merge_files(session_id)
+                    return False
+            else:
+                print("  ✗ Reconnection failed")
+                await self._save_and_merge_files(session_id)
+                return False
+
+        self.downloading_file = False
+        await self._save_and_merge_files(session_id)
+        return True
+
     async def run_test(self):
         """Run recording with simultaneous transfer - manual stop with Enter key"""
         try:
@@ -557,12 +778,86 @@ class ClipClient:
         finally:
             await self.disconnect()
 
+    async def test_disconnect_resume(self):
+        """
+        Test disconnect and resume - simulate connection loss during transfer
+
+        This will:
+        1. Start recording
+        2. Start transfer and run continuously
+        3. YOU disconnect manually (turn off bluetooth, etc.)
+        4. Script detects disconnect
+        5. Script auto-reconnects and resumes
+        """
+        print("\n" + "="*50)
+        print("Disconnect & Resume Test")
+        print("="*50)
+        print("\nThis test will:")
+        print("1. Start recording and transfer")
+        print("2. Run transfer continuously")
+        print("3. When YOU disconnect (turn off bluetooth), script will detect it")
+        print("4. Script will auto-reconnect and resume transfer")
+        print("\nPress Enter when ready...")
+        input()
+
+        # Set time
+        if not await self.set_time():
+            return
+
+        # Start recording
+        print("\n=== Starting recording ===")
+        response = await self.send_command("AT+START")
+        if not response.get("ok"):
+            print(f"✗ Failed to start: {response.get('error')}")
+            return
+
+        session = str(response.get("session", ""))
+        print(f"✓ Recording started, session: {session}")
+
+        # Use the resume-capable download function
+        print("\n=== Starting transfer (with auto-reconnect) ===")
+        print("Transfer will run until you stop it with Ctrl+C")
+        print("Try disconnecting bluetooth - it will auto-reconnect!")
+        print("(Press Ctrl+C twice to stop completely)", flush=True)
+
+        try:
+            success = await self.download_session_with_resume(session_id=session, auto_reconnect=True)
+            if success:
+                print("\n✓ Transfer completed!")
+            else:
+                print("\n✗ Transfer failed")
+        except KeyboardInterrupt:
+            print("\n[!] Interrupted by user")
+
+        # Stop recording
+        print("\n=== Stopping recording ===")
+        await self.send_command("AT+STOP")
+        print("✓ Done")
+
+        if success:
+            print("\n✓ Resume test complete!")
+        else:
+            print("\n✗ Resume test failed")
+
+        # Stop recording
+        print("\n=== Stopping recording ===")
+        await self.send_command("AT+STOP")
+
 async def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Recording and Transfer Test")
+    parser.add_argument("--test-disconnect", action="store_true",
+                       help="Test disconnect and resume scenario")
+    args = parser.parse_args()
+
     client = ClipClient()
     if not await client.connect():
         return 1
 
-    await client.run_test()
+    if args.test_disconnect:
+        await client.test_disconnect_resume()
+    else:
+        await client.run_test()
 
     return 0
 

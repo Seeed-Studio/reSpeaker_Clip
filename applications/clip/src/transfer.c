@@ -9,6 +9,7 @@
 #include <zephyr/fs/fs.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "transfer.h"
 #include "storage.h"
@@ -155,6 +156,116 @@ int transfer_start(const char *session_id, const char *filename)
 	return 0;
 }
 
+int transfer_resume_from(const char *session_id, const char *start_file)
+{
+	int err;
+
+	if (transfer_is_active()) {
+		LOG_WRN("Transfer already in progress");
+		return -EBUSY;
+	}
+
+	if (!storage_is_mounted()) {
+		LOG_ERR("SD card not mounted");
+		return -ENODEV;
+	}
+
+	if (!session_id || !start_file) {
+		return -EINVAL;
+	}
+
+	/* Check if session exists */
+	if (!storage_session_exists(session_id)) {
+		LOG_ERR("Session not found: %s", session_id);
+		return -ENOENT;
+	}
+
+	/* Set last_transferred_file to the file BEFORE start_file
+	 * This way, the transfer logic will start from start_file
+	 * For example, if start_file is "010.opus", we set last_transferred_file
+	 * to "009.opus" so the search finds 010.opus as the next file.
+	 *
+	 * However, since files are sorted alphabetically, we can just set
+	 * last_transferred_file to start_file and the logic will find the
+	 * first file > start_file. Wait, that would skip start_file.
+	 *
+	 * Better approach: Set last_transferred_file to a value that's
+	 * lexicographically just before start_file. Since we can't do that
+	 * easily, let's just set it to start_file and modify the comparison
+	 * logic to use >= instead of >.
+	 *
+	 * Actually, the simplest approach is to set last_transferred_file
+	 * to the prefix before start_file. For "010.opus", use "009.opus".
+	 * But we don't know the previous file.
+	 *
+	 * The cleanest solution: set last_transferred_file to start_file
+	 * and use a flag to indicate we want to START from this file, not
+	 * skip files BEFORE it.
+	 *
+	 * The simplest solution: directly use the file number as the index
+	 */
+
+	/* Initialize transfer state */
+	memset(&current_transfer, 0, sizeof(current_transfer));
+	current_transfer.state = TRANSFER_STATE_TRANSMITTING;
+	current_transfer.direction = TRANSFER_DIR_UPLOAD;
+	strncpy(current_transfer.session_id, session_id, sizeof(current_transfer.session_id) - 1);
+
+	/* List all files in session */
+	err = storage_list_session_files(session_id, current_transfer.file_list,
+	                                  TRANSFER_MAX_FILES);
+	if (err < 0) {
+		LOG_ERR("Failed to list session files: %d", err);
+		return err;
+	}
+
+	current_transfer.total_files = err;
+	LOG_INF("Session has %u files to transfer", current_transfer.total_files);
+
+	/* Debug: log file list content */
+	LOG_INF("File list (first 5): %s, %s, %s, %s, %s",
+	        current_transfer.file_list[0],
+	        err > 1 ? current_transfer.file_list[1] : "",
+	        err > 2 ? current_transfer.file_list[2] : "",
+	        err > 3 ? current_transfer.file_list[3] : "",
+	        err > 4 ? current_transfer.file_list[4] : "");
+
+	/* Extract number from filename (e.g., "023.opus" -> 23)
+	 * Files are numbered from 1, but indices are from 0
+	 */
+	int start_num = atoi(start_file);
+	LOG_INF("Start file: %s (parsed num=%d)", start_file, start_num);
+	if (start_num > 0 && start_num <= (int)current_transfer.total_files) {
+		/* Start from this file (convert to 0-based index) */
+		current_transfer.file_index = start_num - 1;
+		LOG_INF("Starting from file %s (index=%u)", start_file, current_transfer.file_index);
+	} else if (start_num > (int)current_transfer.total_files) {
+		/* Requested file doesn't exist yet, start from last file
+		 * This allows transfer to wait for new files during recording
+		 */
+		current_transfer.file_index = current_transfer.total_files - 1;
+		LOG_INF("Start file %s doesn't exist yet (session has %u files), will wait for new files",
+		        start_file, current_transfer.total_files);
+		/* Set last_transferred_file to the last file so we wait for new ones */
+		if (current_transfer.total_files > 0) {
+			strncpy(last_transferred_file, current_transfer.file_list[current_transfer.total_files - 1],
+			       sizeof(last_transferred_file) - 1);
+		}
+	} else {
+		LOG_WRN("Invalid start file %s (num=%d), starting from beginning",
+		        start_file, start_num);
+		current_transfer.file_index = 0;
+	}
+
+	/* Start transfer thread */
+	transfer_thread_running = true;
+	k_sem_give(&transfer_trigger_sem);
+
+	LOG_INF("Transfer resumed from: %s", start_file);
+
+	return 0;
+}
+
 int transfer_pause(void)
 {
 	if (!transfer_is_active()) {
@@ -245,8 +356,22 @@ process_next_file:
 
 		/* Check if paused */
 		if (current_transfer.state == TRANSFER_STATE_PAUSED) {
-			/* Wait for resume signal */
-			k_sem_take(&transfer_trigger_sem, K_FOREVER);
+			/* If paused due to BLE disconnect, wait for reconnection */
+			if (!ble_svc_is_ready()) {
+				LOG_INF("Waiting for BLE reconnection...");
+				/* Wait for BLE to reconnect */
+				while (!ble_svc_is_ready() && transfer_thread_running) {
+					k_sleep(K_MSEC(1000));
+				}
+				if (!transfer_thread_running) {
+					break;  /* Thread is shutting down */
+				}
+				LOG_INF("BLE reconnected, resuming transfer");
+			}
+
+			/* Resume transfer */
+			current_transfer.state = TRANSFER_STATE_TRANSMITTING;
+			LOG_INF("Transfer resumed");
 			goto process_next_file;
 		}
 
@@ -326,6 +451,19 @@ process_next_file:
 		while (transfer_thread_running &&
 		       current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
 
+			/* Check if BLE is connected before sending */
+			if (!ble_svc_is_ready()) {
+				/* BLE disconnected, pause transfer and wait */
+				LOG_INF("BLE disconnected, pausing transfer...");
+				current_transfer.state = TRANSFER_STATE_PAUSED;
+				/* Close file while paused */
+				if (transfer_file_open) {
+					fs_close(&transfer_file);
+					transfer_file_open = false;
+				}
+				break;
+			}
+
 			/* First chunk: log start */
 			if (current_transfer.bytes_transferred == 0) {
 				LOG_INF("File transfer started: %s (index=%u, total_files=%u)",
@@ -359,6 +497,16 @@ process_next_file:
 					k_sem_give(&transfer_trigger_sem);
 					/* Break to let outer loop handle next file */
 					break;
+				} else if (ret == -ENOTCONN || ret == -EIO) {
+					/* BLE connection error, pause and wait for reconnect */
+					LOG_INF("BLE connection lost, pausing transfer (error: %d)", ret);
+					current_transfer.state = TRANSFER_STATE_PAUSED;
+					/* Close file while paused */
+					if (transfer_file_open) {
+						fs_close(&transfer_file);
+						transfer_file_open = false;
+					}
+					break;
 				} else {
 					current_transfer.state = TRANSFER_STATE_ERROR;
 					LOG_ERR("Transfer send error: %d", ret);
@@ -376,7 +524,10 @@ process_next_file:
 			/* Check if paused */
 			if (current_transfer.state == TRANSFER_STATE_PAUSED) {
 				/* Close file while paused */
-				fs_close(&transfer_file);
+				if (transfer_file_open) {
+					fs_close(&transfer_file);
+					transfer_file_open = false;
+				}
 				break;
 			}
 		}
