@@ -50,6 +50,9 @@ python sync.py
 # Sync a specific session
 python sync.py --session 20250225_143000
 
+# Sync ALL sessions from device
+python sync.py --all-sessions
+
 # Show device status only
 python sync.py --status
 
@@ -63,6 +66,7 @@ python sync.py --device AA:BB:CC:DD:EE:FF
 |--------|-------|-------------|
 | `--device` | `-d` | Device MAC address (auto-scan if not specified) |
 | `--session` | `-s` | Specific session ID to sync |
+| `--all-sessions` | `-a` | Sync ALL sessions from device |
 | `--status` | - | Show device status and exit |
 | `--oneshot` | - | Exit when no new files (default: continuous for active recordings) |
 
@@ -138,6 +142,61 @@ Found 10 existing local files
 
 ... (continues from 011.opus onwards)
 ```
+
+### Sync All Sessions
+
+Sync all recordings from the device at once:
+
+```
+============================================================
+Sync All Sessions Mode
+============================================================
+
+Found 18 session(s) to sync
+Total files across all sessions: 197
+Total size: 8,765,432 bytes (8.4 MB)
+
+============================================================
+Session [1/18]: 20260225022123
+  Files: 19, Size: 812270 bytes
+============================================================
+  All 19 files already synced locally
+
+============================================================
+Session [2/18]: 20260225022539
+  Files: 5, Size: 191239 bytes
+============================================================
+  Overall (22539):   0%|          | 0/5 [00:00<?, ?it/s]
+
+  [FILE READY] 001.opus (38328 bytes)
+  001.opus: 100%|██████████| 38.3K/38.3K [00:01<00:00, 38.1KB/s]
+
+  [SAVED] 001.opus (38328 bytes)
+
+  ... (continues)
+
+============================================================
+Session [3/18]: 20260225022946
+  Files: 4, Size: 148122 bytes
+============================================================
+  All 4 files already synced locally
+
+... (continues for all sessions)
+
+============================================================
+All Sessions Sync Summary
+============================================================
+  Total sessions: 18
+  Successfully synced: 18
+  Failed: 0
+============================================================
+```
+
+**Features:**
+- Overall progress bar showing session completion
+- Skips already synced sessions automatically
+- Shows per-session progress
+- Final summary with success/failure count
 
 ## Session States
 

@@ -579,11 +579,104 @@ class ReSpeakerSync:
         print(f"✓ Files saved to: {session_dir.absolute()}")
 
 
+    async def sync_all_sessions(self, continuous: bool = False):
+        """Sync all sessions from device
+
+        Args:
+            continuous: If True, keep waiting for new files (for active recordings)
+        """
+        print("\n" + "="*60)
+        print("Sync All Sessions Mode")
+        print("="*60)
+
+        # Get all sessions
+        sessions = await self.list_sessions()
+        if not sessions:
+            print("\nNo sessions found on device")
+            return False
+
+        # Sort by session ID (oldest first for stable download order)
+        sessions = sorted(sessions, key=lambda x: x['id'])
+
+        print(f"\nFound {len(sessions)} session(s) to sync")
+
+        # Calculate total files
+        total_files = sum(sess.get('files', 0) for sess in sessions)
+        total_size = sum(sess.get('size', 0) for sess in sessions)
+
+        print(f"Total files across all sessions: {total_files}")
+        print(f"Total size: {total_size:,} bytes ({total_size / 1024 / 1024:.1f} MB)")
+
+        # Create overall progress bar for all sessions
+        if self.has_tqdm and len(sessions) > 0:
+            all_sessions_pbar = self.tqdm(
+                total=len(sessions),
+                unit='session',
+                desc="  All sessions",
+                ncols=60,
+                leave=True,
+            )
+        else:
+            all_sessions_pbar = None
+
+        # Sync each session
+        completed_count = 0
+        failed_sessions = []
+
+        for i, sess in enumerate(sessions):
+            session_id = sess['id']
+            session_files = sess.get('files', 0)
+            session_size = sess.get('size', 0)
+
+            print(f"\n{'='*60}")
+            print(f"Session [{i+1}/{len(sessions)}]: {session_id}")
+            print(f"  Files: {session_files}, Size: {session_size} bytes")
+            print(f"{'='*60}")
+
+            # Sync this session (oneshot mode for completed sessions)
+            try:
+                result = await self.sync_session(session_id, continuous=continuous)
+                if result:
+                    completed_count += 1
+                else:
+                    failed_sessions.append(session_id)
+            except Exception as e:
+                print(f"  ✗ Error syncing session: {e}")
+                failed_sessions.append(session_id)
+
+            # Update overall progress
+            if all_sessions_pbar:
+                all_sessions_pbar.update(1)
+
+        # Close overall progress bar
+        if all_sessions_pbar:
+            all_sessions_pbar.close()
+
+        # Final summary
+        print(f"\n{'='*60}")
+        print("All Sessions Sync Summary")
+        print(f"{'='*60}")
+        print(f"  Total sessions: {len(sessions)}")
+        print(f"  Successfully synced: {completed_count}")
+        print(f"  Failed: {len(failed_sessions)}")
+
+        if failed_sessions:
+            print(f"\n  Failed sessions:")
+            for sess_id in failed_sessions:
+                print(f"    - {sess_id}")
+
+        print(f"{'='*60}")
+
+        return len(failed_sessions) == 0
+
+
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description="ReSpeaker Clip Sync Tool")
     parser.add_argument("--device", "-d", help="Device MAC address")
     parser.add_argument("--session", "-s", help="Specific session to sync")
+    parser.add_argument("--all-sessions", "-a", action="store_true",
+                       help="Sync all sessions from device")
     parser.add_argument("--status", action="store_true", help="Show status and exit")
     parser.add_argument("--oneshot", action="store_true",
                        help="One-shot mode: exit when no new files (default: continuous for active recordings)")
@@ -600,6 +693,10 @@ async def main():
 
         if args.status:
             return 0
+
+        # Sync all sessions
+        if args.all_sessions:
+            return 0 if await sync.sync_all_sessions(continuous=not args.oneshot) else 1
 
         # Determine which session to sync
         session_id = args.session
