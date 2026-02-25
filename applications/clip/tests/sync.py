@@ -429,6 +429,10 @@ class ReSpeakerSync:
                     if self._overall_progress:
                         self._overall_progress.close()
                         self._overall_progress = None
+                    # Delete session from device after successful sync
+                    print("\nDeleting session from device...")
+                    if await self.delete_session(session_id):
+                        print(f"✓ Session {session_id} deleted from device")
                     return True
 
                 print(f"  Resuming from: {start_file}")
