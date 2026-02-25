@@ -427,13 +427,6 @@ class ReSpeakerSync:
                     print(f"  Status: All files up to date")
                     print(f"{'='*60}")
                     if self._overall_progress:
-                    print(f"\n{'='*60}")
-                    print(f"✓ Sync Complete!")
-                    print(f"  Session: {session_id}")
-                    print(f"  Files: {len(local_files)}/{total_files} already synced")
-                    print(f"  Status: All files up to date")
-                    print(f"{'='*60}")
-                    if self._overall_progress:
                         self._overall_progress.close()
                         self._overall_progress = None
                     return True

@@ -386,8 +386,37 @@ class ClipClient:
         sessions = response.get("data", [])
         print(f"Found {len(sessions)} session(s):")
         for sess in sessions:
-            print(f"  - {sess['id']}: {sess['files']} files, {sess['size']} bytes")
+            synced = sess.get('synced', 0)
+            print(f"  - {sess['id']}: {sess['files']} files, {sess['size']} bytes, {synced} synced")
         return sessions
+
+    async def get_session_info(self, session_id):
+        """Get session info (file count, total size, synced count)"""
+        print(f"\n=== Getting session info: {session_id} ===")
+        response = await self.send_command(f"AT+LIST={session_id}")
+        if not response.get("ok"):
+            print(f"✗ Failed: {response.get('error')}")
+            return None
+
+        data = response.get("data", {})
+        info = {
+            'files': data.get('files', 0),
+            'size': data.get('size', 0),
+            'synced': data.get('synced', 0)
+        }
+        print(f"  Files: {info['files']}, Size: {info['size']}, Synced: {info['synced']}")
+        return info
+
+    async def delete_session(self, session_id):
+        """Delete a session from device after successful sync"""
+        print(f"\n=== Deleting session: {session_id} ===")
+        response = await self.send_command(f"AT+DELETE={session_id}")
+        if response.get("ok"):
+            print(f"✓ Session deleted: {session_id}")
+            return True
+        else:
+            print(f"✗ Failed to delete: {response.get('error')}")
+            return False
 
     async def download_session(self, session_id):
         """Download all files from a session continuously until all files transferred"""
@@ -458,6 +487,11 @@ class ClipClient:
             # Always save and merge files, even if disconnected
             print(f"\n\n  Processing {len(self.completed_files)} files...")
             await self._save_and_merge_files(session_id)
+
+            # Delete session from device after successful transfer
+            if len(self.completed_files) > 0:
+                print("\n  Deleting session from device after successful transfer...")
+                await self.delete_session(session_id)
 
         self.downloading_file = False
         return True
