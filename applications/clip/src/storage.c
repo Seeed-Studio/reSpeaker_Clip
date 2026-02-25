@@ -12,13 +12,11 @@
 #include <zephyr/logging/log.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "storage.h"
 
 LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
-
-/* SD Card access mutex - prevents concurrent read/write conflicts */
-K_MUTEX_DEFINE(sd_card_mutex);
 
 /* SD Card and File System */
 static FATFS fat_fs;
@@ -46,17 +44,6 @@ static int flush_write_buffer(void);
 static int update_free_space(void);
 
 static uint32_t free_space_mb = 0;
-
-/* Public API for SD card lock */
-void storage_lock_sd_card(void)
-{
-	k_mutex_lock(&sd_card_mutex, K_FOREVER);
-}
-
-void storage_unlock_sd_card(void)
-{
-	k_mutex_unlock(&sd_card_mutex);
-}
 
 int storage_init(void)
 {
@@ -202,9 +189,10 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 	buffer_pos = 0;
 	current_file_ptr = &file->_internal_file;
 
-	/* Open file for writing */
+	/* Open file for writing - FATFS handles thread safety internally */
 	fs_file_t_init(current_file_ptr);
 	rc = fs_open(current_file_ptr, filepath, FS_O_CREATE | FS_O_WRITE);
+
 	if (rc != 0) {
 		LOG_ERR("Failed to create file: %d (path: %s)", rc, filepath);
 		/* Check if directory exists */
@@ -568,10 +556,7 @@ static int flush_write_buffer(void)
 		return 0;
 	}
 
-	/* Lock SD card for write operation */
-	storage_lock_sd_card();
-
-	/* Retry write on failure */
+	/* Retry write on failure - FATFS handles thread safety internally */
 	while (retry_count < max_retries) {
 		written = fs_write(current_file_ptr, write_buffer, buffer_pos);
 
@@ -581,23 +566,17 @@ static int flush_write_buffer(void)
 				LOG_WRN("SD partial write: %zd/%u", written, buffer_pos);
 			}
 			buffer_pos = 0;
-			storage_unlock_sd_card();
 			return 0;
 		}
 
-		/* Write failed, retry */
+		/* Write failed, retry immediately */
 		retry_count++;
 		if (retry_count < max_retries) {
 			LOG_WRN("SD write failed: %zd, retrying (%d/%d)...",
 				written, retry_count, max_retries);
-			storage_unlock_sd_card();  /* Unlock before sleep */
-			k_sleep(K_MSEC(10));  /* Wait before retry */
-			storage_lock_sd_card();  /* Re-lock before retry */
 		}
 	}
 
-	/* All retries failed */
-	storage_unlock_sd_card();
 	LOG_ERR("SD write error after %d retries: %zd", max_retries, written);
 	return written;
 }
@@ -721,6 +700,12 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 	return count;
 }
 
+/* Simple string comparison for sorting */
+static int compare_filenames(const void *a, const void *b)
+{
+	return strcmp((const char *)a, (const char *)b);
+}
+
 int storage_list_session_files(const char *session_id, char (*files)[32], int max_files)
 {
 	char session_path[64];
@@ -762,6 +747,11 @@ int storage_list_session_files(const char *session_id, char (*files)[32], int ma
 	}
 
 	fs_closedir(&dirp);
+
+	/* Sort files by name to ensure correct transfer order */
+	if (count > 0) {
+		qsort(files, count, 32, compare_filenames);
+	}
 
 	return count;
 }

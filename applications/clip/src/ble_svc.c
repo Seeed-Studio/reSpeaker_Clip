@@ -290,6 +290,15 @@ static void le_param_updated(struct bt_conn *conn, uint16_t interval,
 
     if (!mtu_exchanged && current_conn == conn) {
         bt_gatt_exchange_mtu(conn, &mtu_params);
+        /* After MTU exchange, request faster connection parameters for better throughput */
+        struct bt_le_conn_param fast_params = {
+            .interval_min = 6,   /* 7.5ms - fastest for stable transfer */
+            .interval_max = 6,   /* 7.5ms - fixed interval */
+            .latency = 0,
+            .timeout = 200,
+        };
+        LOG_INF("Requesting fast connection params: interval=6 (7.5ms)");
+        bt_conn_le_param_update(conn, &fast_params);
     }
 }
 
@@ -405,10 +414,7 @@ int ble_svc_send_response(const char *json)
         chunk_count++;
         offset += chunk_len;
 
-        /* Small delay between chunks to avoid overwhelming the client */
-        if (offset < total_len) {
-            k_sleep(K_MSEC(5));
-        }
+        /* No delay - let BLE flow control handle pacing */
     }
 
     LOG_DBG("Sent %d chunks, total %u bytes", chunk_count, (uint32_t)total_len);
@@ -423,6 +429,8 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
     size_t offset = 0;
     int retry_count = 0;
     const int max_retries = 3;
+    int64_t notify_start, notify_end;
+    static int notify_count = 0;
 
     if (!file_data_notify_enabled || !current_conn) {
         return -ENOTCONN;
@@ -441,10 +449,18 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
         /* Retry logic for temporary failures */
         retry_count = 0;
         do {
+            notify_start = k_uptime_get();
             err = bt_gatt_notify(current_conn, &clip_svc.attrs[7],
                                   data + offset, chunk_len);
+            notify_end = k_uptime_get();
 
             if (err == 0) {
+                /* Log timing every 50 notifications */
+                notify_count++;
+                if (notify_count % 50 == 0) {
+                    LOG_DBG("[BLE] notify #%d: %zu bytes took %lldms",
+                            notify_count, chunk_len, notify_end - notify_start);
+                }
                 break;  /* Success */
             }
 
@@ -452,6 +468,8 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
             if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY) {
                 retry_count++;
                 if (retry_count < max_retries) {
+                    LOG_WRN("[BLE] notify failed (offset=%u, err=%d), retrying %d/%d",
+                            (uint32_t)offset, err, retry_count, max_retries);
                     k_sleep(K_MSEC(10));  /* Wait before retry */
                     continue;
                 }

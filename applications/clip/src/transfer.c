@@ -22,10 +22,15 @@ static struct k_work transfer_work;
 static struct fs_file_t transfer_file;
 static bool transfer_file_open = false;
 
+/* Track last successfully transferred file to avoid skipping after refresh */
+static char last_transferred_file[32] = {0};
+
 /* Transfer configuration */
-#define TRANSFER_CHUNK_SIZE 500
+/* 240 bytes = 1 BLE notification (MTU 247 - 3 ATT header) for optimal throughput */
+#define TRANSFER_CHUNK_SIZE 240
 #define TRANSFER_THREAD_STACK_SIZE 4096
-#define TRANSFER_THREAD_PRIORITY 5
+/* Lower priority than audio thread (5) to prevent PDM RX queue overflow */
+#define TRANSFER_THREAD_PRIORITY 7
 
 /* Transfer thread stack */
 K_THREAD_STACK_DEFINE(transfer_thread_stack, TRANSFER_THREAD_STACK_SIZE);
@@ -45,6 +50,7 @@ static void transfer_cleanup(void);
 int transfer_init(void)
 {
 	memset(&current_transfer, 0, sizeof(current_transfer));
+	memset(last_transferred_file, 0, sizeof(last_transferred_file));
 
 	/* Set thread running flag BEFORE creating thread */
 	transfer_thread_running = true;
@@ -90,6 +96,7 @@ int transfer_start(const char *session_id, const char *filename)
 
 	/* Initialize transfer state */
 	memset(&current_transfer, 0, sizeof(current_transfer));
+	memset(last_transferred_file, 0, sizeof(last_transferred_file));
 	current_transfer.state = TRANSFER_STATE_TRANSMITTING;
 	current_transfer.direction = TRANSFER_DIR_UPLOAD;
 
@@ -128,7 +135,13 @@ int transfer_start(const char *session_id, const char *filename)
 		current_transfer.total_files = err;
 		current_transfer.file_index = 0;
 		LOG_INF("Session has %u files to transfer", current_transfer.total_files);
-		for (int i = 0; i < err; i++) {
+		LOG_INF("File list: %s, %s, %s, %s, %s...",
+		     current_transfer.file_list[0],
+		     err > 1 ? current_transfer.file_list[1] : "",
+		     err > 2 ? current_transfer.file_list[2] : "",
+		     err > 3 ? current_transfer.file_list[3] : "",
+		     err > 4 ? current_transfer.file_list[4] : "");
+		for (int i = 0; i < err && i < 10; i++) {
 			LOG_DBG("  File %d: %s", i, current_transfer.file_list[i]);
 		}
 	}
@@ -138,9 +151,6 @@ int transfer_start(const char *session_id, const char *filename)
 	k_sem_give(&transfer_trigger_sem);
 
 	LOG_INF("Transfer started: %s%s%s", session_id, filename ? "/" : "", filename ? filename : "");
-
-	/* Small delay to ensure filesystem is ready */
-	k_sleep(K_MSEC(100));
 
 	return 0;
 }
@@ -264,11 +274,29 @@ process_next_file:
 							/* Update total files - don't reset file_index */
 							int old_total = current_transfer.total_files;
 							current_transfer.total_files = ret;
-							LOG_INF("Refreshed file list (total: %d, new: %d), continuing from index %u",
-							     ret, ret - old_total, current_transfer.file_index);
+							LOG_DBG("Refreshed file list: %d files (old:%d, new:%d), last_transferred=%s",
+							     ret, old_total, ret - old_total, last_transferred_file);
+							LOG_DBG("File list: %s, %s, %s, %s, %s...",
+							     current_transfer.file_list[0],
+							     ret > 1 ? current_transfer.file_list[1] : "",
+							     ret > 2 ? current_transfer.file_list[2] : "",
+							     ret > 3 ? current_transfer.file_list[3] : "",
+							     ret > 4 ? current_transfer.file_list[4] : "");
 
-							/* Check if we've reached the end of the list */
-							if (current_transfer.file_index >= current_transfer.total_files) {
+							/* Find first file that hasn't been transferred yet */
+							bool found_next = false;
+							for (int i = 0; i < ret; i++) {
+								if (strcmp(current_transfer.file_list[i], last_transferred_file) > 0) {
+									/* Found first file after last_transferred_file */
+									current_transfer.file_index = i;
+									found_next = true;
+									LOG_DBG("Resuming from file[%u]=%s (after %s)",
+									     i, current_transfer.file_list[i], last_transferred_file);
+									break;
+								}
+							}
+
+							if (!found_next) {
 								/* All files transferred, wait for new files */
 								LOG_INF("All files transferred, waiting for new files...");
 								k_sleep(K_MSEC(500));
@@ -294,18 +322,35 @@ process_next_file:
 			}
 		}
 
-		/* Send data chunks */
+		/* Send data chunks - FATFS handles thread safety internally */
 		while (transfer_thread_running &&
 		       current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
+
+			/* First chunk: log start */
+			if (current_transfer.bytes_transferred == 0) {
+				LOG_INF("File transfer started: %s (index=%u, total_files=%u)",
+				        current_transfer.current_file,
+				        current_transfer.file_index, current_transfer.total_files);
+			}
+
 			ret = transfer_send_chunk();
 			if (ret != 0) {
 				if (ret == -EOF) {
 					/* File complete, move to next file */
-					LOG_INF("File transfer complete: %s", current_transfer.current_file);
+					LOG_INF("File transfer complete: %s (bytes_transferred=%llu, next_index=%u)",
+					        current_transfer.current_file,
+					        current_transfer.bytes_transferred,
+					        current_transfer.file_index);
+
+					/* Remember last successfully transferred file */
+					strncpy(last_transferred_file, current_transfer.current_file,
+					       sizeof(last_transferred_file) - 1);
+					last_transferred_file[sizeof(last_transferred_file) - 1] = '\0';
 
 					/* Notify client that file transfer is complete */
 					ble_svc_send_file_complete(current_transfer.current_file);
 
+					/* Close file */
 					fs_close(&transfer_file);
 					transfer_file_open = false;
 					/* Clear current file to trigger next file load */
@@ -330,11 +375,10 @@ process_next_file:
 
 			/* Check if paused */
 			if (current_transfer.state == TRANSFER_STATE_PAUSED) {
+				/* Close file while paused */
+				fs_close(&transfer_file);
 				break;
 			}
-
-			/* Small delay to avoid blocking other tasks */
-			k_sleep(K_MSEC(10));
 		}
 	}
 
@@ -354,12 +398,10 @@ static int transfer_next_file(void)
 		/* Wait for file to finish writing before opening */
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
-			LOG_INF("File %s is being written, waiting for it to complete...",
-			        current_transfer.current_file);
+			LOG_DBG("File %s is being written, waiting...", current_transfer.current_file);
 			k_sleep(K_MSEC(500));
 		}
-		LOG_INF("File %s is ready, opening for transfer",
-		        current_transfer.current_file);
+		LOG_DBG("File %s is ready, opening for transfer", current_transfer.current_file);
 
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 			 current_transfer.session_id, current_transfer.current_file);
@@ -367,6 +409,8 @@ static int transfer_next_file(void)
 		/* Get next file from file list */
 		if (current_transfer.file_index >= current_transfer.total_files) {
 			/* No more files */
+			LOG_DBG("No more files: index=%u >= total=%u",
+			        current_transfer.file_index, current_transfer.total_files);
 			return -ENOENT;
 		}
 
@@ -379,38 +423,53 @@ static int transfer_next_file(void)
 		/* Wait for the new file to finish writing before opening */
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
-			LOG_INF("File %s is being written, waiting for it to complete...",
-			        current_transfer.current_file);
+			LOG_DBG("File %s is being written, waiting...", current_transfer.current_file);
 			k_sleep(K_MSEC(500));
 		}
-		LOG_INF("File %s is ready, opening for transfer",
-		        current_transfer.current_file);
+		LOG_DBG("File %s is ready, opening for transfer", current_transfer.current_file);
 
 		/* Now open the file */
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 		         current_transfer.session_id, current_transfer.current_file);
 	}
 
-	/* Open file */
+	/* Open file for reading - NO LOCK NEEDED for read-only access */
 	fs_file_t_init(&transfer_file);
 	ret = fs_open(&transfer_file, filepath, FS_O_READ);
 	if (ret != 0) {
 		LOG_ERR("Failed to open file: %s (%d)", filepath, ret);
+		/* Clear current file to trigger retry */
+		current_transfer.current_file[0] = '\0';
 		return ret;
 	}
 
 	transfer_file_open = true;
+	LOG_DBG("Successfully opened %s for transfer", current_transfer.current_file);
 
 	/* Get file size */
 	struct fs_dirent entry;
 	ret = fs_stat(filepath, &entry);
 	if (ret == 0) {
-		current_transfer.total_bytes += entry.size;
-		LOG_INF("Opened file: %s (%u bytes, total: %u)",
-		         current_transfer.current_file, (uint32_t)entry.size,
-		         (uint32_t)current_transfer.total_bytes);
+		LOG_DBG("Opened file: %s (%u bytes)",
+		         current_transfer.current_file, (uint32_t)entry.size);
+
+		/* Check if file is empty - skip it if so */
+		if (entry.size == 0) {
+			LOG_DBG("File is empty (0 bytes), skipping - may still be writing");
+			/* Close and skip this file */
+			fs_close(&transfer_file);
+			transfer_file_open = false;
+			/* Clear current file to try next file */
+			current_transfer.current_file[0] = '\0';
+			/* Don't increment file_index since we didn't actually transfer */
+			return -ENOENT;  /* Use ENOENT to signal "skip this file" */
+		}
+
+		/* Reset total_bytes for this file (not cumulative) */
+		current_transfer.total_bytes = entry.size;
 	} else {
-		LOG_INF("Opened file: %s (size unknown)", current_transfer.current_file);
+		LOG_DBG("Opened file: %s (size unknown)", current_transfer.current_file);
+		current_transfer.total_bytes = 0;
 	}
 
 	return 0;
@@ -421,22 +480,12 @@ static int transfer_send_chunk(void)
 	uint8_t chunk[TRANSFER_CHUNK_SIZE];
 	ssize_t bytes_read;
 	int ret;
+	int64_t read_start, read_end, send_start, send_end;
 
-	/* Check if any file is being written BEFORE reading */
-	if (storage_get_writing_file(NULL, NULL, NULL, NULL)) {
-		/* A file is being written, skip this chunk and wait */
-		k_sleep(K_MSEC(20));
-		return 0;  /* Return success but no data sent */
-	}
-
-	/* Lock SD card for read operation */
-	storage_lock_sd_card();
-
-	/* Read chunk from file */
+	/* Read chunk from file - file should already be opened, lock is held at file level */
+	read_start = k_uptime_get();
 	bytes_read = fs_read(&transfer_file, chunk, TRANSFER_CHUNK_SIZE);
-
-	/* Unlock SD card immediately after read - BLE send can happen without lock */
-	storage_unlock_sd_card();
+	read_end = k_uptime_get();
 
 	if (bytes_read < 0) {
 		LOG_ERR("File read error: %zd (file_open=%d, offset=%llu)",
@@ -446,12 +495,15 @@ static int transfer_send_chunk(void)
 
 	if (bytes_read == 0) {
 		/* End of file */
-		LOG_INF("End of file reached (total: %llu bytes)", current_transfer.bytes_transferred);
+		LOG_DBG("End of file reached (total: %llu bytes)", current_transfer.bytes_transferred);
 		return -EOF;
 	}
 
-	/* Send via BLE (without SD card lock) */
+	/* Send via BLE */
+	send_start = k_uptime_get();
 	ret = ble_svc_send_file_data(chunk, bytes_read);
+	send_end = k_uptime_get();
+
 	if (ret != 0) {
 		LOG_ERR("BLE send error: %d (chunk size: %zd) - NOT COUNTED", ret, bytes_read);
 		return ret;
@@ -459,10 +511,13 @@ static int transfer_send_chunk(void)
 
 	/* Only increment bytes_transferred if send actually succeeded */
 	current_transfer.bytes_transferred += bytes_read;
-	LOG_DBG("Sent chunk: %zd bytes, total: %llu", bytes_read, current_transfer.bytes_transferred);
 
-	/* Small delay to avoid overwhelming the system */
-	k_sleep(K_MSEC(10));
+	/* Print timing breakdown every 50 chunks (12KB) */
+	if ((current_transfer.bytes_transferred / bytes_read) % 50 == 0) {
+		LOG_INF("[TIMING] read:%lldms send:%lldms total:%llu bytes",
+		        read_end - read_start, send_end - send_start,
+		        current_transfer.bytes_transferred);
+	}
 
 	return 0;
 }

@@ -48,18 +48,6 @@ struct storage_file {
 int storage_init(void);
 
 /**
- * @brief Lock SD card for exclusive access
- *
- * Use this to prevent concurrent read/write conflicts
- */
-void storage_lock_sd_card(void);
-
-/**
- * @brief Unlock SD card access
- */
-void storage_unlock_sd_card(void);
-
-/**
  * @brief Cleanup storage subsystem
  */
 void storage_cleanup(void);

@@ -13,9 +13,18 @@ import json
 import os
 import struct
 import sys
+import threading
 import wave
 from bleak import BleakClient, BleakScanner
 from pathlib import Path
+
+# Try to import tqdm for progress bar
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    print("Note: tqdm not installed. Install with: pip install tqdm")
 
 # Try to import opuslib for decoding (requires native libopus)
 HAS_OPUSLIB = False
@@ -58,6 +67,11 @@ class ClipClient:
         self._last_filename = None  # Last file that received file_ready event
         self._last_file_size = 0
         self.session_dir = None  # Download directory for current session
+        # Progress bar support
+        self._current_file_progress = 0  # Bytes received for current file
+        self._progress_bar = None  # tqdm progress bar
+        self._progress_lock = threading.Lock()  # Thread-safe progress updates
+        self._last_progress_update = 0  # For throttling progress updates
 
     def stop_download(self):
         """Signal the download to stop after current file completes"""
@@ -71,6 +85,17 @@ class ClipClient:
 
     def _disconnect_callback(self, client):
         print("\n[!] Device disconnected")
+        # Save any partial data and merge files
+        if self.downloading_file and self.session_dir:
+            print("[!] Saving partial data...")
+            if len(self.current_file_data) > 0 and self._last_filename:
+                filepath = self.session_dir / self._last_filename
+                with open(filepath, "wb") as f:
+                    f.write(self.current_file_data)
+                print(f"[!] Saved partial: {self._last_filename} ({len(self.current_file_data)} bytes)")
+                # Add to completed files for merging
+                if self._last_filename not in [f[0] for f in self.completed_files]:
+                    self.completed_files.append((self._last_filename, bytes(self.current_file_data)))
 
     async def connect(self):
         print("Scanning...")
@@ -122,6 +147,8 @@ class ClipClient:
 
                     if event_type == "file_complete":
                         filename = event_data.get("filename", "")
+                        # Close progress bar
+                        self._close_progress_bar()
                         print(f"\n  [DEBUG] file_complete: {filename}, data_size={len(self.current_file_data)}, last_file={self._last_filename}", flush=True)
                         # Only save if matches the last ready file AND has data
                         if filename == self._last_filename and len(self.current_file_data) > 0:
@@ -138,13 +165,18 @@ class ClipClient:
                     elif event_type == "file_ready":
                         filename = event_data.get("filename", "")
                         size = event_data.get("size", 0)
-                        print(f"\n  [FILE READY] {filename} ({size} bytes) - will start transfer", flush=True)
-                        # Clear previous file data when new file is ready
-                        if len(self.current_file_data) > 0 and self._last_filename and self._last_filename != filename:
-                            print(f"\n  [DEBUG] Clearing previous data for: {self._last_filename}", flush=True)
-                            self.current_file_data = bytearray()
-                        self._last_filename = filename
-                        self._last_file_size = size
+                        print(f"\n  [FILE READY] {filename} ({size} bytes)", flush=True)
+                        # Only switch to new file if we're not currently receiving data for a different file
+                        # The device will send file_complete for each file in order
+                        if self._last_filename is None or self._last_filename == filename:
+                            # No file currently being received, or same file (duplicate event)
+                            self._last_filename = filename
+                            self._last_file_size = size
+                            self._current_file_progress = 0
+                            # Create new progress bar
+                            self._create_progress_bar(filename, size)
+                        # else: we're currently receiving a different file, ignore this event
+                        # the device will send file_complete when current file is done
                     else:
                         # Not an event, store as regular response
                         self.last_response = response_str
@@ -163,6 +195,51 @@ class ClipClient:
             # Regular file data
             self.current_file_data.extend(data)
             self.file_data.extend(data)  # Also keep in main buffer for progress tracking
+            # Update progress bar
+            self._update_progress(len(data))
+
+    def _create_progress_bar(self, filename, total_size):
+        """Create a new progress bar for file transfer"""
+        if not HAS_TQDM:
+            return
+        with self._progress_lock:
+            if self._progress_bar is not None:
+                self._progress_bar.close()
+            self._progress_bar = tqdm(
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=f"  {filename}",
+                ncols=60,
+                leave=False,
+                file=sys.stdout
+            )
+            self._current_file_progress = 0
+            self._last_progress_update = 0
+
+    def _update_progress(self, chunk_size):
+        """Update progress bar with received data (throttled)"""
+        if not HAS_TQDM or self._progress_bar is None:
+            return
+        with self._progress_lock:
+            self._current_file_progress += chunk_size
+            # Only update UI every 4KB to reduce overhead
+            if self._current_file_progress - self._last_progress_update >= 4096:
+                self._progress_bar.update(self._current_file_progress - self._last_progress_update)
+                self._last_progress_update = self._current_file_progress
+
+    def _close_progress_bar(self):
+        """Close the current progress bar"""
+        if not HAS_TQDM:
+            return
+        with self._progress_lock:
+            if self._progress_bar is not None:
+                # Final update to show 100%
+                if self._current_file_progress > self._last_progress_update:
+                    self._progress_bar.update(self._current_file_progress - self._last_progress_update)
+                self._progress_bar.close()
+                self._progress_bar = None
 
     def decode_opus_to_wav(self, opus_data, wav_path, sample_rate=16000, channels=2):
         """Decode Opus frame data to WAV file.
@@ -336,60 +413,71 @@ class ClipClient:
         last_file_count = 0
         no_new_files_count = 0
 
-        # Continue until stop signal AND all files transferred
-        while True:
-            await asyncio.sleep(1)
+        try:
+            # Continue until stop signal AND all files transferred
+            while True:
+                await asyncio.sleep(1)
 
-            # Check if user requested stop (Enter pressed)
-            if self._stop_requested and not self._recording_stopped:
-                print("\n  [INFO] Stop requested, waiting for transfer to complete...", flush=True)
-                self._recording_stopped = True
-                # Don't break yet - continue to wait for files
+                # Check if user requested stop (Enter pressed)
+                if self._stop_requested and not self._recording_stopped:
+                    print("\n  [INFO] Stop requested, waiting for transfer to complete...", flush=True)
+                    self._recording_stopped = True
+                    # Don't break yet - continue to wait for files
 
-            # Check if we should exit after recording stopped
-            if self._recording_stopped:
-                # Check if we have received new files recently
-                current_file_count = len(self.completed_files)
-                if current_file_count > last_file_count:
-                    last_file_count = current_file_count
-                    no_new_files_count = 0
-                else:
-                    no_new_files_count += 1
-                    print(f"  Waiting for transfer... ({no_new_files_count}/5)", flush=True)
+                # Check if we should exit after recording stopped
+                if self._recording_stopped:
+                    # Check if we have received new files recently
+                    current_file_count = len(self.completed_files)
+                    if current_file_count > last_file_count:
+                        last_file_count = current_file_count
+                        no_new_files_count = 0
+                    else:
+                        no_new_files_count += 1
+                        print(f"  Waiting for transfer... ({no_new_files_count}/5)", flush=True)
 
-                    # If 5 seconds (5 checks) with no new files, assume done
-                    if no_new_files_count >= 5:
-                        print("  ✓ All files transferred", flush=True)
-                        break
-
-        # Save all completed files
-        print(f"\n\n  Saving {len(self.completed_files)} files...")
-        for filename, file_data in self.completed_files:
-            filepath = session_dir / filename
-            with open(filepath, "wb") as f:
-                f.write(file_data)
-            print(f"  ✓ Saved: {filename} ({len(file_data)} bytes)")
-
-        # Save any remaining data (last file might still be recording)
-        if len(self.current_file_data) > 0:
-            # Get current file list to find the last file
-            list_resp = await self.send_command(f"AT+LIST={session_id}")
-            if list_resp.get("ok"):
-                current_files = list_resp.get("data", [])
-                if current_files:
-                    # Find which file we haven't saved yet
-                    saved_filenames = [f[0] for f in self.completed_files]
-                    for f in current_files:
-                        if f not in saved_filenames:
-                            filepath = session_dir / f
-                            with open(filepath, "wb") as f:
-                                f.write(self.current_file_data)
-                            print(f"  ✓ Saved: {f} ({len(self.current_file_data)} bytes)")
+                        # If 5 seconds (5 checks) with no new files, assume done
+                        if no_new_files_count >= 5:
+                            print("  ✓ All files transferred", flush=True)
                             break
+        finally:
+            # Always save and merge files, even if disconnected
+            print(f"\n\n  Processing {len(self.completed_files)} files...")
+            await self._save_and_merge_files(session_id)
 
-        print(f"\n  ✓ Download complete: {len(self.completed_files)} files saved")
         self.downloading_file = False
         return True
+
+    async def _save_and_merge_files(self, session_id):
+        """Save any remaining data and merge all files into one"""
+        # Save any remaining data (last file might still be recording)
+        if len(self.current_file_data) > 0 and self._last_filename:
+            print(f"  Saving partial file: {self._last_filename}")
+            filepath = self.session_dir / self._last_filename
+            with open(filepath, "wb") as f:
+                f.write(self.current_file_data)
+            # Also add to completed files
+            if self._last_filename not in [f[0] for f in self.completed_files]:
+                self.completed_files.append((self._last_filename, bytes(self.current_file_data)))
+
+        # Sort files by name (001.opus, 002.opus, etc.)
+        sorted_files = sorted(self.completed_files, key=lambda x: x[0])
+
+        if not sorted_files:
+            print("  No files to merge")
+            return
+
+        # Merge all Opus files into one
+        merged_file = self.session_dir.parent / f"{session_id}.opus"
+        print(f"\n  Merging {len(sorted_files)} files -> {merged_file.name}...", flush=True)
+
+        total_size = 0
+        with open(merged_file, "wb") as outfile:
+            for filename, data in sorted_files:
+                outfile.write(data)
+                total_size += len(data)
+                print(f"    + {filename} ({len(data)} bytes)", flush=True)
+
+        print(f"  ✓ Merged: {merged_file.name} ({total_size} bytes)", flush=True)
 
     async def run_test(self):
         """Run recording with simultaneous transfer - manual stop with Enter key"""
@@ -444,19 +532,27 @@ class ClipClient:
             self.stop_download()
 
             # Wait for transfer to complete
-            await download_task
+            try:
+                await download_task
+            except Exception as e:
+                print(f"\n[!] Transfer interrupted: {e}")
+                # Still try to merge any files we received
+                if self.session_dir and self.completed_files:
+                    print("[!] Merging received files...")
+                    await self._save_and_merge_files(session)
 
             print("\n" + "="*50)
             print("Test complete!")
             print("="*50)
-            print(f"\nFiles saved to: {DOWNLOAD_DIR.absolute()}/")
+            print(f"\nFiles saved to: {DOWNLOAD_DIR.absolute()}")
 
-            if HAS_OPUSLIB:
-                print("Note: Opus files have been automatically decoded to WAV.")
+            # Show merged file info
+            merged_file = DOWNLOAD_DIR / f"{session}.opus"
+            if merged_file.exists():
+                size = merged_file.stat().st_size
+                print(f"  Merged file: {merged_file.name} ({size} bytes)")
             else:
-                print("\nTo decode Opus files manually:")
-                print("  ffmpeg -f opus -i merged.opus -ar 16000 output.wav")
-                print("  (Windows users: download ffmpeg from https://ffmpeg.org/)")
+                print(f"  Note: Merged file not created")
 
         finally:
             await self.disconnect()

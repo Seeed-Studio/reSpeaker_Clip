@@ -22,6 +22,8 @@ import json
 import struct
 import time
 import argparse
+import os
+import threading
 from typing import Optional, Callable, Any
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
@@ -87,6 +89,26 @@ class ReSpeakerClipClient:
         self.transfer_progress = 0
         self.last_notification = None
 
+        # Session download state
+        self._session_files = {}  # filename -> bytes
+        self._session_file_events = {}  # filename -> asyncio.Event
+        self._current_file_data = bytearray()
+        self._last_filename = None
+        self._last_file_size = 0
+        self._current_file_progress = 0
+        self._progress_lock = threading.Lock()
+        self._progress_bar = None
+        self._last_progress_update = 0
+
+        # Try to import tqdm for progress bars
+        try:
+            from tqdm import tqdm
+            self._tqdm = tqdm
+            self._has_tqdm = True
+        except ImportError:
+            self._tqdm = None
+            self._has_tqdm = False
+
     async def connect(self) -> bool:
         """Connect to the device"""
         if self.address is None:
@@ -136,12 +158,95 @@ class ReSpeakerClipClient:
         try:
             text = data.decode('utf-8').strip()
             self.last_notification = text
+
+            # Handle session download events
+            try:
+                event = json.loads(text)
+                event_type = event.get("event")
+
+                if event_type == "file_ready":
+                    filename = event.get("filename", "")
+                    size = event.get("size", 0)
+                    print(f"\n  [FILE READY] {filename} ({size} bytes)", flush=True)
+                    # Only switch to new file if we're not currently receiving data for a different file
+                    if self._last_filename is None or self._last_filename == filename:
+                        self._last_filename = filename
+                        self._last_file_size = size
+                        self._current_file_progress = 0
+                        self._create_progress_bar(filename, size)
+
+                elif event_type == "file_complete":
+                    filename = event.get("filename", "")
+                    data_size = len(self._current_file_data)
+                    print(f"\n  [FILE COMPLETE] {filename} ({data_size} bytes)", flush=True)
+
+                    # Close progress bar
+                    with self._progress_lock:
+                        if self._progress_bar is not None:
+                            remaining = self._last_file_size - self._last_progress_update
+                            if remaining > 0:
+                                self._progress_bar.update(remaining)
+                            self._progress_bar.close()
+                            self._progress_bar = None
+
+                    # Store file data
+                    self._session_files[filename] = bytes(self._current_file_data)
+                    self._current_file_data.clear()
+
+                    # Signal that file is complete
+                    if filename in self._session_file_events:
+                        self._session_file_events[filename].set()
+
+                    # Reset for next file
+                    self._last_filename = None
+                    self._current_file_progress = 0
+                    self._last_file_size = 0
+
+            except json.JSONDecodeError:
+                pass  # Not a JSON event
+
         except:
             self.last_notification = data.hex()
 
     def _file_data_handler(self, sender, data: bytearray):
         """Handle file data during transfer"""
-        self.file_data_buffer.extend(data)
+        # Handle session download mode
+        if self._last_filename is not None:
+            self._current_file_data.extend(data)
+            self._update_progress(len(data))
+        else:
+            # Legacy mode
+            self.file_data_buffer.extend(data)
+
+    def _update_progress(self, chunk_size: int):
+        """Update progress bar with received data (throttled)"""
+        if not self._has_tqdm or self._progress_bar is None:
+            return
+        with self._progress_lock:
+            self._current_file_progress += chunk_size
+            # Only update UI every 4KB to reduce overhead
+            if self._current_file_progress - self._last_progress_update >= 4096:
+                self._progress_bar.update(self._current_file_progress - self._last_progress_update)
+                self._last_progress_update = self._current_file_progress
+
+    def _create_progress_bar(self, filename: str, total_size: int):
+        """Create a new progress bar for a file"""
+        if not self._has_tqdm:
+            print(f"\n  Receiving: {filename} ({total_size} bytes)", flush=True)
+            return
+        with self._progress_lock:
+            if self._progress_bar is not None:
+                self._progress_bar.close()
+            self._progress_bar = self._tqdm(
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=f"  {filename}",
+                disable=None
+            )
+            self._current_file_progress = 0
+            self._last_progress_update = 0
 
     async def send_command(self, command: str) -> dict:
         """Send AT command and wait for response"""
@@ -222,6 +327,120 @@ class ReSpeakerClipClient:
                 except json.JSONDecodeError:
                     pass
         return None
+
+    async def download_session(self, session_id: str, output_file: str = None,
+                              stop_recording: bool = False) -> dict:
+        """
+        Download all files from a session, wait for completion, and merge into one file.
+
+        Args:
+            session_id: Session ID to download
+            output_file: Output filename (default: <session_id>.opus)
+            stop_recording: If True, stop recording before waiting for all files
+
+        Returns:
+            dict with success status and file info
+        """
+        if output_file is None:
+            output_file = f"{session_id}.opus"
+
+        # Clear session state
+        self._session_files.clear()
+        self._session_file_events.clear()
+        self._current_file_data.clear()
+        self._last_filename = None
+
+        # Start download for the session
+        response = await self.send_command(f"AT+DOWNLOAD={session_id}")
+        if not response.get("ok"):
+            return {"success": False, "error": response.get("error", "Failed to start download")}
+
+        print(f"  Download started for session: {session_id}")
+        print(f"  Files will be saved as they complete (press Ctrl+C to stop early)")
+        print()
+
+        # Wait a bit for transfer to start
+        await asyncio.sleep(0.5)
+
+        # Optionally stop recording after a delay
+        if stop_recording:
+            await asyncio.sleep(1.0)  # Let transfer start
+            print("  Stopping recording...")
+            response = await self.send_command("AT+STOP")
+            if response.get("ok"):
+                duration = response["data"].get("duration")
+                print(f"  Recording stopped. Duration: {duration}s")
+            print()
+
+        # Wait for all files to complete
+        # We'll wait for 5 minutes of no new files + session closed
+        last_file_time = time.time()
+        no_file_timeout = 30.0  # 30 seconds with no new files
+        max_wait_time = 300.0  # Maximum 5 minutes total
+        session_closed = False
+        start_time = time.time()
+
+        print("  Waiting for all files to sync...", flush=True)
+        if self._has_tqdm:
+            print("  (Files will appear as they complete)", flush=True)
+
+        while time.time() - start_time < max_wait_time:
+            await asyncio.sleep(0.5)
+
+            # Check if session is closed (recording stopped)
+            if not session_closed:
+                response = await self.send_command("AT+GSTAT")
+                if response.get("ok"):
+                    state = response["data"].get("state")
+                    if state == "IDLE":
+                        session_closed = True
+                        print(f"  Session closed, waiting for remaining files...", flush=True)
+
+            # Check for file_complete events via last_notification
+            # (Events are handled in _notification_handler)
+            current_file_count = len(self._session_files)
+            if current_file_count > 0:
+                last_file_time = time.time()
+
+            # If session is closed and no new files for a while, we're done
+            if session_closed:
+                if time.time() - last_file_time > no_file_timeout:
+                    print(f"\n  All files received! ({current_file_count} files)", flush=True)
+                    break
+
+        # Close any remaining progress bar
+        with self._progress_lock:
+            if self._progress_bar is not None:
+                self._progress_bar.close()
+                self._progress_bar = None
+
+        # Check if we got any files
+        if not self._session_files:
+            return {"success": False, "error": "No files received"}
+
+        # Sort files by name (001.opus, 002.opus, etc.)
+        sorted_files = sorted(self._session_files.keys())
+
+        print(f"\n  Merging {len(sorted_files)} files into {output_file}...", flush=True)
+
+        # Merge Opus files (simple concatenation works for Ogg Opus)
+        with open(output_file, "wb") as outfile:
+            total_size = 0
+            for filename in sorted_files:
+                data = self._session_files[filename]
+                outfile.write(data)
+                total_size += len(data)
+                print(f"    + {filename} ({len(data)} bytes)", flush=True)
+
+        print(f"\n  [DONE] Merged {len(sorted_files)} files -> {output_file} ({total_size} bytes)", flush=True)
+
+        return {
+            "success": True,
+            "output_file": output_file,
+            "file_count": len(sorted_files),
+            "total_size": total_size,
+            "files": sorted_files
+        }
 
 
 # ============================= Test Cases =============================
@@ -704,6 +923,7 @@ class InteractiveMode:
         print("  gstat         - Get device status")
         print("  start [mode]  - Start recording (normal/enhanced)")
         print("  stop          - Stop recording")
+        print("  rec [mode]    - Record, download & merge (auto-stop)")
         print("  mark [note]   - Add bookmark")
         print("  list          - List sessions")
         print("  list <session> - List session files")
@@ -751,6 +971,24 @@ class InteractiveMode:
             mode = args if args in ["normal", "enhanced"] else "normal"
             response = await self.client.send_command(f"AT+START={mode}")
             print(json.dumps(response, indent=2))
+
+        elif command == "rec":
+            mode = args if args in ["normal", "enhanced"] else "normal"
+            print(f"Starting recording in {mode} mode...")
+            response = await self.client.send_command(f"AT+START={mode}")
+            if not response.get("ok"):
+                print(f"Failed to start recording: {response.get('error')}")
+                return
+
+            session_id = response["data"].get("session")
+            print(f"Recording started: {session_id}")
+
+            # Start download with auto-stop
+            result = await self.client.download_session(session_id, stop_recording=True)
+            if result.get("success"):
+                print(f"\nRecording saved to: {result['output_file']}")
+            else:
+                print(f"\nRecording failed: {result.get('error')}")
 
         elif command == "stop":
             response = await self.client.send_command("AT+STOP")
@@ -816,11 +1054,12 @@ class InteractiveMode:
                 print(f"Unknown command: {cmd}")
 
     def show_help(self):
-        """Show help information"""
+        """Show help information")
         print("\nAvailable commands:")
         print("  gstat         - Get device status")
         print("  start [mode]  - Start recording (normal/enhanced)")
         print("  stop          - Stop recording")
+        print("  rec [mode]    - Record, download & merge (auto-stop)")
         print("  mark [note]   - Add bookmark")
         print("  list          - List sessions")
         print("  list <session> - List session files")
