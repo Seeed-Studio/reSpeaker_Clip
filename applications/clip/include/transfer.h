@@ -122,4 +122,34 @@ bool transfer_is_paused(void);
  */
 enum transfer_state transfer_get_state(void);
 
+/**
+ * @brief Get current transfer session info
+ *
+ * @param session_id Output buffer for session ID (can be NULL)
+ * @param len Size of session_id buffer
+ * @param filename Output buffer for current filename (can be NULL)
+ * @param filename_len Size of filename buffer
+ * @return 0 on success, negative error code on failure
+ */
+int transfer_get_current_session(char *session_id, size_t len, char *filename, size_t filename_len);
+
+/**
+ * @brief Get total files count for current transfer
+ *
+ * @return Total files count, or 0 if no active transfer
+ */
+uint32_t transfer_get_total_files(void);
+
+/**
+ * @brief Get transfer progress without copying entire struct
+ *
+ * @param progress_percent Output for progress percent (can be NULL)
+ * @param bytes_transferred Output for bytes transferred (can be NULL)
+ * @param total_bytes Output for total bytes (can be NULL)
+ * @param state Output for transfer state (can be NULL)
+ * @return 0 on success, negative error code on failure
+ */
+int transfer_get_progress_lite(uint8_t *progress_percent, uint64_t *bytes_transferred,
+                               uint64_t *total_bytes, enum transfer_state *state);
+
 #endif /* TRANSFER_H */

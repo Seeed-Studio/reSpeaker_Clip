@@ -192,6 +192,7 @@ class ReSpeakerSync:
                         self._last_filename = None
 
                 elif event_type == "file_ready":
+                    # NOTE: Device no longer sends file_ready events - kept for compatibility
                     filename = event_data.get("filename", "")
                     size = event_data.get("size", 0)
 
@@ -385,17 +386,23 @@ class ReSpeakerSync:
                 print(f"  Synced progress: {synced_files}/{total_files} files")
             remaining = max(0, total_files - synced_files)
             print(f"  Remaining to sync: ~{remaining} files")
+        else:
+            print(f"  Device reports: {total_files} files (empty session)")
 
         # Determine starting file - use synced_files as reference
         start_file = None
 
-        # Check if already synced all files
-        if total_files > 0 and synced_files >= total_files:
+        # Check if already synced all files OR session is empty
+        if (total_files == 0) or (total_files > 0 and synced_files >= total_files):
             print(f"\n{'='*60}")
             print(f"✓ Sync Complete!")
             print(f"  Session: {session_id}")
-            print(f"  Files: {synced_files}/{total_files} already synced")
-            print(f"  Status: All files up to date")
+            if total_files == 0:
+                print(f"  Files: Empty session (no files on device)")
+                print(f"  Status: Session already empty")
+            else:
+                print(f"  Files: {synced_files}/{total_files} already synced")
+                print(f"  Status: All files up to date")
             print(f"{'='*60}")
             # Optionally delete session from device after successful sync
             print("\nDeleting session from device...")
@@ -410,13 +417,13 @@ class ReSpeakerSync:
         # Start from the file after the last synced file
         if synced_files > 0 and synced_files < total_files:
             next_num = synced_files + 1
-            start_file = f"{next_num:03d}.opus"
+            start_file = f"{next_num:04d}.opus"
         elif local_files:
             # Fallback to local files if synced_files is 0
             try:
                 last_num = int(local_files[-1].split('.')[0])
                 next_num = last_num + 1
-                start_file = f"{next_num:03d}.opus"
+                start_file = f"{next_num:04d}.opus"
 
                 # Don't request files beyond the device's total count
                 if total_files > 0 and next_num > total_files:
@@ -450,15 +457,30 @@ class ReSpeakerSync:
         # Create overall progress bar (starting from existing file count)
         if self.has_tqdm and total_files > 0:
             overall_desc = f"  Overall ({session_id[-6:]})"
-            self._overall_progress = self.tqdm(
-                total=total_files,
-                unit='file',
-                desc=overall_desc,
-                ncols=70,
-                leave=True,
-                initial=len(local_files),  # Start from existing file count
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
-            )
+            # For continuous mode (recording sessions), show file count without fixed total
+            # For oneshot mode (completed sessions), show progress toward known total
+            if continuous:
+                # Don't show total - just show count of files transferred
+                self._overall_progress = self.tqdm(
+                    total=None,  # Unknown/variable total
+                    unit='file',
+                    desc=overall_desc,
+                    ncols=70,
+                    leave=True,
+                    initial=len(local_files),
+                    bar_format='{l_bar}{bar}| {n_fmt} files [{elapsed}]',
+                )
+            else:
+                # Fixed total for completed sessions
+                self._overall_progress = self.tqdm(
+                    total=total_files,
+                    unit='file',
+                    desc=overall_desc,
+                    ncols=70,
+                    leave=True,
+                    initial=len(local_files),
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                )
         else:
             self._overall_progress = None
 
@@ -473,6 +495,19 @@ class ReSpeakerSync:
         response = await self.send_command(cmd)
         if not response.get("ok"):
             error = response.get("error", "")
+
+            # Check if session doesn't exist on device
+            if "not found" in error.lower() or "session" in error.lower():
+                print(f"\n  [!] Session '{session_id}' not found on device")
+                print(f"  [!] Local files exist in: {self.session_dir}")
+                print(f"  [!] This session was likely already deleted from the device")
+                print(f"\n  Options:")
+                print(f"    - Keep local files: Do nothing (files are already downloaded)")
+                print(f"    - Delete local files: Remove the directory manually")
+                print(f"      {self.session_dir}")
+                if self._overall_progress:
+                    self._overall_progress.close()
+                return False
 
             # If error is about busy transfer, wait and retry
             if "busy" in error.lower() or "already in progress" in error.lower() or "failed to start transfer" in error.lower():
@@ -491,11 +526,21 @@ class ReSpeakerSync:
                     if self._overall_progress:
                         self._overall_progress.close()
                     return False
-            else:
-                print(f"Error starting download: {error}")
-                if self._overall_progress:
-                    self._overall_progress.close()
-                return False
+
+        # Extract file info from response
+        data = response.get("data", {})
+        filename = data.get("filename", "")
+        if filename:
+            self._last_filename = filename
+            self._last_file_size = data.get("size", 0)
+            self._current_file_progress = 0
+            print(f"  [INFO] Transferring: {filename}", flush=True)
+        elif start_file:
+            # Set the expected filename
+            self._last_filename = start_file
+        else:
+            # No filename info available
+            pass
 
         print("Syncing files... (Press Ctrl+C to stop)\n")
 
@@ -610,6 +655,10 @@ class ReSpeakerSync:
 
         if not sorted_files:
             print("No files to merge")
+            # Delete empty session from device
+            print(f"\nDeleting empty session {session_id} from device...")
+            if await self.delete_session(session_id):
+                print(f"✓ Session deleted from device")
             return
 
         # Merge

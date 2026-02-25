@@ -85,6 +85,14 @@ int transfer_start(const char *session_id, const char *filename)
 		return -EBUSY;
 	}
 
+	/* Check if this is a different session - if so, cancel old transfer */
+	if (transfer_is_active() &&
+	    strncmp(current_transfer.session_id, session_id, sizeof(current_transfer.session_id)) != 0) {
+		LOG_INF("New session requested, canceling old transfer (old: %s, new: %s)",
+		        current_transfer.session_id, session_id);
+		transfer_cleanup();
+	}
+
 	/* Wait for any previous transfer to complete and clean up
 	 * This handles the case where transfer thread is between files
 	 */
@@ -180,15 +188,19 @@ int transfer_start(const char *session_id, const char *filename)
 		}
 		current_transfer.total_files = err;
 		current_transfer.file_index = 0;
-		LOG_INF("Session has %u files to transfer", current_transfer.total_files);
-		LOG_INF("File list: %s, %s, %s, %s, %s...",
-		     current_transfer.file_list[0],
-		     err > 1 ? current_transfer.file_list[1] : "",
-		     err > 2 ? current_transfer.file_list[2] : "",
-		     err > 3 ? current_transfer.file_list[3] : "",
-		     err > 4 ? current_transfer.file_list[4] : "");
-		for (int i = 0; i < err && i < 10; i++) {
-			LOG_DBG("  File %d: %s", i, current_transfer.file_list[i]);
+		if (err == 0) {
+			LOG_INF("Session exists but has no files yet, will wait for new files");
+		} else {
+			LOG_INF("Session has %u files to transfer", current_transfer.total_files);
+			LOG_INF("File list: %s, %s, %s, %s, %s...",
+			     current_transfer.file_list[0],
+			     err > 1 ? current_transfer.file_list[1] : "",
+			     err > 2 ? current_transfer.file_list[2] : "",
+			     err > 3 ? current_transfer.file_list[3] : "",
+			     err > 4 ? current_transfer.file_list[4] : "");
+			for (int i = 0; i < err && i < 10; i++) {
+				LOG_DBG("  File %d: %s", i, current_transfer.file_list[i]);
+			}
 		}
 	}
 
@@ -432,6 +444,61 @@ enum transfer_state transfer_get_state(void)
 	return current_transfer.state;
 }
 
+int transfer_get_current_session(char *session_id, size_t len, char *filename, size_t filename_len)
+{
+	if (!transfer_is_active()) {
+		return -EINVAL;
+	}
+
+	if (session_id && len > 0) {
+		strncpy(session_id, current_transfer.session_id, len - 1);
+		session_id[len - 1] = '\0';
+	}
+
+	if (filename && filename_len > 0) {
+		if (current_transfer.current_file[0] != '\0') {
+			strncpy(filename, current_transfer.current_file, filename_len - 1);
+			filename[filename_len - 1] = '\0';
+		} else {
+			filename[0] = '\0';
+		}
+	}
+
+	return 0;
+}
+
+uint32_t transfer_get_total_files(void)
+{
+	if (!transfer_is_active()) {
+		return 0;
+	}
+
+	return current_transfer.total_files;
+}
+
+int transfer_get_progress_lite(uint8_t *progress_percent, uint64_t *bytes_transferred,
+                               uint64_t *total_bytes, enum transfer_state *state)
+{
+	if (!transfer_is_active()) {
+		return -EINVAL;
+	}
+
+	if (progress_percent) {
+		*progress_percent = current_transfer.progress_percent;
+	}
+	if (bytes_transferred) {
+		*bytes_transferred = current_transfer.bytes_transferred;
+	}
+	if (total_bytes) {
+		*total_bytes = current_transfer.total_bytes;
+	}
+	if (state) {
+		*state = current_transfer.state;
+	}
+
+	return 0;
+}
+
 /* Internal functions */
 static void transfer_thread_main(void *p1, void *p2, void *p3)
 {
@@ -451,25 +518,35 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 		/* Process transfer */
 		int ret;
 		static int consecutive_file_errors = 0;  /* Track repeated file open failures */
+		static int consecutive_empty_refreshes = 0;  /* Track repeated empty file list refreshes */
 
 process_next_file:
 
+		/* Check BLE connection first - if disconnected, stop waiting */
+		if (!ble_svc_is_ready()) {
+			LOG_INF("BLE disconnected, stopping transfer (process_next_file)");
+			transfer_cleanup();
+			/* Wait for next transfer */
+			transfer_thread_waiting = true;
+			k_sem_take(&transfer_trigger_sem, K_FOREVER);
+			transfer_thread_waiting = false;
+			goto process_next_file;
+		}
+
 		/* Check if paused */
 		if (current_transfer.state == TRANSFER_STATE_PAUSED) {
-			/* If paused due to BLE disconnect, wait for reconnection */
+			/* If paused due to BLE disconnect, stop transfer (don't wait for reconnect) */
 			if (!ble_svc_is_ready()) {
-				LOG_INF("Waiting for BLE reconnection...");
-				/* Wait for BLE to reconnect */
-				while (!ble_svc_is_ready() && transfer_thread_running) {
-					k_sleep(K_MSEC(1000));
-				}
-				if (!transfer_thread_running) {
-					break;  /* Thread is shutting down */
-				}
-				LOG_INF("BLE reconnected, resuming transfer");
+				LOG_INF("BLE disconnected, stopping transfer");
+				transfer_cleanup();
+				/* Wait for next transfer */
+				transfer_thread_waiting = true;
+				k_sem_take(&transfer_trigger_sem, K_FOREVER);
+				transfer_thread_waiting = false;
+				goto process_next_file;
 			}
 
-			/* Resume transfer */
+			/* Resume transfer (still connected) */
 			current_transfer.state = TRANSFER_STATE_TRANSMITTING;
 			LOG_INF("Transfer resumed");
 			goto process_next_file;
@@ -487,35 +564,55 @@ process_next_file:
 			}
 			if (ret != 0) {
 				LOG_INF("File open failed (%d), checking error type", ret);
-				if (ret == -ENOENT) {
+				if (ret == -ENOTCONN) {
+					/* BLE disconnected - stop transfer immediately */
+					LOG_INF("BLE disconnected, stopping transfer");
+					transfer_cleanup();
+					/* Wait for next transfer */
+					transfer_thread_waiting = true;
+					k_sem_take(&transfer_trigger_sem, K_FOREVER);
+					transfer_thread_waiting = false;
+					goto process_next_file;
+				} else if (ret == -ENOENT) {
 					/* No more files at this moment - could be:
 					 * 1. Empty file was deleted (transfer_next_file deletes 0-byte files)
 					 * 2. End of file list reached
 					 * 3. Session directory not found
 					 * Refresh file list to check for more files after deletion
 					 */
-					/* Check if session is closed (recording stopped) */
-					if (storage_session_is_closed(current_transfer.session_id)) {
-						/* Session closed, transfer complete */
-						current_transfer.state = TRANSFER_STATE_COMPLETED;
-						LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
+					LOG_INF("No more files (ENOENT), checking if should wait for more files...");
+					/* Check if we should wait for more files:
+					 * Only wait if device is currently recording AND this is the recording session
+					 */
+					extern bool audio_is_recording(void);
+					extern const char *audio_get_session_id(void);
 
-						/* Notify Python that transfer is complete */
-						ble_svc_send_transfer_complete(current_transfer.session_id,
-						                               (int)current_transfer.file_index);
+					bool is_recording = audio_is_recording();
+					bool is_current_session = false;
 
-						transfer_cleanup();
-						/* Wait for next transfer - go back to sem wait */
-						transfer_thread_waiting = true;
-						k_sem_take(&transfer_trigger_sem, K_FOREVER);
-						transfer_thread_waiting = false;
-						goto process_next_file;
+					if (is_recording) {
+						const char *recording_session = audio_get_session_id();
+						is_current_session = (strcmp(current_transfer.session_id, recording_session) == 0);
+						LOG_INF("Device recording=%d, current_session=%d (recording_session=%s, transfer_session=%s)",
+						        is_recording, is_current_session,
+						        is_recording ? recording_session : "N/A",
+						        current_transfer.session_id);
 					} else {
-						/* Session still recording, refresh file list and try again */
+						LOG_INF("Device not recording, transfer complete");
+					}
+
+					/* Only wait if actively recording this session */
+					if (is_recording && is_current_session) {
+						/* Still recording this session, refresh file list and try again */
+						LOG_INF("Session still recording, refreshing file list...");
 						ret = storage_list_session_files(current_transfer.session_id,
 						                                 current_transfer.file_list,
 						                                 TRANSFER_MAX_FILES);
+						LOG_INF("Refresh returned: %d files", ret);
 						if (ret > 0) {
+							/* Found files, reset empty refresh counter */
+							consecutive_empty_refreshes = 0;
+
 							/* Update total files - don't reset file_index */
 							int old_total = current_transfer.total_files;
 							current_transfer.total_files = ret;
@@ -529,8 +626,10 @@ process_next_file:
 									/* Empty filename - end of list */
 									break;
 								}
-								if (strcmp(current_transfer.file_list[i], last_transferred_file) > 0) {
-									/* Found first file after last_transferred_file */
+								/* If last_transferred_file is empty, start from first file */
+								if (last_transferred_file[0] == '\0' ||
+								    strcmp(current_transfer.file_list[i], last_transferred_file) > 0) {
+									/* Found first file after last_transferred_file (or first file) */
 									current_transfer.file_index = i;
 									found_next = true;
 									LOG_DBG("Resuming from file[%u]=%s (after %s)",
@@ -583,10 +682,50 @@ process_next_file:
 							goto process_next_file;
 						} else {
 							/* No new files yet, wait a bit */
-							LOG_DBG("No files found, waiting...");
+							consecutive_empty_refreshes++;
+							LOG_INF("No files found after refresh (ret=%d), consecutive_empty_refreshes=%d, waiting 500ms...",
+							     ret, consecutive_empty_refreshes);
+
+							/* If we've had many empty refreshes and device is not recording, complete the transfer */
+							if (consecutive_empty_refreshes > 10) {  /* 5 seconds of no new files */
+								extern bool audio_is_recording(void);
+								if (!audio_is_recording()) {
+									LOG_INF("No new files for 5 seconds and not recording, completing transfer");
+									current_transfer.state = TRANSFER_STATE_COMPLETED;
+
+									/* Notify Python that transfer is complete */
+									ble_svc_send_transfer_complete(current_transfer.session_id,
+									                               (int)current_transfer.file_index);
+
+									transfer_cleanup();
+									transfer_thread_waiting = true;
+									k_sem_take(&transfer_trigger_sem, K_FOREVER);
+									transfer_thread_waiting = false;
+									consecutive_empty_refreshes = 0;
+									goto process_next_file;
+								}
+							}
+
 							k_sleep(K_MSEC(500));
 							goto process_next_file;
 						}
+					} else {
+						/* Not recording or not current session - transfer complete immediately */
+						LOG_INF("Not recording or not current session, transfer complete");
+						current_transfer.state = TRANSFER_STATE_COMPLETED;
+						LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
+
+						/* Notify Python that transfer is complete */
+						ble_svc_send_transfer_complete(current_transfer.session_id,
+						                               (int)current_transfer.file_index);
+
+						transfer_cleanup();
+						/* Wait for next transfer - go back to sem wait */
+						transfer_thread_waiting = true;
+						k_sem_take(&transfer_trigger_sem, K_FOREVER);
+						transfer_thread_waiting = false;
+						consecutive_empty_refreshes = 0;  /* Reset for next transfer */
+						goto process_next_file;
 					}
 				} else {
 					/* Non-ENOENT error (e.g., file open failed) */
@@ -723,6 +862,11 @@ static int transfer_next_file(void)
 		/* Wait for file to finish writing before opening */
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
+			/* Check if BLE disconnected - abort transfer if so */
+			if (!ble_svc_is_ready()) {
+				LOG_INF("BLE disconnected while waiting for file, aborting transfer");
+				return -ENOTCONN;
+			}
 			LOG_DBG("File %s is being written, waiting...", current_transfer.current_file);
 			k_sleep(K_MSEC(500));
 		}
@@ -753,15 +897,19 @@ static int transfer_next_file(void)
 		strncpy(current_transfer.current_file,
 		        current_transfer.file_list[current_transfer.file_index],
 		        sizeof(current_transfer.current_file) - 1);
-		current_transfer.file_index++;
 
-		LOG_INF("Selected file for transfer: %s (new file_index=%u)",
+		LOG_INF("Selected file for transfer: %s (file_index=%u)",
 		        current_transfer.current_file, current_transfer.file_index);
 
 		/* Wait for the new file to finish writing before opening */
 		LOG_INF("Checking if file %s is being written...", current_transfer.current_file);
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
+			/* Check if BLE disconnected - abort transfer if so */
+			if (!ble_svc_is_ready()) {
+				LOG_INF("BLE disconnected while waiting for file, aborting transfer");
+				return -ENOTCONN;
+			}
 			LOG_INF("File %s is being written, waiting...", current_transfer.current_file);
 			k_sleep(K_MSEC(500));
 		}
@@ -778,14 +926,17 @@ static int transfer_next_file(void)
 	if (ret != 0) {
 		LOG_INF("FAILED to open file: %s (error=%d), file_index=%u, total_files=%u",
 		        filepath, ret, current_transfer.file_index, current_transfer.total_files);
-		/* Clear current file to trigger retry */
+		/* Clear current file to trigger retry - don't increment file_index yet */
 		current_transfer.current_file[0] = '\0';
-		/* Don't increment file_index again - it was already incremented */
 		return ret;
 	}
 
+	/* File opened successfully - now increment file_index */
+	current_transfer.file_index++;
+
 	transfer_file_open = true;
-	LOG_INF("Successfully opened %s for transfer", current_transfer.current_file);
+	LOG_INF("Successfully opened %s for transfer (file_index=%u)",
+	        current_transfer.current_file, current_transfer.file_index);
 
 	/* Get file size */
 	struct fs_dirent entry;

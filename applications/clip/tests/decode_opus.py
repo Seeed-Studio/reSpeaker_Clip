@@ -37,8 +37,8 @@ def decode_raw_opus(input_file, output_file, sample_rate=16000, channels=1):
     offset = 0
     while offset < min(200, len(raw_data)):
         frame_len = struct.unpack('<H', raw_data[offset:offset+2])[0]
-        # Look for small frame sizes (Opus frames are typically 50-200 bytes)
-        if 50 <= frame_len <= 300:
+        # Look for small frame sizes (Opus frames are typically 20-300 bytes)
+        if 10 <= frame_len <= 300:
             print(f"Found valid frame start at offset {offset}")
             break
         offset += 2

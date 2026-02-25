@@ -1067,17 +1067,44 @@ static int cmd_download(const struct at_command *cmd, char **response)
         return json_create_error("Failed to start transfer", response);
     }
 
-    /* Note: Transfer is a background operation, does not change state */
-    return json_create_success(NULL, response);
+    /* Return current file info in response */
+    char data[256];
+    char cur_session_id[32] = {0};
+    char cur_filename[64] = {0};
+    uint32_t total_files = 0;
+    int len;
+
+    err = transfer_get_current_session(cur_session_id, sizeof(cur_session_id), cur_filename, sizeof(cur_filename));
+    if (err == 0) {
+        total_files = transfer_get_total_files();
+        if (cur_filename[0] != '\0') {
+            len = snprintf(data, sizeof(data),
+                         "{\"session\":\"%s\",\"filename\":\"%s\",\"files\":%u}",
+                         cur_session_id, cur_filename, total_files);
+        } else {
+            len = snprintf(data, sizeof(data),
+                         "{\"session\":\"%s\",\"files\":%u}",
+                         cur_session_id, total_files);
+        }
+    } else {
+        /* Not actively transferring, return basic success */
+        return json_create_success(NULL, response);
+    }
+
+    return json_create_success(data, response);
 }
 
 static int cmd_progress(const struct at_command *cmd, char **response)
 {
-    struct transfer_info info;
     char data[256];
+    uint8_t progress_percent;
+    uint64_t bytes_transferred;
+    uint64_t total_bytes;
+    enum transfer_state state;
     int err;
 
-    err = transfer_get_progress(&info);
+    err = transfer_get_progress_lite(&progress_percent, &bytes_transferred,
+                                     &total_bytes, &state);
     if (err != 0) {
         return json_create_error("Failed to get progress", response);
     }
@@ -1087,10 +1114,10 @@ static int cmd_progress(const struct at_command *cmd, char **response)
              "\"transferred\":%llu,"
              "\"total\":%llu,"
              "\"state\":%u}",
-             info.progress_percent,
-             info.bytes_transferred,
-             info.total_bytes,
-             info.state);
+             progress_percent,
+             bytes_transferred,
+             total_bytes,
+             state);
 
     return json_create_success(data, response);
 }

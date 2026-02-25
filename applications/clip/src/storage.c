@@ -173,10 +173,10 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 		return -EBUSY;
 	}
 
-	/* Generate filename: NNN.opus */
-	snprintf(file->filename, sizeof(file->filename), "%03u.opus", file_index);
+	/* Generate filename: NNNN.opus (4-digit for 1000+ files) */
+	snprintf(file->filename, sizeof(file->filename), "%04u.opus", file_index);
 
-	/* Full path: /SD:/REC/<session_id>/<NNN.opus> */
+	/* Full path: /SD:/REC/<session_id>/<NNNN.opus> */
 	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, file->filename);
 
 	LOG_INF("Creating file: %s", filepath);
@@ -209,6 +209,9 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 
 	file->is_open = true;
 	total_files++;
+
+	/* Mark this file as being written */
+	storage_set_writing_file(session_id, file->filename);
 
 	LOG_INF("Recording file created: %s", file->filename);
 	return 0;
@@ -301,7 +304,29 @@ int storage_close_file(struct storage_file *file)
 
 	current_file_ptr = NULL;
 	file->is_open = false;
+
+	/* Check if file is empty (0 bytes written) - delete it to avoid issues */
+	if (file->bytes_written == 0) {
+		char filepath[128];
+		snprintf(filepath, sizeof(filepath), "%s/%s",
+		         current_session_dir, file->filename);
+
+		rc = fs_unlink(filepath);
+		if (rc == 0) {
+			LOG_INF("Deleted empty file: %s", filepath);
+		} else {
+			LOG_WRN("Failed to delete empty file %s: %d", filepath, rc);
+		}
+
+		/* Clear writing file status */
+		storage_set_writing_file(NULL, NULL);
+		return 0;
+	}
+
 	total_bytes += file->bytes_written;
+
+	/* Clear writing file status */
+	storage_set_writing_file(NULL, NULL);
 
 	/* Update free space */
 	update_free_space();
@@ -814,6 +839,7 @@ int storage_delete_session(const char *session_id)
 	struct fs_dir_t dirp;
 	struct fs_dirent entry;
 	int rc;
+	int deleted_count = 0;
 
 	if (!sd_mounted) {
 		return -ENODEV;
@@ -824,6 +850,7 @@ int storage_delete_session(const char *session_id)
 	}
 
 	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
+	LOG_INF("Deleting session: %s (path: %s)", session_id, session_path);
 
 	/* First, delete all files in the session directory */
 	fs_dir_t_init(&dirp);
@@ -838,16 +865,26 @@ int storage_delete_session(const char *session_id)
 			if (entry.type == FS_DIR_ENTRY_FILE) {
 				char filepath[128];
 				snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, entry.name);
-				fs_unlink(filepath);
+				rc = fs_unlink(filepath);
+				if (rc == 0) {
+					deleted_count++;
+					LOG_DBG("Deleted file: %s", entry.name);
+				} else {
+					LOG_WRN("Failed to delete file %s: %d", entry.name, rc);
+				}
 			}
 		}
 		fs_closedir(&dirp);
+		LOG_INF("Deleted %d files from session %s", deleted_count, session_id);
+	} else {
+		LOG_ERR("Failed to open session directory: %d", rc);
+		return rc;
 	}
 
 	/* Then delete the directory */
 	rc = fs_unlink(session_path);
 	if (rc != 0) {
-		LOG_ERR("Failed to delete session directory: %d", rc);
+		LOG_ERR("Failed to delete session directory %s: %d", session_path, rc);
 		return rc;
 	}
 

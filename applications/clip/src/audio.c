@@ -339,9 +339,7 @@ int audio_stop_recording(void)
 		storage_set_writing_file(NULL, NULL);
 		memset(&current_storage_file, 0, sizeof(current_storage_file));
 
-		/* Notify that file is ready for transfer */
-		ble_svc_send_file_ready(current_session_id,
-			completed_filename, completed_size);
+		/* NOTE: Recording and transfer are now separated - client initiates transfer via AT+DOWNLOAD */
 	}
 
 	/* Calculate duration */
@@ -636,9 +634,7 @@ create_new_segment:
 				/* Clear old writing file mark */
 				storage_set_writing_file(NULL, NULL);
 
-				/* Notify that file is ready for transfer */
-				ble_svc_send_file_ready(current_session_id,
-					completed_filename, completed_size);
+				/* NOTE: Recording and transfer are now separated - client initiates transfer via AT+DOWNLOAD */
 			}
 
 			/* Create new file with incremented index */

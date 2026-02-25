@@ -150,18 +150,30 @@ class ClipClient:
                         filename = event_data.get("filename", "")
                         # Close progress bar
                         self._close_progress_bar()
-                        print(f"\n  [DEBUG] file_complete: {filename}, data_size={len(self.current_file_data)}, last_file={self._last_filename}", flush=True)
-                        # Only save if matches the last ready file AND has data
-                        if filename == self._last_filename and len(self.current_file_data) > 0:
-                            filepath = self.session_dir / filename
-                            with open(filepath, "wb") as f:
-                                f.write(self.current_file_data)
-                            print(f"\n  [SAVED TO DISK] {filename} ({len(self.current_file_data)} bytes)", flush=True)
-                            self.completed_files.append((filename, bytes(self.current_file_data)))
+                        print(f"\n  [DEBUG] file_complete: {filename}, data_size={len(self.current_file_data)}", flush=True)
+                        # Save file if we have data for it
+                        if len(self.current_file_data) > 0:
+                            # Use filename from event if we don't have one set (file_ready was not sent)
+                            save_filename = self._last_filename if self._last_filename else filename
+                            if save_filename:
+                                filepath = self.session_dir / save_filename
+                                with open(filepath, "wb") as f:
+                                    f.write(self.current_file_data)
+                                print(f"\n  [SAVED TO DISK] {save_filename} ({len(self.current_file_data)} bytes)", flush=True)
+                                self.completed_files.append((save_filename, bytes(self.current_file_data)))
+                            else:
+                                print(f"\n  [DEBUG] No filename available, using {filename} as fallback", flush=True)
+                                # Use event filename as fallback
+                                if filename:
+                                    filepath = self.session_dir / filename
+                                    with open(filepath, "wb") as f:
+                                        f.write(self.current_file_data)
+                                    print(f"\n  [SAVED TO DISK] {filename} ({len(self.current_file_data)} bytes)", flush=True)
+                                    self.completed_files.append((filename, bytes(self.current_file_data)))
                             self.current_file_data = bytearray()
-                            self._last_filename = None
+                            self._last_filename = None  # Reset for next file
                         else:
-                            print(f"\n  [DEBUG] Skipping save: match={filename == self._last_filename}, data_size={len(self.current_file_data)}", flush=True)
+                            print(f"\n  [DEBUG] No data to save for file {filename}", flush=True)
 
                     elif event_type == "transfer_complete":
                         # All files in session have been transferred
@@ -172,20 +184,15 @@ class ClipClient:
                         self._transfer_complete = True
 
                     elif event_type == "file_ready":
+                        # NOTE: Device no longer sends file_ready events - kept for compatibility
                         filename = event_data.get("filename", "")
                         size = event_data.get("size", 0)
                         print(f"\n  [FILE READY] {filename} ({size} bytes)", flush=True)
-                        # Only switch to new file if we're not currently receiving data for a different file
-                        # The device will send file_complete for each file in order
                         if self._last_filename is None or self._last_filename == filename:
-                            # No file currently being received, or same file (duplicate event)
                             self._last_filename = filename
                             self._last_file_size = size
                             self._current_file_progress = 0
-                            # Create new progress bar
                             self._create_progress_bar(filename, size)
-                        # else: we're currently receiving a different file, ignore this event
-                        # the device will send file_complete when current file is done
                     else:
                         # Not an event, store as regular response
                         self.last_response = response_str
@@ -418,8 +425,13 @@ class ClipClient:
             print(f"✗ Failed to delete: {response.get('error')}")
             return False
 
-    async def download_session(self, session_id):
-        """Download all files from a session continuously until all files transferred"""
+    async def download_session(self, session_id, delete_after=False):
+        """Download all files from a session continuously until all files transferred
+
+        Args:
+            session_id: Session ID to download
+            delete_after: If True, delete session from device after successful transfer
+        """
         print(f"\n=== Downloading session: {session_id} ===")
         print(f"  [DEBUG] download_session called", flush=True)
 
@@ -443,6 +455,16 @@ class ClipClient:
         if not response.get("ok"):
             print(f"  ✗ Failed to start: {response.get('error')}")
             return False
+
+        # Extract file info from response
+        data = response.get("data", {})
+        filename = data.get("filename", "")
+        if filename:
+            self._last_filename = filename
+            self._last_file_size = data.get("size", 0)
+            self._current_file_progress = 0
+            self._create_progress_bar(filename, self._last_file_size)
+            print(f"  [INFO] Transferring: {filename}", flush=True)
 
         self.downloading_file = True
         self._should_stop_download = False  # Reset flag
@@ -488,8 +510,8 @@ class ClipClient:
             print(f"\n\n  Processing {len(self.completed_files)} files...")
             await self._save_and_merge_files(session_id)
 
-            # Delete session from device after successful transfer
-            if len(self.completed_files) > 0:
+            # Delete session from device after successful transfer (if requested)
+            if delete_after and len(self.completed_files) > 0:
                 print("\n  Deleting session from device after successful transfer...")
                 await self.delete_session(session_id)
 
@@ -571,7 +593,7 @@ class ClipClient:
             try:
                 last_num = int(local_files[-1].split('.')[0])
                 next_num = last_num + 1
-                start_file = f"{next_num:03d}.opus"
+                start_file = f"{next_num:04d}.opus"
                 print(f"  Resuming from: {start_file}")
             except (ValueError, IndexError):
                 print(f"  Warning: Could not determine resume point, starting from beginning")
@@ -599,7 +621,13 @@ class ClipClient:
 
             response = await self.send_command(cmd)
             if not response.get("ok"):
-                print(f"  ✗ Failed to start: {response.get('error')}")
+                error = response.get("error", "")
+                print(f"  ✗ Failed to start: {error}")
+                # Check if session doesn't exist on device
+                if "not found" in error.lower() or "session" in error.lower():
+                    print(f"\n  [!] Session '{session_id}' not found on device")
+                    print(f"  [!] This session was likely already deleted")
+                    return False
                 # If failed and not first attempt, might be disconnected
                 if retry_count > 0:
                     connection_lost = True
@@ -663,7 +691,7 @@ class ClipClient:
                             try:
                                 last_num = int(last_filename.split('.')[0])
                                 next_num = last_num + 1
-                                start_file = f"{next_num:03d}.opus"
+                                start_file = f"{next_num:04d}.opus"
                             except (ValueError, IndexError):
                                 pass
                     else:
