@@ -1393,15 +1393,11 @@ int at_cmd_execute(const struct at_command *cmd, char **response)
 {
     const struct cmd_entry *entry;
 
-    LOG_INF("Executing AT command: %s (type=%d)", cmd->name, cmd->type);
-
     /* Find command handler */
     for (entry = commands; entry->name; entry++) {
         if (strcmp(cmd->name, entry->name) == 0) {
             /* Check if command type is allowed */
-            LOG_INF("Found handler for command: %s (allowed types: %d)", entry->name, entry->allowed_types);
             if (!(entry->allowed_types & cmd->type)) {
-                LOG_ERR("Command type %d not supported for %s", cmd->type, entry->name);
                 return json_create_error("Command type not supported", response);
             }
 

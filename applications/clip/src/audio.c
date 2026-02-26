@@ -112,10 +112,8 @@ int audio_init(void)
 {
 	int ret;
 
-	LOG_INF("Initializing audio subsystem...");
-
 	if (!device_is_ready(dmic_dev)) {
-		LOG_ERR("DMIC device not ready");
+		LOG_ERR("dmic not ready");
 		return -ENODEV;
 	}
 
@@ -131,33 +129,32 @@ int audio_init(void)
 		current_bitrate = g_config.bitrate;
 	}
 
-	/* Initialize Opus encoder with config values */
+	/* Initialize Opus encoder */
 	ret = init_opus_encoder();
 	if (ret < 0) {
-		LOG_ERR("Failed to initialize Opus encoder: %d", ret);
+		LOG_ERR("opus_init: %d", ret);
 		return ret;
 	}
 
 #ifdef CONFIG_SPEEXDSP
-	/* Initialize SpeexDSP if enabled in config */
 	if (g_config.noise_suppress > 0) {
 		speex_enabled = true;
 		ret = init_speex_preprocessor();
 		if (ret < 0) {
-			LOG_WRN("Failed to initialize SpeexDSP: %d", ret);
+			LOG_WRN("speex_init: %d", ret);
 			speex_enabled = false;
 		}
 	}
 #endif
 
-	/* Configure channel map - stereo LEFT and RIGHT channels */
+	/* Configure channel map */
 	audio_cfg.channel.req_chan_map_lo = dmic_build_channel_map(0, 0, PDM_CHAN_LEFT);
 	audio_cfg.channel.req_chan_map_lo |= dmic_build_channel_map(1, 0, PDM_CHAN_RIGHT);
 
 	/* Configure DMIC */
 	ret = dmic_configure(dmic_dev, &audio_cfg);
 	if (ret < 0) {
-		LOG_ERR("Failed to configure DMIC: %d", ret);
+		LOG_ERR("dmic_cfg: %d", ret);
 		cleanup_opus_encoder();
 		return ret;
 	}
@@ -165,7 +162,7 @@ int audio_init(void)
 	/* Power on microphone */
 	ret = mic_power_on();
 	if (ret < 0) {
-		LOG_WRN("Failed to power on mic: %d", ret);
+		LOG_WRN("mic_pwr: %d", ret);
 	}
 
 	/* Set microphone gain - level 6 (+20dB) */
@@ -175,8 +172,7 @@ int audio_init(void)
 	nrf_pdm_gain_set(NRF_PDM0_NS, 0x3C, 0x3C);
 #endif
 
-	LOG_INF("Audio subsystem initialized: %d Hz, %d ch, %d bps",
-		AUDIO_SAMPLE_RATE, opus_channels, current_bitrate);
+	LOG_INF("audio: %dch %ukbps", opus_channels, current_bitrate/1000);
 
 	return 0;
 }
@@ -191,8 +187,6 @@ void audio_cleanup(void)
 	cleanup_opus_encoder();
 
 	mic_power_off();
-
-	LOG_INF("Audio subsystem cleaned up");
 }
 
 int audio_start_recording(enum audio_mode mode)
@@ -298,7 +292,9 @@ int audio_start_recording(enum audio_mode mode)
 
 	recording_active = true;
 
-	LOG_INF("Recording started");
+	LOG_INF("Recording started: %s mode, %u kbps",
+		(current_mode == AUDIO_MODE_STEREO) ? "stereo" : "mono",
+		current_bitrate/1000);
 	return 0;
 }
 
@@ -311,14 +307,12 @@ int audio_stop_recording(void)
 		return 0;
 	}
 
-	LOG_INF("Stopping recording");
-
 	recording_active = false;
 
 	/* Stop DMIC */
 	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
 	if (ret < 0) {
-		LOG_ERR("Failed to stop DMIC: %d", ret);
+		LOG_ERR("dmic_stop: %d", ret);
 	}
 
 	/* Close SD card file if open */
@@ -364,8 +358,7 @@ int audio_stop_recording(void)
 		stats.encode_time_avg_ms = encode_time_total / stats.frames_encoded;
 	}
 
-	LOG_INF("Recording stopped: %u frames, %u bytes, %u sec",
-		stats.frames_encoded, stats.total_bytes, duration_sec);
+	LOG_INF("Recording stopped: %u sec, %u KB", duration_sec, stats.total_bytes/1024);
 
 	return 0;
 }

@@ -50,28 +50,22 @@ int storage_init(void)
 {
 	int rc;
 
-	LOG_INF("Initializing SD card storage...");
-
-	/* Initialize SD card disk */
 	rc = disk_access_init("SD");
 	if (rc != 0) {
-		LOG_WRN("SD card init failed: %d", rc);
+		LOG_WRN("SD init failed: %d", rc);
 		return rc;
 	}
 
-	/* Try to mount the SD card */
 	rc = fs_mount(&mp);
 	if (rc != 0) {
-		LOG_WRN("SD card mount failed: %d (not formatted?)", rc);
-		LOG_INF("SD card functions disabled");
+		LOG_WRN("SD mount failed: %d", rc);
 		sd_mounted = false;
 		return 0;
 	}
 
 	sd_mounted = true;
-	LOG_INF("SD card mounted at %s", mp.mnt_point);
+	LOG_INF("SD card ready");
 
-	/* Update free space */
 	update_free_space();
 
 	return 0;
@@ -80,10 +74,8 @@ int storage_init(void)
 void storage_cleanup(void)
 {
 	if (sd_mounted) {
-		/* Unmount SD card */
 		fs_unmount(&mp);
 		sd_mounted = false;
-		LOG_INF("SD card unmounted");
 	}
 }
 
@@ -169,40 +161,27 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 
 	/* Check if a file is already open */
 	if (current_file_ptr != NULL) {
-		LOG_ERR("File already open");
 		return -EBUSY;
 	}
 
-	/* Generate filename: NNNN.opus (4-digit for 1000+ files) */
+	/* Generate filename: NNNN.opus */
 	snprintf(file->filename, sizeof(file->filename), "%04u.opus", file_index);
 
-	/* Full path: /SD:/REC/<session_id>/<NNNN.opus> */
 	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, file->filename);
-
-	LOG_INF("Creating file: %s", filepath);
 
 	/* Allocate file structure */
 	file->is_open = false;
 	file->bytes_written = 0;
 	file->frames_written = 0;
 
-	/* Reset write buffer */
 	buffer_pos = 0;
 	current_file_ptr = &file->_internal_file;
 
-	/* Open file for writing - FATFS handles thread safety internally */
 	fs_file_t_init(current_file_ptr);
 	rc = fs_open(current_file_ptr, filepath, FS_O_CREATE | FS_O_WRITE);
 
 	if (rc != 0) {
-		LOG_ERR("Failed to create file: %d (path: %s)", rc, filepath);
-		/* Check if directory exists */
-		struct fs_dirent entry;
-		char dirpath[128];
-		snprintf(dirpath, sizeof(dirpath), "/SD:/REC/%s", session_id);
-		int dir_rc = fs_stat(dirpath, &entry);
-		LOG_ERR("Directory check: %s -> %d (type=%d)", dirpath, dir_rc,
-		        dir_rc == 0 ? entry.type : -1);
+		LOG_ERR("File create failed: %s", file->filename);
 		current_file_ptr = NULL;
 		return rc;
 	}
@@ -325,14 +304,11 @@ int storage_close_file(struct storage_file *file)
 
 	total_bytes += file->bytes_written;
 
-	/* Clear writing file status */
 	storage_set_writing_file(NULL, NULL);
 
-	/* Update free space */
 	update_free_space();
 
-	LOG_INF("File closed: %s (%u bytes, %u frames)",
-		file->filename, file->bytes_written, file->frames_written);
+	LOG_DBG("File: %s %uKB", file->filename, file->bytes_written/1024);
 
 	return 0;
 }
@@ -362,7 +338,6 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 			session_id, duration_sec, file_count);
 		fs_write(&file, json_buf, len);
 		fs_close(&file);
-		LOG_INF("Created session.json");
 	}
 
 	/* Create files.lst */
@@ -370,7 +345,6 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 	fs_file_t_init(&file);
 	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
 	if (rc == 0) {
-		/* List all .opus files in session directory */
 		char session_path[64];
 		struct fs_dir_t dirp;
 		struct fs_dirent entry;
@@ -391,13 +365,11 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 			fs_closedir(&dirp);
 		}
 		fs_close(&file);
-		LOG_INF("Created files.lst");
 	}
 
-	/* Clear current session directory */
 	memset(current_session_dir, 0, sizeof(current_session_dir));
 
-	LOG_INF("Session closed: %s", session_id);
+	LOG_INF("Session: %s %u files", session_id, file_count);
 	return 0;
 }
 

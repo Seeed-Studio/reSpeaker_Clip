@@ -70,8 +70,6 @@ int transfer_init(void)
 		return -ENOMEM;
 	}
 
-	LOG_INF("Transfer subsystem initialized");
-
 	return 0;
 }
 
@@ -81,56 +79,43 @@ int transfer_start(const char *session_id, const char *filename)
 
 	/* Check if transfer is already active and sending data */
 	if (transfer_is_active() && transfer_file_open) {
-		LOG_WRN("Transfer already in progress (sending data)");
 		return -EBUSY;
 	}
 
 	/* Check if this is a different session - if so, cancel old transfer */
 	if (transfer_is_active() &&
 	    strncmp(current_transfer.session_id, session_id, sizeof(current_transfer.session_id)) != 0) {
-		LOG_INF("New session requested, canceling old transfer (old: %s, new: %s)",
-		        current_transfer.session_id, session_id);
+		LOG_DBG("Canceling old transfer: %s", current_transfer.session_id);
 		transfer_cleanup();
 	}
 
-	/* Wait for any previous transfer to complete and clean up
-	 * This handles the case where transfer thread is between files
-	 */
+	/* Wait for any previous transfer to complete and clean up */
 	int retry_count = 0;
 	while (current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
 		if (transfer_file_open) {
-			/* Still sending data, don't wait */
-			LOG_WRN("Transfer already in progress (sending data)");
 			return -EBUSY;
 		}
 
 		/* No file open - check if all files transferred */
 		if (current_transfer.total_files > 0 &&
 		    current_transfer.file_index >= current_transfer.total_files) {
-			if (retry_count == 0) {
-				LOG_INF("Previous transfer complete (index=%u, total=%u), waiting for cleanup...",
-				        current_transfer.file_index, current_transfer.total_files);
-			}
 			if (++retry_count > 20) {
-				LOG_WRN("Timeout waiting for cleanup, forcing cleanup");
+				LOG_WRN("Transfer cleanup timeout");
 				transfer_cleanup();
 				break;
 			}
 			k_sleep(K_MSEC(50));
 		} else {
-			/* Not all files transferred, might be waiting for next file */
-			LOG_INF("Waiting for previous transfer to finish...");
-			k_sleep(K_MSEC(100));
 			if (++retry_count > 50) {
-				LOG_WRN("Timeout waiting for transfer, forcing cleanup");
+				LOG_WRN("Transfer wait timeout");
 				transfer_cleanup();
 				break;
 			}
+			k_sleep(K_MSEC(100));
 		}
 	}
 
 	if (transfer_is_active()) {
-		LOG_WRN("Transfer still active after waiting");
 		return -EBUSY;
 	}
 
@@ -175,40 +160,28 @@ int transfer_start(const char *session_id, const char *filename)
 		/* Transfer single file */
 		strncpy(current_transfer.current_file, filename, sizeof(current_transfer.current_file) - 1);
 		current_transfer.total_files = 1;
-		/* Set total bytes for progress reporting */
 		current_transfer.total_bytes = entry.size;
-		LOG_INF("Single file transfer: %s (%u bytes)", filename, (uint32_t)entry.size);
+		LOG_INF("Transfer: %s (%u KB)", filename, (uint32_t)entry.size/1024);
 	} else {
-		/* Transfer entire session - list all files */
+		/* Transfer entire session */
 		err = storage_list_session_files(session_id, current_transfer.file_list,
 		                                  TRANSFER_MAX_FILES);
 		if (err < 0) {
-			LOG_ERR("Failed to list session files: %d", err);
+			LOG_ERR("Failed to list files: %d", err);
 			return err;
 		}
 		current_transfer.total_files = err;
 		current_transfer.file_index = 0;
 		if (err == 0) {
-			LOG_INF("Session exists but has no files yet, will wait for new files");
+			LOG_INF("Transfer: %s (empty)", session_id);
 		} else {
-			LOG_INF("Session has %u files to transfer", current_transfer.total_files);
-			LOG_INF("File list: %s, %s, %s, %s, %s...",
-			     current_transfer.file_list[0],
-			     err > 1 ? current_transfer.file_list[1] : "",
-			     err > 2 ? current_transfer.file_list[2] : "",
-			     err > 3 ? current_transfer.file_list[3] : "",
-			     err > 4 ? current_transfer.file_list[4] : "");
-			for (int i = 0; i < err && i < 10; i++) {
-				LOG_DBG("  File %d: %s", i, current_transfer.file_list[i]);
-			}
+			LOG_INF("Transfer: %s (%u files)", session_id, current_transfer.total_files);
 		}
 	}
 
 	/* Start transfer thread */
 	transfer_thread_running = true;
 	k_sem_give(&transfer_trigger_sem);
-
-	LOG_INF("Transfer started: %s%s%s", session_id, filename ? "/" : "", filename ? filename : "");
 
 	return 0;
 }
@@ -221,57 +194,33 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 	int retry_count = 0;
 	while (current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
 		if (transfer_file_open) {
-			LOG_WRN("Transfer already in progress (sending data)");
 			return -EBUSY;
 		}
 
-		/* No file open - check if all files transferred */
-		if (current_transfer.total_files > 0 &&
-		    current_transfer.file_index >= current_transfer.total_files) {
-			if (retry_count == 0) {
-				LOG_INF("Previous transfer complete (index=%u, total=%u), waiting for cleanup...",
-				        current_transfer.file_index, current_transfer.total_files);
-			}
-			if (++retry_count > 20) {
-				LOG_WRN("Timeout waiting for cleanup, forcing cleanup");
-				transfer_cleanup();
-				break;
-			}
-			k_sleep(K_MSEC(50));
-		} else {
-			/* Not all files transferred, might be waiting for next file */
-			LOG_INF("Waiting for previous transfer to finish...");
-			k_sleep(K_MSEC(100));
-			if (++retry_count > 50) {
-				LOG_WRN("Timeout waiting for transfer, forcing cleanup");
-				transfer_cleanup();
-				break;
-			}
+		if (++retry_count > 50) {
+			LOG_WRN("Transfer cleanup timeout");
+			transfer_cleanup();
+			break;
 		}
+		k_sleep(K_MSEC(100));
 	}
 
 	if (transfer_is_active()) {
-		LOG_WRN("Transfer still active after waiting");
 		return -EBUSY;
 	}
 
-	/* Wait for transfer thread to be fully blocked on semaphore
-	 * This prevents race condition where thread is still executing
-	 * code after transfer_cleanup() but before blocking on sem
-	 */
+	/* Wait for transfer thread to be blocked */
 	retry_count = 0;
 	while (!transfer_thread_waiting) {
 		if (++retry_count > 100) {
-			LOG_WRN("Timeout waiting for thread to block");
+			LOG_WRN("Thread block timeout");
 			return -ETIMEDOUT;
 		}
 		k_sleep(K_MSEC(10));
 	}
 
-	/* Small delay to ensure thread is fully blocked */
 	k_sleep(K_MSEC(10));
 
-	/* Mark this as a resume transfer - should complete when all requested files are done */
 	transfer_is_resume = true;
 
 	if (!storage_is_mounted()) {
@@ -283,7 +232,6 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 		return -EINVAL;
 	}
 
-	/* Check if session exists */
 	if (!storage_session_exists(session_id)) {
 		LOG_ERR("Session not found: %s", session_id);
 		return -ENOENT;
@@ -604,20 +552,16 @@ process_next_file:
 					/* Only wait if actively recording this session */
 					if (is_recording && is_current_session) {
 						/* Still recording this session, refresh file list and try again */
-						LOG_INF("Session still recording, refreshing file list...");
 						ret = storage_list_session_files(current_transfer.session_id,
 						                                 current_transfer.file_list,
 						                                 TRANSFER_MAX_FILES);
-						LOG_INF("Refresh returned: %d files", ret);
 						if (ret > 0) {
-							/* Found files, reset empty refresh counter */
 							consecutive_empty_refreshes = 0;
 
-							/* Update total files - don't reset file_index */
+							/* Update total files */
 							int old_total = current_transfer.total_files;
 							current_transfer.total_files = ret;
-							LOG_DBG("Refreshed file list: %d files (old:%d, new:%d), last_transferred=%s",
-							     ret, old_total, ret - old_total, last_transferred_file);
+							LOG_DBG("Refresh: %d files", ret);
 
 							/* Find first file that hasn't been transferred yet */
 							bool found_next = false;
@@ -657,12 +601,9 @@ process_next_file:
 								}
 
 								if (!is_recording || !is_current_session) {
-									/* Not recording or not current session -> complete immediately */
-									LOG_INF("All files transferred (recording=%d, is_current=%d), completing transfer",
-									        is_recording, is_current_session);
+									LOG_INF("Transfer completed: %u files", current_transfer.file_index);
 									current_transfer.state = TRANSFER_STATE_COMPLETED;
 
-									/* Notify Python that transfer is complete */
 									ble_svc_send_transfer_complete(current_transfer.session_id,
 									                               (int)current_transfer.file_index);
 
@@ -673,27 +614,19 @@ process_next_file:
 									goto process_next_file;
 								}
 
-								/* Currently recording this session, wait briefly for new files */
-								LOG_DBG("Waiting for new files in current recording session...");
 								k_sleep(K_MSEC(500));
 								goto process_next_file;
 							}
-							/* Don't wait - immediately try to open the next file */
 							goto process_next_file;
 						} else {
-							/* No new files yet, wait a bit */
 							consecutive_empty_refreshes++;
-							LOG_INF("No files found after refresh (ret=%d), consecutive_empty_refreshes=%d, waiting 500ms...",
-							     ret, consecutive_empty_refreshes);
 
-							/* If we've had many empty refreshes and device is not recording, complete the transfer */
-							if (consecutive_empty_refreshes > 10) {  /* 5 seconds of no new files */
+							if (consecutive_empty_refreshes > 10) {
 								extern bool audio_is_recording(void);
 								if (!audio_is_recording()) {
-									LOG_INF("No new files for 5 seconds and not recording, completing transfer");
+									LOG_INF("Transfer completed: %u files", current_transfer.file_index);
 									current_transfer.state = TRANSFER_STATE_COMPLETED;
 
-									/* Notify Python that transfer is complete */
 									ble_svc_send_transfer_complete(current_transfer.session_id,
 									                               (int)current_transfer.file_index);
 
@@ -710,17 +643,13 @@ process_next_file:
 							goto process_next_file;
 						}
 					} else {
-						/* Not recording or not current session - transfer complete immediately */
-						LOG_INF("Not recording or not current session, transfer complete");
+						LOG_INF("Transfer completed: %u files", current_transfer.file_index);
 						current_transfer.state = TRANSFER_STATE_COMPLETED;
-						LOG_INF("Transfer completed: %u bytes", (uint32_t)current_transfer.bytes_transferred);
 
-						/* Notify Python that transfer is complete */
 						ble_svc_send_transfer_complete(current_transfer.session_id,
 						                               (int)current_transfer.file_index);
 
 						transfer_cleanup();
-						/* Wait for next transfer - go back to sem wait */
 						transfer_thread_waiting = true;
 						k_sem_take(&transfer_trigger_sem, K_FOREVER);
 						transfer_thread_waiting = false;

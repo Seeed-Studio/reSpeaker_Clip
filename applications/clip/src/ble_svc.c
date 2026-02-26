@@ -106,19 +106,18 @@ BT_GATT_SERVICE_DEFINE(clip_svc,
 static void resp_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     resp_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("Response notify %s", resp_notify_enabled ? "enabled" : "disabled");
+    LOG_DBG("notify: %d", resp_notify_enabled);
 }
 
 static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     file_data_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("File data notify %s", file_data_notify_enabled ? "enabled" : "disabled");
+    LOG_DBG("data_notify: %d", file_data_notify_enabled);
 }
 
-/* Reboot work handler - called after delay to allow response to be sent */
+/* Reboot work handler */
 static void reboot_work_handler(struct k_work *work)
 {
-    LOG_INF("Rebooting system...");
     sys_reboot(SYS_REBOOT_COLD);
 }
 
@@ -134,29 +133,25 @@ static void at_thread_main(void *p1, void *p2, void *p3)
     ARG_UNUSED(p2);
     ARG_UNUSED(p3);
 
-    LOG_INF("AT command thread started");
-
     while (1) {
         /* Wait for command from queue */
         if (k_msgq_get(&cmd_msgq, &item, K_FOREVER) != 0) {
             continue;
         }
 
-        LOG_INF("Processing command: [%s]", item.data);
+        LOG_DBG("cmd: %s", item.data);
 
         /* Parse AT command */
         memset(&cmd, 0, sizeof(cmd));
         err = at_cmd_parse(item.data, &cmd);
         if (err != 0) {
-            LOG_ERR("Failed to parse command: %d", err);
+            LOG_WRN("parse: %d", err);
             continue;
         }
 
         /* Execute command */
         err = at_cmd_execute(&cmd, &response);
-
-        LOG_INF("Command executed with result: %d", err);
-        LOG_INF("Response: %s", response ? response : "NULL");
+        LOG_DBG("-> %d", err);
 
         /* Check if this is a REBOOT command */
         bool is_reboot = (strcmp(cmd.name, "REBOOT") == 0);
@@ -170,7 +165,6 @@ static void at_thread_main(void *p1, void *p2, void *p3)
 
         /* If REBOOT command, schedule reboot after response is sent */
         if (is_reboot) {
-            LOG_INF("REBOOT command detected, scheduling system reboot in 500ms");
             k_work_schedule(&reboot_work, K_MSEC(500));
         }
 
@@ -245,10 +239,9 @@ static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
 {
     if (!err) {
         mtu_exchanged = true;
-        LOG_INF("MTU exchanged(%u), ready for communication", bt_gatt_get_mtu(conn));
+        LOG_INF("MTU: %u", bt_gatt_get_mtu(conn));
     } else {
-        LOG_WRN("MTU exchange failed: %d, continuing with default MTU", err);
-        /* Mark as exchanged anyway so we can proceed with default MTU (23) */
+        LOG_WRN("MTU fail: %d", err);
         mtu_exchanged = true;
     }
 }
@@ -277,11 +270,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
     LOG_INF("BLE connected");
 
-    /* Don't request parameter update immediately - let connection stabilize first.
-     * Windows may reject or delay the request, causing timeout with short initial params.
-     * We'll rely on the host's parameters for stability.
-     */
-
     /* Delay MTU exchange */
     k_work_schedule(&mtu_work, K_MSEC(500));
 }
@@ -294,11 +282,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         resp_notify_enabled = false;
         file_data_notify_enabled = false;
 
-        LOG_INF("BLE disconnected (reason: %u)", reason);
+        LOG_INF("BLE disconnect: %u", reason);
 
-        /* Clean up any ongoing transfer - client will reconnect and resume */
+        /* Clean up any ongoing transfer */
         if (transfer_is_active() || transfer_is_paused()) {
-            LOG_INF("Cleaning up transfer due to disconnect");
             transfer_cancel();
         }
 
@@ -310,19 +297,18 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 static void le_param_updated(struct bt_conn *conn, uint16_t interval,
                              uint16_t latency, uint16_t timeout)
 {
-    LOG_INF("LE params: interval=%u, latency=%u, timeout=%u",
-            interval, latency, timeout);
+    LOG_DBG("LE: int=%u lat=%u to=%u", interval, latency, timeout);
 
     if (!mtu_exchanged && current_conn == conn) {
         bt_gatt_exchange_mtu(conn, &mtu_params);
-        /* After MTU exchange, request faster connection parameters for better throughput */
+        /* After MTU exchange, request faster connection parameters */
         struct bt_le_conn_param fast_params = {
-            .interval_min = 6,   /* 7.5ms - fastest for stable transfer */
-            .interval_max = 6,   /* 7.5ms - fixed interval */
+            .interval_min = 6,
+            .interval_max = 6,
             .latency = 0,
             .timeout = 200,
         };
-        LOG_INF("Requesting fast connection params: interval=6 (7.5ms)");
+        LOG_DBG("fast params");
         bt_conn_le_param_update(conn, &fast_params);
     }
 }
@@ -341,9 +327,9 @@ static bool le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
         return false;  /* Reject with our counter-proposal */
     }
 
-    LOG_INF("Accepting params: interval=%u-%u, latency=%u, timeout=%u",
+    LOG_DBG("accept: int=%u-%u lat=%u to=%u",
             param->interval_min, param->interval_max, param->latency, param->timeout);
-    return true;  /* Accept */
+    return true;
 }
 
 static struct bt_conn_cb conn_callbacks = {
@@ -366,11 +352,9 @@ int ble_svc_init(void)
     /* Enable Bluetooth */
     err = bt_enable(NULL);
     if (err) {
-        LOG_ERR("Bluetooth init failed: %d", err);
+        LOG_ERR("bt_enable: %d", err);
         return err;
     }
-
-    LOG_INF("Bluetooth initialized");
 
     /* Register connection callbacks */
     bt_conn_cb_register(&conn_callbacks);
@@ -379,11 +363,11 @@ int ble_svc_init(void)
     err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
                           sd, ARRAY_SIZE(sd));
     if (err) {
-        LOG_ERR("Advertising start failed: %d", err);
+        LOG_ERR("adv_start: %d", err);
         return err;
     }
 
-    LOG_INF("Advertising started as '%s'", DEVICE_NAME);
+    LOG_INF("BLE ready");
 
     /* Start AT command processor thread */
     at_thread_id = k_thread_create(&at_thread_data, at_thread_stack,
