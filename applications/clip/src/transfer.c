@@ -502,19 +502,13 @@ process_next_file:
 
 		/* Open first file if not already open */
 		if (!transfer_file_open) {
-			LOG_INF("About to call transfer_next_file(), file_open=%d", transfer_file_open);
 			ret = transfer_next_file();
-			LOG_INF("transfer_next_file() returned: %d, file_open=%d", ret, transfer_file_open);
 			if (ret == 0) {
-				/* File opened successfully, reset error counter */
-				LOG_INF("File opened, entering send loop (file_open=%d)", transfer_file_open);
 				consecutive_file_errors = 0;
 			}
 			if (ret != 0) {
-				LOG_INF("File open failed (%d), checking error type", ret);
 				if (ret == -ENOTCONN) {
 					/* BLE disconnected - stop transfer immediately */
-					LOG_INF("BLE disconnected, stopping transfer");
 					transfer_cleanup();
 					/* Wait for next transfer */
 					transfer_thread_waiting = true;
@@ -522,16 +516,7 @@ process_next_file:
 					transfer_thread_waiting = false;
 					goto process_next_file;
 				} else if (ret == -ENOENT) {
-					/* No more files at this moment - could be:
-					 * 1. Empty file was deleted (transfer_next_file deletes 0-byte files)
-					 * 2. End of file list reached
-					 * 3. Session directory not found
-					 * Refresh file list to check for more files after deletion
-					 */
-					LOG_INF("No more files (ENOENT), checking if should wait for more files...");
-					/* Check if we should wait for more files:
-					 * Only wait if device is currently recording AND this is the recording session
-					 */
+					/* No more files - check if recording this session */
 					extern bool audio_is_recording(void);
 					extern const char *audio_get_session_id(void);
 
@@ -541,25 +526,17 @@ process_next_file:
 					if (is_recording) {
 						const char *recording_session = audio_get_session_id();
 						is_current_session = (strcmp(current_transfer.session_id, recording_session) == 0);
-						LOG_INF("Device recording=%d, current_session=%d (recording_session=%s, transfer_session=%s)",
-						        is_recording, is_current_session,
-						        is_recording ? recording_session : "N/A",
-						        current_transfer.session_id);
-					} else {
-						LOG_INF("Device not recording, transfer complete");
 					}
 
 					/* Only wait if actively recording this session */
 					if (is_recording && is_current_session) {
-						/* Still recording this session, refresh file list and try again */
+						/* Still recording, refresh file list and try again */
 						ret = storage_list_session_files(current_transfer.session_id,
 						                                 current_transfer.file_list,
 						                                 TRANSFER_MAX_FILES);
 						if (ret > 0) {
 							consecutive_empty_refreshes = 0;
 
-							/* Update total files */
-							int old_total = current_transfer.total_files;
 							current_transfer.total_files = ret;
 							LOG_DBG("Refresh: %d files", ret);
 
@@ -567,17 +544,12 @@ process_next_file:
 							bool found_next = false;
 							for (int i = 0; i < ret; i++) {
 								if (current_transfer.file_list[i][0] == '\0') {
-									/* Empty filename - end of list */
 									break;
 								}
-								/* If last_transferred_file is empty, start from first file */
 								if (last_transferred_file[0] == '\0' ||
 								    strcmp(current_transfer.file_list[i], last_transferred_file) > 0) {
-									/* Found first file after last_transferred_file (or first file) */
 									current_transfer.file_index = i;
 									found_next = true;
-									LOG_DBG("Resuming from file[%u]=%s (after %s)",
-									     i, current_transfer.file_list[i], last_transferred_file);
 									break;
 								}
 							}
@@ -834,33 +806,25 @@ static int transfer_next_file(void)
 		LOG_INF("Checking if file %s is being written...", current_transfer.current_file);
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
-			/* Check if BLE disconnected - abort transfer if so */
 			if (!ble_svc_is_ready()) {
-				LOG_INF("BLE disconnected while waiting for file, aborting transfer");
+				LOG_INF("BLE disconnected, transfer aborted");
 				return -ENOTCONN;
 			}
-			LOG_INF("File %s is being written, waiting...", current_transfer.current_file);
 			k_sleep(K_MSEC(500));
 		}
-		LOG_INF("File %s is ready, attempting fs_open...", current_transfer.current_file);
 
-		/* Now open the file */
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 		         current_transfer.session_id, current_transfer.current_file);
 	}
 
-	/* Open file for reading - NO LOCK NEEDED for read-only access */
 	fs_file_t_init(&transfer_file);
 	ret = fs_open(&transfer_file, filepath, FS_O_READ);
 	if (ret != 0) {
-		LOG_INF("FAILED to open file: %s (error=%d), file_index=%u, total_files=%u",
-		        filepath, ret, current_transfer.file_index, current_transfer.total_files);
-		/* Clear current file to trigger retry - don't increment file_index yet */
+		LOG_ERR("File open failed: %s (%d)", filepath, ret);
 		current_transfer.current_file[0] = '\0';
 		return ret;
 	}
 
-	/* File opened successfully - now increment file_index */
 	current_transfer.file_index++;
 
 	transfer_file_open = true;
