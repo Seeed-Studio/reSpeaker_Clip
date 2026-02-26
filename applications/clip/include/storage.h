@@ -190,8 +190,17 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
  *
  * @param session_id Session ID to delete
  * @return 0 on success, negative error code on failure
+ * @return -EBUSY if trying to delete current recording session
  */
 int storage_delete_session(const char *session_id);
+
+/**
+ * @brief Get current session ID (if recording is active)
+ *
+ * @param out_session_id Buffer to store session ID (must be at least 32 bytes)
+ * @return 0 on success, -ENODEV if no session is active
+ */
+int storage_get_current_session(char *out_session_id);
 
 /**
  * @brief Check if session exists

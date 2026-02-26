@@ -608,6 +608,38 @@ static int update_free_space(void)
 }
 
 /* Session management functions */
+
+/**
+ * @brief Get current session ID (if recording is active)
+ *
+ * @param out_session_id Buffer to store session ID (must be at least 32 bytes)
+ * @return 0 on success, -ENODEV if no session is active
+ */
+int storage_get_current_session(char *out_session_id)
+{
+	if (!out_session_id) {
+		return -EINVAL;
+	}
+
+	if (current_session_dir[0] == '\0') {
+		return -ENODEV;  /* No active session */
+	}
+
+	/* Extract session ID from current_session_dir path */
+	/* Format: "/SD:/REC/YYYYMMDDHHMMSS" */
+	const char *session_start = strrchr(current_session_dir, '/');
+	if (session_start) {
+		session_start++;  /* Skip the '/' */
+	} else {
+		session_start = current_session_dir;
+	}
+
+	strncpy(out_session_id, session_start, 31);
+	out_session_id[31] = '\0';
+
+	return 0;
+}
+
 int storage_list_sessions(struct storage_session_info *sessions, int max_sessions)
 {
 	struct fs_dir_t dirp;
@@ -819,6 +851,24 @@ int storage_delete_session(const char *session_id)
 
 	if (!session_id) {
 		return -EINVAL;
+	}
+
+	/* PROTECTION: Prevent deleting current recording session directory */
+	if (current_session_dir[0] != '\0') {
+		/* Extract session ID from current_session_dir path */
+		/* Format: "/SD:/REC/YYYYMMDDHHMMSS" */
+		const char *session_start = strrchr(current_session_dir, '/');
+		if (session_start) {
+			session_start++;  /* Skip the '/' */
+		} else {
+			session_start = current_session_dir;
+		}
+
+		/* Check if the session being deleted matches the current session */
+		if (strcmp(session_start, session_id) == 0) {
+			LOG_ERR("Cannot delete current recording session: %s", session_id);
+			return -EBUSY;  /* Return busy to indicate active session */
+		}
 	}
 
 	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
