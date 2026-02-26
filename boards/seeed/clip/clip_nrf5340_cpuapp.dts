@@ -66,6 +66,13 @@
 		dmic0 = &pdm0;
 		sw0 = &usr_btn;
 	};
+
+	/* NVS storage on external SPI flash */
+	nvs_storage: nvs {
+		compatible = "zephyr,nvs-storage";
+		partition = <&ext_nvs_partition>;
+		status = "okay";
+	};
 };
 
 &gpiote {
