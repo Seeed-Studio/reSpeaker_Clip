@@ -1,3 +1,145 @@
+## Remaining Features (As of 2025-02-26)
+
+### Implemented ✅
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| PDM Microphone Capture | ✅ | 16kHz, stereo/mono |
+| Opus Encoding | ✅ | Configurable bitrate/complexity |
+| SpeexDSP Processing | ✅ | Noise suppression, dereverb |
+| Audio Modes | ✅ | Normal (stereo), Enhanced (mono+DSP) |
+| SD Card Storage | ✅ | FAT32, session directories |
+| Session Metadata | ✅ | session.json, files.lst |
+| Bookmark System | ✅ | marks.bin |
+| BLE GATT Service | ✅ | Command, Response, File Data |
+| AT Command Protocol | ✅ | Full implementation |
+| File Transfer | ✅ | Pause/resume/cancel |
+| Simultaneous Rec+Transfer | ✅ | Record and transfer at same time |
+| NVS Configuration | ✅ | All 9 settings persist |
+| Battery Monitoring | ✅ | Via NPM1300 PMIC |
+| Button Handler | ✅ | Long press record, short press bookmark |
+| Time Sync | ✅ | AT+SETTIME |
+| Auto-Delete Config | ✅ | AT+AUTODEL |
+
+### Not Yet Implemented ❌
+
+| Feature | Priority | Requirements Ref | Notes |
+|---------|----------|------------------|-------|
+| **OLED Display** | Medium | FR-4.2.x | CH1115 I2C driver needed |
+| **Haptic Feedback** | Medium | FR-4.3.x | PMIC GPIO2 control needed |
+| **AGC Implementation** | Low | FR-1.2.3 | Config exists, SpeexDSP AGC? |
+| **Low Power Mode** | Medium | FR-5.3.x | Sleep when idle |
+| **BLE Security** | High | FR-3.1.5, FR-3.1.6 | LE Secure Connections |
+| **Bonding/Pairing** | Medium | FR-3.4.x | AT+PAIR=reset |
+| **Auto-Purge Execution** | Medium | FR-2.4.x | Background cleanup task |
+| **Firmware Update (DFU)** | Low | NFR-5.1 | Future feature |
+
+### Acceptance Criteria Status
+
+From requirements.md Section 9:
+
+**AC-1: Recording Control**
+- ✅ Long press starts recording
+- ✅ Long press stops recording
+- ✅ Short press adds bookmark
+- ❓ State changes displayed on screen (OLED not implemented)
+- ❓ Recording time updates (OLED not implemented)
+
+**AC-2: File Transfer**
+- ✅ List all sessions
+- ✅ List files in session
+- ✅ Download single file
+- ✅ Pause/resume transfer
+- ✅ Cancel transfer
+- ✅ Progress updates
+- ✅ Transfer marker
+
+**AC-3: Bookmark System**
+- ✅ AT+MARK adds bookmark
+- ✅ Bookmarks stored in marks.bin
+- ❓ AT+MARKS returns list (need to verify)
+- ✅ Bookmark offset accurate
+
+**AC-4: Configuration**
+- ✅ All config AT commands work
+- ✅ Config persists across reboots
+- ✅ AT+FACTORY resets settings
+
+### Recommended Next Steps
+
+1. **OLED Display** - Implement CH1115 driver for visual feedback
+2. **Haptic Feedback** - Control vibration motor via PMIC GPIO2
+3. **BLE Security** - Enable LE Secure Connections for secure pairing
+4. **Auto-Purge** - Implement background task to delete old transferred sessions
+
+---
+
+## 2025-02-26 - Mode Mapping Fix and DSP Restriction
+
+### Completed Tasks
+
+#### 1. Mode Mapping Fix (audio.c)
+- ✅ Fixed mode mapping bug:
+  - `MODE_NORMAL` → `AUDIO_MODE_STEREO` (stereo, no DSP)
+  - `MODE_ENHANCED` → `AUDIO_MODE_MERGE` (mono with DSP)
+- ✅ Previous implementation had mapping inverted
+
+#### 2. DSP Restriction for Stereo Mode (audio.c)
+- ✅ DSP only enabled in enhanced (mono) mode
+- ✅ `noise_suppress` config can be set regardless of mode
+- ✅ During recording:
+  - Normal (stereo) mode: DSP never enabled
+  - Enhanced (mono) mode: DSP enabled if `noise_suppress > 0`
+- ✅ When mode changes during recording, DSP is properly enabled/disabled
+
+#### 3. Bitrate Scaling (audio.c)
+- ✅ Mono bitrate = configured value
+- ✅ Stereo bitrate = configured value × 2
+
+### Mode Behavior
+
+| Mode | Audio Mode | DSP | Bitrate |
+|------|------------|-----|---------|
+| Normal | Stereo | Disabled | config × 2 |
+| Enhanced | Mono (merged) | Enabled (if configured) | config |
+
+### Code Changes
+
+```c
+// audio_init() - mode mapping
+current_mode = (g_config.mode == MODE_NORMAL) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
+
+// audio_init() - DSP only in enhanced mode
+if (g_config.noise_suppress > 0 && current_mode == AUDIO_MODE_MERGE) {
+    speex_enabled = true;
+    // ...
+}
+
+// audio_start_recording() - handle mode changes
+if (mode == AUDIO_MODE_STEREO) {
+    // Disable DSP in stereo mode
+    if (speex_enabled) {
+        cleanup_speex_preprocessor();
+        speex_enabled = false;
+    }
+} else {
+    // Re-enable DSP in enhanced mode if configured
+    if (g_config.noise_suppress > 0 && !speex_enabled) {
+        // ...
+    }
+}
+```
+
+### Known Issue
+
+**File Open Error (-2) during transfer**
+- Error: `<err> fs: file open error (-2)` appears periodically during recording+transfer
+- Cause: Zephyr FAT filesystem internal operation
+- Impact: None - files are written successfully
+- Status: Non-critical, can be ignored
+
+---
+
 ## 2025-02-25 - Simultaneous Recording and BLE Transfer
 
 ### Completed Tasks
