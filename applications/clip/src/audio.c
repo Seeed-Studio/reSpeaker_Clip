@@ -750,6 +750,9 @@ static int init_speex_preprocessor(void)
 	/* Destroy old preprocessor if exists */
 	if (speex_pp) {
 		speex_preprocess_state_destroy(speex_pp);
+
+
+		
 		speex_pp = NULL;
 	}
 

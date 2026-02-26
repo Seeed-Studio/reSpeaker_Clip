@@ -22,6 +22,7 @@
 #include "transfer.h"
 #include "bookmarks.h"
 #include "battery.h"
+#include "config.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -302,6 +303,10 @@ static int cmd_time(const struct at_command *cmd, char **response)
                 g_synced_time.year, g_synced_time.month, g_synced_time.day,
                 g_synced_time.hour, g_synced_time.min, g_synced_time.sec,
                 (int64_t)unix_time, g_synced_time.base_uptime_ms);
+
+        /* Save to NVS for persistence across reboots */
+        int64_t unix_time_64 = (int64_t)unix_time;
+        config_set_time(&unix_time_64);
 
         snprintf(data, sizeof(data), "\"%lld\"", (int64_t)unix_time);
         return json_create_kv("time", data, response);

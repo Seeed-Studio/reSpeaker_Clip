@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "clip.h"
 
 /* NVS keys for configuration (for future use) */
@@ -69,5 +70,21 @@ int config_set(uint16_t key, const void *value, size_t len);
  * @return 0 on success, negative error code on failure
  */
 int config_get(uint16_t key, void *value, size_t len);
+
+/**
+ * @brief Save Unix timestamp to NVS for time persistence
+ *
+ * @param unix_time Pointer to Unix timestamp (int64_t)
+ * @return 0 on success, negative error code on failure
+ */
+int config_set_time(const int64_t *unix_time);
+
+/**
+ * @brief Get current Unix timestamp from synced time
+ *
+ * @param unix_time Output buffer for Unix timestamp (int64_t)
+ * @return 0 on success, negative error code if time not set
+ */
+int config_get_time(int64_t *unix_time);
 
 #endif /* CONFIG_H */

@@ -7,7 +7,9 @@
 #include <zephyr/kernel.h>
 #include <string.h>
 #include <zephyr/logging/log.h>
+#include <time.h>
 #include "config.h"
+#include "clip.h"
 
 LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 
@@ -21,6 +23,7 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 #define SETTING_AGC_ENABLED     "config/agc_enabled"
 #define SETTING_AGC_TARGET      "config/agc_target"
 #define SETTING_DEREVERB        "config/dereverb_enabled"
+#define SETTING_TIME_UNIX       "time/unix_timestamp"
 
 /* Factory default configuration */
 static const struct clip_config factory_config = {
@@ -95,6 +98,50 @@ static struct settings_handler config_handler = {
     .name = "config",
     .h_set = config_set_handler,
 };
+
+/* Time settings handler - restores synced time on boot */
+static int time_set_handler(const char *name, size_t len,
+                             settings_read_cb read_cb, void *cb_arg)
+{
+    if (!name || strcmp(name, "unix_timestamp") != 0) {
+        return -ENOENT;
+    }
+
+    int64_t saved_unix_time;
+    int rc = read_cb(cb_arg, (uint8_t *)&saved_unix_time, sizeof(saved_unix_time));
+    if (rc != sizeof(saved_unix_time)) {
+        return -EINVAL;
+    }
+
+    /* Restore synced time from NVS on boot */
+    time_t unix_time = (time_t)saved_unix_time;
+    struct tm tm;
+
+    /* Convert Unix timestamp to broken-down time */
+    gmtime_r(&unix_time, &tm);
+
+    g_synced_time.year = tm.tm_year + 1900;
+    g_synced_time.month = tm.tm_mon + 1;
+    g_synced_time.day = tm.tm_mday;
+    g_synced_time.hour = tm.tm_hour;
+    g_synced_time.min = tm.tm_min;
+    g_synced_time.sec = tm.tm_sec;
+    /* Set base_uptime to current uptime (time will drift if device was off) */
+    g_synced_time.base_uptime_ms = k_uptime_get();
+    g_synced_time.valid = true;
+
+    LOG_INF("Time restored from NVS: %04d-%02d-%02d %02d:%02d:%02d (unix: %lld)",
+            g_synced_time.year, g_synced_time.month, g_synced_time.day,
+            g_synced_time.hour, g_synced_time.min, g_synced_time.sec,
+            (int64_t)saved_unix_time);
+
+    return 0;
+}
+
+static struct settings_handler time_handler = {
+    .name = "time",
+    .h_set = time_set_handler,
+};
 #endif /* CONFIG_SETTINGS */
 
 int config_init(void)
@@ -112,11 +159,15 @@ int config_init(void)
         return 0;
     }
 
-    /* Register settings handler */
+    /* Register settings handlers */
     err = settings_register(&config_handler);
     if (err) {
         LOG_WRN("Settings register failed: %d", err);
-        return 0;
+    }
+
+    err = settings_register(&time_handler);
+    if (err) {
+        LOG_WRN("Time settings register failed: %d", err);
     }
 
     /* Load configuration from NVS */
@@ -346,4 +397,53 @@ int config_get(uint16_t key, void *value, size_t len)
     }
 
     return -EINVAL;
+}
+
+/* Time persistence - saves/loads Unix timestamp to/from NVS */
+int config_set_time(const int64_t *unix_time)
+{
+    if (!unix_time) {
+        return -EINVAL;
+    }
+
+#ifdef CONFIG_SETTINGS
+    int err = settings_save_one(SETTING_TIME_UNIX, (const uint8_t *)unix_time, sizeof(*unix_time));
+    if (err == 0) {
+        LOG_DBG("Time saved to NVS: %lld", *unix_time);
+    } else {
+        LOG_WRN("Failed to save time to NVS: %d", err);
+    }
+    return err;
+#else
+    return -ENOTSUP;
+#endif
+}
+
+int config_get_time(int64_t *unix_time)
+{
+    if (!unix_time) {
+        return -EINVAL;
+    }
+
+    if (g_synced_time.valid) {
+        /* Calculate current Unix time from synced time */
+        int64_t elapsed_ms = k_uptime_get() - g_synced_time.base_uptime_ms;
+        int64_t elapsed_sec = elapsed_ms / 1000;
+
+        /* Convert synced time to Unix timestamp */
+        struct tm tm = {
+            .tm_year = g_synced_time.year - 1900,
+            .tm_mon = g_synced_time.month - 1,
+            .tm_mday = g_synced_time.day,
+            .tm_hour = g_synced_time.hour,
+            .tm_min = g_synced_time.min,
+            .tm_sec = g_synced_time.sec,
+        };
+        time_t base_time = timegm(&tm);
+        *unix_time = (int64_t)base_time + elapsed_sec;
+
+        return 0;
+    }
+
+    return -ENODATA;
 }
