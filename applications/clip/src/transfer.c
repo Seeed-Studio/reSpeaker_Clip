@@ -653,21 +653,14 @@ process_next_file:
 			}
 		}
 
-		LOG_INF("After transfer_next_file(), about to check send loop (file_open=%d, ret=%d)",
-		        transfer_file_open, ret);
-
-		/* Send data chunks - FATFS handles thread safety internally */
-		LOG_INF("Entering send loop: file_open=%d, state=%d",
-		        transfer_file_open, current_transfer.state);
+		/* Send data chunks */
 		while (transfer_thread_running &&
 		       current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
 
 			/* Check if BLE is connected before sending */
 			if (!ble_svc_is_ready()) {
-				/* BLE disconnected, pause transfer and wait */
-				LOG_INF("BLE disconnected, pausing transfer...");
+				LOG_INF("BLE disconnected, pausing transfer");
 				current_transfer.state = TRANSFER_STATE_PAUSED;
-				/* Close file while paused */
 				if (transfer_file_open) {
 					fs_close(&transfer_file);
 					transfer_file_open = false;
@@ -675,23 +668,14 @@ process_next_file:
 				break;
 			}
 
-			/* First chunk: log start */
-			if (current_transfer.bytes_transferred == 0) {
-				LOG_INF("File transfer started: %s (index=%u, total_files=%u)",
-				        current_transfer.current_file,
-				        current_transfer.file_index, current_transfer.total_files);
-			}
-
 			ret = transfer_send_chunk();
 			if (ret != 0) {
 				if (ret == -EOF) {
-					/* File complete, move to next file */
-					LOG_INF("File transfer complete: %s (bytes_transferred=%llu, next_index=%u)",
+					/* File complete */
+					LOG_DBG("File done: %s (%u KB)",
 					        current_transfer.current_file,
-					        current_transfer.bytes_transferred,
-					        current_transfer.file_index);
+					        (uint32_t)(current_transfer.bytes_transferred/1024));
 
-					/* Remember last successfully transferred file */
 					strncpy(last_transferred_file, current_transfer.current_file,
 					       sizeof(last_transferred_file) - 1);
 					last_transferred_file[sizeof(last_transferred_file) - 1] = '\0';
@@ -777,37 +761,25 @@ static int transfer_next_file(void)
 			 current_transfer.session_id, current_transfer.current_file);
 	} else {
 		/* Get next file from file list */
-		LOG_INF("Opening next file: current_file='%s', file_index=%u, total_files=%u",
-		        current_transfer.current_file, current_transfer.file_index, current_transfer.total_files);
-
 		if (current_transfer.file_index >= current_transfer.total_files) {
-			/* No more files */
-			LOG_DBG("No more files: index=%u >= total=%u",
-			        current_transfer.file_index, current_transfer.total_files);
 			return -ENOENT;
 		}
 
-		/* Check if the filename is empty */
 		if (current_transfer.file_list[current_transfer.file_index][0] == '\0') {
-			/* Empty filename - no more files */
-			LOG_DBG("Empty filename at index %u, no more files", current_transfer.file_index);
 			return -ENOENT;
 		}
 
-		/* Copy next filename from list */
 		strncpy(current_transfer.current_file,
 		        current_transfer.file_list[current_transfer.file_index],
 		        sizeof(current_transfer.current_file) - 1);
 
-		LOG_INF("Selected file for transfer: %s (file_index=%u)",
-		        current_transfer.current_file, current_transfer.file_index);
+		LOG_DBG("Next: %s (%u/%u)", current_transfer.current_file,
+		        current_transfer.file_index + 1, current_transfer.total_files);
 
-		/* Wait for the new file to finish writing before opening */
-		LOG_INF("Checking if file %s is being written...", current_transfer.current_file);
+		/* Wait for file to finish writing */
 		while (storage_file_is_writing(current_transfer.session_id,
 			current_transfer.current_file)) {
 			if (!ble_svc_is_ready()) {
-				LOG_INF("BLE disconnected, transfer aborted");
 				return -ENOTCONN;
 			}
 			k_sleep(K_MSEC(500));
@@ -826,31 +798,24 @@ static int transfer_next_file(void)
 	}
 
 	current_transfer.file_index++;
-
 	transfer_file_open = true;
-	LOG_INF("Successfully opened %s for transfer (file_index=%u)",
-	        current_transfer.current_file, current_transfer.file_index);
 
 	/* Get file size */
 	struct fs_dirent entry;
 	ret = fs_stat(filepath, &entry);
 	if (ret == 0) {
-		LOG_DBG("Opened file: %s (%u bytes)",
-		         current_transfer.current_file, (uint32_t)entry.size);
+		LOG_DBG("File: %s (%u bytes)", current_transfer.current_file, (uint32_t)entry.size);
 
 		/* Check if file is empty - skip it if so */
 		if (entry.size == 0) {
-			LOG_INF("File is empty (0 bytes), deleting: %s", current_transfer.current_file);
-			/* Close the file first */
+			LOG_WRN("Empty file: %s", current_transfer.current_file);
 			fs_close(&transfer_file);
 			transfer_file_open = false;
 
 			/* Delete the empty file */
 			int del_ret = fs_unlink(filepath);
-			if (del_ret == 0) {
-				LOG_INF("Deleted empty file: %s", filepath);
-			} else {
-				LOG_WRN("Failed to delete empty file %s: %d", filepath, del_ret);
+			if (del_ret != 0) {
+				LOG_WRN("Delete failed: %d", del_ret);
 			}
 
 			/* Clear current file to try next file */
@@ -907,13 +872,6 @@ static int transfer_send_chunk(void)
 	/* Only increment bytes_transferred if send actually succeeded */
 	current_transfer.bytes_transferred += bytes_read;
 
-	/* Print timing breakdown every 50 chunks (12KB) */
-	if ((current_transfer.bytes_transferred / bytes_read) % 50 == 0) {
-		LOG_INF("[TIMING] read:%lldms send:%lldms total:%llu bytes",
-		        read_end - read_start, send_end - send_start,
-		        current_transfer.bytes_transferred);
-	}
-
 	return 0;
 }
 
@@ -932,6 +890,4 @@ static void transfer_cleanup(void)
 	current_transfer.bytes_transferred = 0;
 	current_transfer.total_bytes = 0;
 	current_transfer.progress_percent = 0;
-
-	LOG_INF("Transfer cleanup complete");
 }
