@@ -118,7 +118,8 @@ int audio_init(void)
 	}
 
 	/* Initialize audio parameters from loaded config */
-	current_mode = (g_config.mode == MODE_ENHANCED) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
+	/* MODE_NORMAL = stereo, MODE_ENHANCED = mono with DSP */
+	current_mode = (g_config.mode == MODE_NORMAL) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
 
 	/* Calculate actual bitrate: mono = configured, stereo = configured * 2 */
 	if (current_mode == AUDIO_MODE_STEREO) {
@@ -137,7 +138,8 @@ int audio_init(void)
 	}
 
 #ifdef CONFIG_SPEEXDSP
-	if (g_config.noise_suppress > 0) {
+	/* DSP only enabled in enhanced (mono) mode */
+	if (g_config.noise_suppress > 0 && current_mode == AUDIO_MODE_MERGE) {
 		speex_enabled = true;
 		ret = init_speex_preprocessor();
 		if (ret < 0) {
@@ -219,6 +221,27 @@ int audio_start_recording(enum audio_mode mode)
 			LOG_ERR("Failed to reinitialize Opus encoder: %d", ret);
 			return ret;
 		}
+
+#ifdef CONFIG_SPEEXDSP
+		/* Handle DSP based on mode: only enabled in enhanced (mono) mode */
+		if (mode == AUDIO_MODE_STEREO) {
+			/* Disable DSP in stereo mode */
+			if (speex_enabled) {
+				cleanup_speex_preprocessor();
+				speex_enabled = false;
+			}
+		} else {
+			/* Re-enable DSP in enhanced mode if configured */
+			if (g_config.noise_suppress > 0 && !speex_enabled) {
+				speex_enabled = true;
+				ret = init_speex_preprocessor();
+				if (ret < 0) {
+					LOG_WRN("speex_init: %d", ret);
+					speex_enabled = false;
+				}
+			}
+		}
+#endif
 	}
 
 	/* Reset statistics */
@@ -435,9 +458,9 @@ uint8_t audio_get_complexity(void)
 int audio_set_noise_suppress(bool enable)
 {
 #ifdef CONFIG_SPEEXDSP
-	speex_enabled = enable;
 	g_config.noise_suppress = enable ? 1 : 0;
-	LOG_INF("Noise suppression %s", enable ? "enabled" : "disabled");
+	/* Note: speex_enabled is set based on mode during recording start */
+	LOG_INF("Noise suppression config: %s", enable ? "enabled" : "disabled");
 	return 0;
 #else
 	return -ENOTSUP;
