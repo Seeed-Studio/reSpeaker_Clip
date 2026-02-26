@@ -120,9 +120,6 @@ int audio_init(void)
 	}
 
 	/* Initialize audio parameters from loaded config */
-	LOG_INF("Config addr: %p, g_config addr: %p", &g_config, &g_config);
-	LOG_INF("Config: mode=%u, mono_bitrate=%u, complexity=%u",
-		g_config.mode, g_config.bitrate, g_config.complexity);
 	current_mode = (g_config.mode == MODE_ENHANCED) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
 
 	/* Calculate actual bitrate: mono = configured, stereo = configured * 2 */
@@ -133,9 +130,6 @@ int audio_init(void)
 		opus_channels = 1;
 		current_bitrate = g_config.bitrate;
 	}
-
-	LOG_INF("Audio params: mode=%d, channels=%d, mono_bitrate=%u, actual_bitrate=%u",
-		current_mode, opus_channels, g_config.bitrate, current_bitrate);
 
 	/* Initialize Opus encoder with config values */
 	ret = init_opus_encoder();
@@ -407,8 +401,7 @@ int audio_set_bitrate(uint32_t bitrate)
 		return ret;
 	}
 
-	LOG_INF("Mono bitrate set to %u bps (actual: %u bps, mode: %d)",
-		bitrate, current_bitrate, current_mode);
+	LOG_INF("Bitrate: mono=%u bps, actual=%u bps", bitrate, current_bitrate);
 	return 0;
 }
 
@@ -721,8 +714,8 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	LOG_INF("Opus encoder: %d Hz, %d ch, %d bps, complexity=%d",
-		AUDIO_SAMPLE_RATE, opus_channels, current_bitrate, g_config.complexity);
+	LOG_INF("Audio: %d Hz, %d ch, %u bps",
+		AUDIO_SAMPLE_RATE, opus_channels, current_bitrate);
 
 	return 0;
 }

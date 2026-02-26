@@ -82,17 +82,6 @@ static int config_set_handler(const char *name, size_t len,
                 return rc;
             }
 
-            /* Log what we're loading */
-            if (entry->size == sizeof(uint16_t)) {
-                LOG_INF("Loading %s: %u", entry->name, *(uint16_t *)buffer);
-            } else if (entry->size == sizeof(uint8_t)) {
-                LOG_INF("Loading %s: %u", entry->name, *(uint8_t *)buffer);
-            } else if (entry->size == sizeof(int8_t)) {
-                LOG_INF("Loading %s: %d", entry->name, *(int8_t *)buffer);
-            } else if (entry->size == sizeof(bool)) {
-                LOG_INF("Loading %s: %d", entry->name, *(bool *)buffer);
-            }
-
             /* Copy to g_config at offset */
             memcpy((uint8_t *)&g_config + entry->offset, buffer, entry->size);
             return 0;
@@ -119,37 +108,31 @@ int config_init(void)
     /* Initialize settings subsystem */
     err = settings_subsys_init();
     if (err) {
-        LOG_WRN("Settings subsystem init failed: %d, using defaults", err);
+        LOG_WRN("Settings init failed: %d", err);
         return 0;
     }
-    LOG_INF("Settings subsystem initialized");
 
     /* Register settings handler */
     err = settings_register(&config_handler);
     if (err) {
-        LOG_WRN("Settings register failed: %d, using defaults", err);
+        LOG_WRN("Settings register failed: %d", err);
         return 0;
     }
-    LOG_INF("Settings handler registered");
 
     /* Load configuration from NVS */
     err = settings_load();
     if (err) {
         LOG_WRN("Settings load failed: %d, using defaults", err);
         /* Save defaults to NVS */
-        LOG_INF("Saving defaults to NVS...");
         config_save();
     } else {
-        LOG_INF("g_config addr: %p", &g_config);
-        LOG_INF("Settings loaded from NVS: bitrate=%u, mode=%d, complexity=%u",
-                g_config.bitrate, g_config.mode, g_config.complexity);
+        LOG_INF("Config loaded: mode=%s, bitrate=%u, complexity=%u",
+                (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced",
+                g_config.bitrate, g_config.complexity);
     }
 #else
-    LOG_INF("Config initialized with factory defaults (settings disabled)");
+    LOG_INF("Config: factory defaults (NVS disabled)");
 #endif /* CONFIG_SETTINGS */
-
-    LOG_INF("config_init() returning: g_config addr=%p, mode=%u, bitrate=%u, complexity=%u",
-            &g_config, g_config.mode, g_config.bitrate, g_config.complexity);
 
     return 0;
 }
