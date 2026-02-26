@@ -169,6 +169,19 @@ void clip_main_loop(void);
 #define CLIP_BUTTON_WORK_STACK_SIZE       CONFIG_BUTTON_WORK_STACK_SIZE
 #endif
 
+/* UI thread configuration */
+#ifndef CONFIG_UI_THREAD_PRIORITY
+#define CLIP_UI_THREAD_PRIORITY           5
+#else
+#define CLIP_UI_THREAD_PRIORITY           CONFIG_UI_THREAD_PRIORITY
+#endif
+
+#ifndef CONFIG_UI_THREAD_STACK_SIZE
+#define CLIP_UI_THREAD_STACK_SIZE         4096
+#else
+#define CLIP_UI_THREAD_STACK_SIZE         CONFIG_UI_THREAD_STACK_SIZE
+#endif
+
 /* Audio segmentation - configurable via prj.conf or Kconfig */
 #ifndef CONFIG_AUDIO_SEGMENT_DURATION_SYNC
 #define CLIP_AUDIO_SEGMENT_DURATION_SYNC      10  /* seconds during sync */

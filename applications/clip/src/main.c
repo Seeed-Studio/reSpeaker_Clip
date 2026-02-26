@@ -20,7 +20,7 @@
 #include "button_handler.h"
 #include "transfer.h"
 #include "battery.h"
-/* #include "display_ctrl.h" */
+#include "display_ctrl.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -192,8 +192,13 @@ int clip_init(void)
         /* Continue anyway, battery is optional */
     }
 
-    /* Initialize display (disabled for now) */
-    /* err = display_init(); */
+    /* Initialize display controller */
+    err = display_init();
+    if (err)
+    {
+        LOG_WRN("Display init failed: %d, display features disabled", err);
+        /* Continue anyway, display is optional */
+    }
 
     /* Transition to idle state */
     err = state_transition(CLIP_STATE_IDLE);
@@ -218,6 +223,13 @@ static void state_change_handler(enum clip_state old_state,
 
     /* Update status */
     g_status.state = new_state;
+
+    /* Notify UI of recording state changes */
+    if (new_state == CLIP_STATE_RECORDING) {
+        display_set_recording(true);
+    } else if (old_state == CLIP_STATE_RECORDING) {
+        display_set_recording(false);
+    }
 
     /* Update display (disabled for now) */
     /* display_update_status(); */

@@ -14,6 +14,7 @@
 #include "state_machine.h"
 #include "audio.h"
 #include "clip.h"
+#include "display_ctrl.h"
 
 LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
 
@@ -115,6 +116,8 @@ static void button_bookmark_work_handler(struct k_work *work)
 	err = audio_add_bookmark(NULL);
 	if (err == 0) {
 		LOG_INF("Button: Bookmark added");
+		/* Trigger UI mark display */
+		ui_trigger_mark();
 	} else {
 		LOG_ERR("Button: Failed to add bookmark: %d", err);
 	}
@@ -138,8 +141,12 @@ static void button_event_callback(const struct device *dev,
 		if (current_state == CLIP_STATE_RECORDING) {
 			LOG_INF("Button: Single click - submitting bookmark work");
 			k_work_submit_to_queue(&button_work_q, &button_bookmark_work);
+		} else if (current_state == CLIP_STATE_IDLE) {
+			/* Show status bar in IDLE state */
+			LOG_INF("Button: Single click - show status bar");
+			ui_trigger_status_show();
 		} else {
-			LOG_INF("Button: Short press ignored (state=%d, not recording)", current_state);
+			LOG_INF("Button: Short press ignored (state=%d)", current_state);
 		}
 		break;
 
