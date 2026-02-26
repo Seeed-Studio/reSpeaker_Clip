@@ -66,6 +66,55 @@ static int extract_int(const char *str, int *value)
     return 0;
 }
 
+/* JSON string escaping - escapes special characters for valid JSON */
+static void json_escape_string(char *dest, const char *src, size_t dest_size)
+{
+    size_t j = 0;
+
+    if (!dest || dest_size == 0) {
+        return;
+    }
+
+    for (size_t i = 0; src[i] != '\0' && j < dest_size - 1; i++) {
+        switch (src[i]) {
+        case '"':
+        case '\\':
+            /* Escape quote and backslash */
+            if (j + 1 < dest_size - 1) {
+                dest[j++] = '\\';
+                dest[j++] = src[i];
+            }
+            break;
+        case '\n':
+            /* Escape newline */
+            if (j + 1 < dest_size - 1) {
+                dest[j++] = '\\';
+                dest[j++] = 'n';
+            }
+            break;
+        case '\r':
+            /* Escape carriage return */
+            if (j + 1 < dest_size - 1) {
+                dest[j++] = '\\';
+                dest[j++] = 'r';
+            }
+            break;
+        case '\t':
+            /* Escape tab */
+            if (j + 1 < dest_size - 1) {
+                dest[j++] = '\\';
+                dest[j++] = 't';
+            }
+            break;
+        default:
+            /* Copy character as-is */
+            dest[j++] = src[i];
+            break;
+        }
+    }
+    dest[j] = '\0';
+}
+
 int at_cmd_parse(const char *cmd_str, struct at_command *cmd)
 {
     char buffer[256];
@@ -193,7 +242,7 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
 
 static int cmd_version(const struct at_command *cmd, char **response)
 {
-    return json_create_kv("firmware", "1.0.0", response);
+    return json_create_kv("firmware", "\"1.0.0\"", response);
 }
 
 /* Combined TIME command handler for GET and SET */
@@ -800,13 +849,16 @@ static int cmd_mark(const struct at_command *cmd, char **response)
     LOG_INF("Bookmark added at %u seconds: %s", g_recording_time, note);
 
     char data[256];
+    char escaped_note[128];
+    json_escape_string(escaped_note, note, sizeof(escaped_note));
+
     snprintf(data, sizeof(data),
              "{\"timestamp\":%u,"
              "\"offset\":%u,"
              "\"note\":\"%s\"}",
              (uint32_t)(k_uptime_get() / 1000),
              g_recording_time,
-             note);
+             escaped_note);
 
     return json_create_success(data, response);
 }
@@ -1001,6 +1053,9 @@ static int cmd_marks(const struct at_command *cmd, char **response)
     remaining = sizeof(json_buffer) - (ptr - json_buffer);
 
     for (int i = 0; i < count && remaining > 100; i++) {
+        char escaped_note[64];
+        json_escape_string(escaped_note, bookmarks[i].note, sizeof(escaped_note));
+
         int len = snprintf(ptr, remaining,
                           "%s{\"time\":%u,\"offset\":%u,\"file\":%u,"
                           "\"file_offset\":%u,\"note\":\"%s\"}",
@@ -1009,7 +1064,7 @@ static int cmd_marks(const struct at_command *cmd, char **response)
                           bookmarks[i].offset_sec,
                           bookmarks[i].file_index,
                           bookmarks[i].file_offset,
-                          bookmarks[i].note);
+                          escaped_note);
         ptr += len;
         remaining -= len;
     }
