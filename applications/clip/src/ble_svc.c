@@ -5,6 +5,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/hci.h>
@@ -17,6 +18,9 @@
 #include "clip.h"
 
 LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
+
+/* Reboot work item - delays reboot to allow response to be sent */
+static struct k_work_delayable reboot_work;
 
 #define DEVICE_NAME CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
@@ -111,6 +115,13 @@ static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t 
     LOG_INF("File data notify %s", file_data_notify_enabled ? "enabled" : "disabled");
 }
 
+/* Reboot work handler - called after delay to allow response to be sent */
+static void reboot_work_handler(struct k_work *work)
+{
+    LOG_INF("Rebooting system...");
+    sys_reboot(SYS_REBOOT_COLD);
+}
+
 /* AT command processor thread */
 static void at_thread_main(void *p1, void *p2, void *p3)
 {
@@ -147,11 +158,20 @@ static void at_thread_main(void *p1, void *p2, void *p3)
         LOG_INF("Command executed with result: %d", err);
         LOG_INF("Response: %s", response ? response : "NULL");
 
+        /* Check if this is a REBOOT command */
+        bool is_reboot = (strcmp(cmd.name, "REBOOT") == 0);
+
         /* Send response if available */
         if (response) {
             ble_svc_send_response(response);
             k_free(response);
             response = NULL;
+        }
+
+        /* If REBOOT command, schedule reboot after response is sent */
+        if (is_reboot) {
+            LOG_INF("REBOOT command detected, scheduling system reboot in 500ms");
+            k_work_schedule(&reboot_work, K_MSEC(500));
         }
 
         /* Cleanup parsed command */
@@ -341,6 +361,7 @@ int ble_svc_init(void)
     /* Initialize work queue */
     k_work_init(&adv_work, adv_work_handler);
     k_work_init_delayable(&mtu_work, mtu_work_handler);
+    k_work_init_delayable(&reboot_work, reboot_work_handler);
 
     /* Enable Bluetooth */
     err = bt_enable(NULL);

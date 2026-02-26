@@ -11,14 +11,25 @@
 
 LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 
+/* Settings name macros */
+#define SETTING_BITRATE         "config/bitrate"
+#define SETTING_COMPLEXITY      "config/complexity"
+#define SETTING_MODE            "config/mode"
+#define SETTING_NOISE_SUPPRESS  "config/noise_suppress"
+#define SETTING_CHUNK_SIZE      "config/chunk_size"
+#define SETTING_AUTODEL         "config/auto_delete_days"
+#define SETTING_AGC_ENABLED     "config/agc_enabled"
+#define SETTING_AGC_TARGET      "config/agc_target"
+#define SETTING_DEREVERB        "config/dereverb_enabled"
+
 /* Factory default configuration */
 static const struct clip_config factory_config = {
-    .bitrate = 48000,  /* Enhanced mode uses higher bitrate */
-    .complexity = 1,   /* Lower complexity for better performance */
-    .mode = MODE_ENHANCED,  /* Default to enhanced (stereo) mode */
+    .bitrate = 48000,
+    .complexity = 1,
+    .mode = MODE_ENHANCED,
     .noise_suppress = 0,
     .chunk_size = 500,
-    .auto_delete_days = -1,  /* Disabled by default */
+    .auto_delete_days = -1,
     .agc_target = 0,
     .agc_enabled = false,
     .dereverb_enabled = false,
@@ -27,51 +38,63 @@ static const struct clip_config factory_config = {
 #ifdef CONFIG_SETTINGS
 #include <zephyr/settings/settings.h>
 
+/* Config entry: maps setting name to struct member offset and size */
+struct config_entry {
+    const char *name;
+    size_t offset;
+    size_t size;
+};
+
+/* Table of all config entries */
+static const struct config_entry config_table[] = {
+    { SETTING_BITRATE,        offsetof(struct clip_config, bitrate),        sizeof(uint16_t) },
+    { SETTING_COMPLEXITY,     offsetof(struct clip_config, complexity),     sizeof(uint8_t) },
+    { SETTING_MODE,           offsetof(struct clip_config, mode),           sizeof(uint8_t) },
+    { SETTING_NOISE_SUPPRESS, offsetof(struct clip_config, noise_suppress), sizeof(uint8_t) },
+    { SETTING_CHUNK_SIZE,     offsetof(struct clip_config, chunk_size),     sizeof(uint16_t) },
+    { SETTING_AUTODEL,        offsetof(struct clip_config, auto_delete_days), sizeof(int8_t) },
+    { SETTING_AGC_ENABLED,    offsetof(struct clip_config, agc_enabled),    sizeof(bool) },
+    { SETTING_AGC_TARGET,     offsetof(struct clip_config, agc_target),     sizeof(uint8_t) },
+    { SETTING_DEREVERB,       offsetof(struct clip_config, dereverb_enabled), sizeof(bool) },
+};
+
+#define CONFIG_TABLE_SIZE (sizeof(config_table) / sizeof(config_table[0]))
+
 /* Settings handler for configuration */
 static int config_set_handler(const char *name, size_t len,
                                settings_read_cb read_cb, void *cb_arg)
 {
-    const char *next;
-    int rc;
-
     if (!name) {
         return -ENOENT;
     }
 
-    /* Parse settings subtree */
-    if (!strcmp(name, "bitrate")) {
-        uint16_t value;
-        rc = read_cb(cb_arg, &value, sizeof(value));
-        if (rc >= 0) {
-            g_config.bitrate = value;
-            return 0;
-        }
-    } else if (!strcmp(name, "complexity")) {
-        uint8_t value;
-        rc = read_cb(cb_arg, &value, sizeof(value));
-        if (rc >= 0) {
-            g_config.complexity = value;
-            return 0;
-        }
-    } else if (!strcmp(name, "mode")) {
-        uint8_t value;
-        rc = read_cb(cb_arg, &value, sizeof(value));
-        if (rc >= 0) {
-            g_config.mode = value;
-            return 0;
-        }
-    } else if (!strcmp(name, "noise_suppress")) {
-        uint8_t value;
-        rc = read_cb(cb_arg, &value, sizeof(value));
-        if (rc >= 0) {
-            g_config.noise_suppress = value;
-            return 0;
-        }
-    } else if (!strcmp(name, "chunk_size")) {
-        uint16_t value;
-        rc = read_cb(cb_arg, &value, sizeof(value));
-        if (rc >= 0) {
-            g_config.chunk_size = value;
+    /* Find matching entry in table */
+    for (size_t i = 0; i < CONFIG_TABLE_SIZE; i++) {
+        const struct config_entry *entry = &config_table[i];
+
+        /* Check if name matches (skip "config/" prefix) */
+        const char *entry_name = entry->name + 7;  /* Skip "config/" */
+        if (!strcmp(name, entry_name)) {
+            /* Read value from NVS */
+            uint8_t buffer[16];
+            int rc = read_cb(cb_arg, buffer, entry->size);
+            if (rc < 0) {
+                return rc;
+            }
+
+            /* Log what we're loading */
+            if (entry->size == sizeof(uint16_t)) {
+                LOG_INF("Loading %s: %u", entry->name, *(uint16_t *)buffer);
+            } else if (entry->size == sizeof(uint8_t)) {
+                LOG_INF("Loading %s: %u", entry->name, *(uint8_t *)buffer);
+            } else if (entry->size == sizeof(int8_t)) {
+                LOG_INF("Loading %s: %d", entry->name, *(int8_t *)buffer);
+            } else if (entry->size == sizeof(bool)) {
+                LOG_INF("Loading %s: %d", entry->name, *(bool *)buffer);
+            }
+
+            /* Copy to g_config at offset */
+            memcpy((uint8_t *)&g_config + entry->offset, buffer, entry->size);
             return 0;
         }
     }
@@ -99,6 +122,7 @@ int config_init(void)
         LOG_WRN("Settings subsystem init failed: %d, using defaults", err);
         return 0;
     }
+    LOG_INF("Settings subsystem initialized");
 
     /* Register settings handler */
     err = settings_register(&config_handler);
@@ -106,17 +130,26 @@ int config_init(void)
         LOG_WRN("Settings register failed: %d, using defaults", err);
         return 0;
     }
+    LOG_INF("Settings handler registered");
 
     /* Load configuration from NVS */
     err = settings_load();
     if (err) {
         LOG_WRN("Settings load failed: %d, using defaults", err);
         /* Save defaults to NVS */
+        LOG_INF("Saving defaults to NVS...");
         config_save();
+    } else {
+        LOG_INF("g_config addr: %p", &g_config);
+        LOG_INF("Settings loaded from NVS: bitrate=%u, mode=%d, complexity=%u",
+                g_config.bitrate, g_config.mode, g_config.complexity);
     }
 #else
     LOG_INF("Config initialized with factory defaults (settings disabled)");
 #endif /* CONFIG_SETTINGS */
+
+    LOG_INF("config_init() returning: g_config addr=%p, mode=%u, bitrate=%u, complexity=%u",
+            &g_config, g_config.mode, g_config.bitrate, g_config.complexity);
 
     return 0;
 }
@@ -135,34 +168,17 @@ int config_save(void)
 #ifdef CONFIG_SETTINGS
     int err;
 
-    err = settings_save_one("config/bitrate", &g_config.bitrate,
-                            sizeof(g_config.bitrate));
-    if (err) {
-        return err;
-    }
+    /* Save all entries from table */
+    for (size_t i = 0; i < CONFIG_TABLE_SIZE; i++) {
+        const struct config_entry *entry = &config_table[i];
 
-    err = settings_save_one("config/complexity", &g_config.complexity,
-                            sizeof(g_config.complexity));
-    if (err) {
-        return err;
-    }
-
-    err = settings_save_one("config/mode", &g_config.mode,
-                            sizeof(g_config.mode));
-    if (err) {
-        return err;
-    }
-
-    err = settings_save_one("config/noise_suppress", &g_config.noise_suppress,
-                            sizeof(g_config.noise_suppress));
-    if (err) {
-        return err;
-    }
-
-    err = settings_save_one("config/chunk_size", &g_config.chunk_size,
-                            sizeof(g_config.chunk_size));
-    if (err) {
-        return err;
+        err = settings_save_one(entry->name,
+                               (const uint8_t *)&g_config + entry->offset,
+                               entry->size);
+        if (err) {
+            LOG_ERR("Failed to save %s: %d", entry->name, err);
+            return err;
+        }
     }
 
     return 0;
@@ -181,10 +197,28 @@ int config_factory_reset(void)
     return config_save();
 }
 
+/* Map NVS keys to setting names */
+static const char *nvs_key_to_setting(uint16_t key)
+{
+    switch (key) {
+    case NVS_KEY_BITRATE:     return SETTING_BITRATE;
+    case NVS_KEY_COMPLEXITY:  return SETTING_COMPLEXITY;
+    case NVS_KEY_MODE:        return SETTING_MODE;
+    case NVS_KEY_NOISE:       return SETTING_NOISE_SUPPRESS;
+    case NVS_KEY_CHUNK_SIZE:  return SETTING_CHUNK_SIZE;
+    case NVS_KEY_AUTODEL:     return SETTING_AUTODEL;
+    case NVS_KEY_AGC_ENABLE:  return SETTING_AGC_ENABLED;
+    case NVS_KEY_AGC_TARGET:  return SETTING_AGC_TARGET;
+    case NVS_KEY_DEREVERB:    return SETTING_DEREVERB;
+    default:                  return NULL;
+    }
+}
+
 int config_set(uint16_t key, const void *value, size_t len)
 {
     int ret = 0;
 
+    /* Update in-memory config */
     switch (key) {
     case NVS_KEY_BITRATE:
         if (len == sizeof(uint16_t)) {
@@ -258,26 +292,9 @@ int config_set(uint16_t key, const void *value, size_t len)
     }
 
 #ifdef CONFIG_SETTINGS
-    /* Save to NVS */
-    switch (key) {
-    case NVS_KEY_BITRATE:
-        return settings_save_one("config/bitrate", value, len);
-    case NVS_KEY_COMPLEXITY:
-        return settings_save_one("config/complexity", value, len);
-    case NVS_KEY_MODE:
-        return settings_save_one("config/mode", value, len);
-    case NVS_KEY_NOISE:
-        return settings_save_one("config/noise_suppress", value, len);
-    case NVS_KEY_CHUNK_SIZE:
-        return settings_save_one("config/chunk_size", value, len);
-    case NVS_KEY_AUTODEL:
-        return settings_save_one("config/auto_delete_days", value, len);
-    case NVS_KEY_AGC_ENABLE:
-        return settings_save_one("config/agc_enabled", value, len);
-    case NVS_KEY_AGC_TARGET:
-        return settings_save_one("config/agc_target", value, len);
-    case NVS_KEY_DEREVERB:
-        return settings_save_one("config/dereverb_enabled", value, len);
+    const char *setting = nvs_key_to_setting(key);
+    if (setting) {
+        return settings_save_one(setting, value, len);
     }
 #endif
 

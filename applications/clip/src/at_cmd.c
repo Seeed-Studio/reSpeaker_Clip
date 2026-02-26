@@ -115,6 +115,22 @@ static void json_escape_string(char *dest, const char *src, size_t dest_size)
     dest[j] = '\0';
 }
 
+#ifdef CONFIG_SETTINGS
+#include <zephyr/settings/settings.h>
+
+/* Helper to save a single setting to NVS immediately */
+static int save_setting_now(const char *name, const void *value, size_t size)
+{
+    int err = settings_save_one(name, value, size);
+    if (err != 0) {
+        LOG_WRN("Failed to save %s: %d", name, err);
+    } else {
+        LOG_INF("Saved %s to NVS", name);
+    }
+    return err;
+}
+#endif
+
 int at_cmd_parse(const char *cmd_str, struct at_command *cmd)
 {
     char buffer[256];
@@ -392,6 +408,10 @@ static int cmd_autodel_set(const struct at_command *cmd, char **response)
         g_config.auto_delete_days = (int8_t)days;
     }
 
+#ifdef CONFIG_SETTINGS
+    save_setting_now("config/auto_delete_days", &g_config.auto_delete_days, sizeof(g_config.auto_delete_days));
+#endif
+
     if (g_config.auto_delete_days < 0) {
         return json_create_kv("value", "\"off\"", response);
     } else {
@@ -417,6 +437,10 @@ static int cmd_noise_set(const struct at_command *cmd, char **response)
     }
 
     g_config.noise_suppress = level;
+#ifdef CONFIG_SETTINGS
+    uint8_t noise_val = level;
+    save_setting_now("config/noise_suppress", &noise_val, sizeof(noise_val));
+#endif
 
     snprintf(data, sizeof(data), "{\"value\":%u}", level);
     return json_create_success(data, response);
@@ -472,6 +496,11 @@ static int cmd_agc_set(const struct at_command *cmd, char **response)
 
     g_config.agc_enabled = enable;
     g_config.agc_target = target;
+
+#ifdef CONFIG_SETTINGS
+    save_setting_now("config/agc_enabled", &enable, sizeof(enable));
+    save_setting_now("config/agc_target", &target, sizeof(target));
+#endif
 
     snprintf(data, sizeof(data),
             "{\"enabled\":%s,\"target\":%u}",
@@ -547,6 +576,10 @@ static int cmd_dereverb_set(const struct at_command *cmd, char **response)
 
     g_config.dereverb_enabled = enable;
 
+#ifdef CONFIG_SETTINGS
+    save_setting_now("config/dereverb_enabled", &enable, sizeof(enable));
+#endif
+
     snprintf(data, sizeof(data),
             "{\"enabled\":%s,\"level\":%u,\"decay\":%u}",
             enable ? "true" : "false",
@@ -589,7 +622,7 @@ static int cmd_pair(const struct at_command *cmd, char **response)
 static int cmd_bitrate(const struct at_command *cmd, char **response)
 {
     if (cmd->type == AT_CMD_SET) {
-        /* Set bitrate */
+        /* Set bitrate (mono bitrate, stereo will be x2) */
         int bitrate;
 
         if (!cmd->value) {
@@ -600,18 +633,26 @@ static int cmd_bitrate(const struct at_command *cmd, char **response)
             return json_create_error("Invalid bitrate format", response);
         }
 
-        /* Validate bitrate */
-        if (bitrate < 12000 || bitrate > 64000) {
-            return json_create_error("Bitrate out of range (12000-64000)", response);
+        /* Validate bitrate (mono bitrate range: 16000-32000) */
+        if (bitrate < 16000 || bitrate > 32000) {
+            return json_create_error("Bitrate out of range (16000-32000 for mono)", response);
         }
 
+        /* Store to config */
         g_config.bitrate = bitrate;
+#ifdef CONFIG_SETTINGS
+        save_setting_now("config/bitrate", &bitrate, sizeof(bitrate));
+#endif
+
+        /* Update audio subsystem */
+        audio_set_bitrate(bitrate);
 
         return json_create_kv("value", cmd->value, response);
     } else {
-        /* GET bitrate */
+        /* GET bitrate - return actual bitrate being used (depends on mode) */
         char buffer[16];
-        snprintf(buffer, sizeof(buffer), "%u", g_config.bitrate);
+        uint32_t actual_bitrate = audio_get_bitrate();
+        snprintf(buffer, sizeof(buffer), "%u", actual_bitrate);
         return json_create_kv("value", buffer, response);
     }
 }
@@ -636,6 +677,10 @@ static int cmd_complexity(const struct at_command *cmd, char **response)
         }
 
         g_config.complexity = complexity;
+#ifdef CONFIG_SETTINGS
+        uint8_t complexity_val = complexity;
+        save_setting_now("config/complexity", &complexity_val, sizeof(complexity_val));
+#endif
 
         return json_create_kv("value", cmd->value, response);
     } else {
@@ -676,6 +721,11 @@ static int cmd_mode(const struct at_command *cmd, char **response)
             return json_create_error("Invalid mode (use normal or enhanced)", response);
         }
 
+#ifdef CONFIG_SETTINGS
+        uint8_t mode_val = g_config.mode;
+        save_setting_now("config/mode", &mode_val, sizeof(mode_val));
+#endif
+
         /* Return as quoted string */
         char quoted_mode[32];
         snprintf(quoted_mode, sizeof(quoted_mode), "\"%s\"", mode_str);
@@ -709,6 +759,10 @@ static int cmd_chunksize(const struct at_command *cmd, char **response)
         }
 
         g_config.chunk_size = value;
+#ifdef CONFIG_SETTINGS
+        uint16_t chunk_val = value;
+        save_setting_now("config/chunk_size", &chunk_val, sizeof(chunk_val));
+#endif
 
         snprintf(buffer, sizeof(buffer), "%u", value);
     } else {
@@ -1228,6 +1282,12 @@ static int cmd_cancel(const struct at_command *cmd, char **response)
     return json_create_success(NULL, response);
 }
 
+static int cmd_reboot(const struct at_command *cmd, char **response)
+{
+    /* Confirm reboot is about to happen */
+    return json_create_success("{\"rebooting\":true}", response);
+}
+
 static int cmd_purge(const struct at_command *cmd, char **response)
 {
     struct storage_session_info sessions[32];
@@ -1287,6 +1347,7 @@ static const struct cmd_entry commands[] = {
     /* System commands */
     {"VERSION",  cmd_version,      AT_CMD_EXEC},
     {"TIME",     cmd_time,         AT_CMD_GET | AT_CMD_SET},
+    {"REBOOT",   cmd_reboot,       AT_CMD_EXEC},
     {"PURGE",    cmd_purge,        AT_CMD_EXEC},
     {"BATTERY",  cmd_battery_set,  AT_CMD_SET | AT_CMD_GET},
     {"CHARGING", cmd_charging_set, AT_CMD_SET | AT_CMD_GET},
@@ -1362,12 +1423,7 @@ int at_cmd_init(void)
     g_status.free_space = 1024000000;
     g_status.session_count = 0;
 
-    /* Initialize default configuration */
-    g_config.bitrate = 48000;
-    g_config.complexity = 1;
-    g_config.mode = MODE_ENHANCED;
-    g_config.noise_suppress = 0;
-    g_config.chunk_size = 500;
+    /* Note: g_config is already initialized by config_init() */
 
     return 0;
 }
