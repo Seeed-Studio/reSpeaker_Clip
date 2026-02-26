@@ -707,8 +707,8 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	LOG_INF("Audio: %d Hz, %d ch, %u bps",
-		AUDIO_SAMPLE_RATE, opus_channels, current_bitrate);
+	LOG_INF("Opus: %d ch, %u bps, complexity=%u",
+		opus_channels, current_bitrate, g_config.complexity);
 
 	return 0;
 }
