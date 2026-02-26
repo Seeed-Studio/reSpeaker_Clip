@@ -193,7 +193,7 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
 
 static int cmd_version(const struct at_command *cmd, char **response)
 {
-    return json_create_kv("firmware", "\"1.0.0\"", response);
+    return json_create_kv("firmware", "1.0.0", response);
 }
 
 /* Combined TIME command handler for GET and SET */
@@ -627,13 +627,16 @@ static int cmd_mode(const struct at_command *cmd, char **response)
             return json_create_error("Invalid mode (use normal or enhanced)", response);
         }
 
-        /* Add quotes for valid JSON string */
-        snprintf(quoted, sizeof(quoted), "\"%s\"", mode_str);
-        return json_create_kv("value", quoted, response);
+        /* Return as quoted string */
+        char quoted_mode[32];
+        snprintf(quoted_mode, sizeof(quoted_mode), "\"%s\"", mode_str);
+        return json_create_kv("value", quoted_mode, response);
     } else {
-        /* GET mode - return quoted string */
-        const char *mode = (g_config.mode == MODE_NORMAL) ? "\"normal\"" : "\"enhanced\"";
-        return json_create_kv("value", mode, response);
+        /* GET mode - return as quoted string */
+        const char *mode = (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced";
+        char quoted_mode[32];
+        snprintf(quoted_mode, sizeof(quoted_mode), "\"%s\"", mode);
+        return json_create_kv("value", quoted_mode, response);
     }
 }
 
@@ -684,21 +687,21 @@ static int cmd_start(const struct at_command *cmd, char **response)
             *p = tolower((unsigned char)*p);
         }
 
-        if (strcmp(mode_str, "normal") == 0) {
+        if (strcmp(mode_str, "normal") == 0 || strcmp(mode_str, "stereo") == 0) {
             rec_mode = MODE_NORMAL;
-            audio_mode = AUDIO_MODE_MERGE; /* Mono with mixed L+R */
-        } else if (strcmp(mode_str, "enhanced") == 0) {
+            audio_mode = AUDIO_MODE_STEREO; /* Stereo: 2 channels */
+        } else if (strcmp(mode_str, "enhanced") == 0 || strcmp(mode_str, "mono") == 0) {
             rec_mode = MODE_ENHANCED;
-            audio_mode = AUDIO_MODE_STEREO; /* Stereo */
+            audio_mode = AUDIO_MODE_MERGE; /* Processed mono: L+R → mono + DSP */
         } else {
-            return json_create_error("Invalid mode", response);
+            return json_create_error("Invalid mode (use normal/stereo or enhanced/mono)", response);
         }
     } else {
         /* Use config default */
         if (rec_mode == MODE_NORMAL) {
-            audio_mode = AUDIO_MODE_MERGE;
+            audio_mode = AUDIO_MODE_STEREO;  /* Stereo: 2 channels */
         } else {
-            audio_mode = AUDIO_MODE_STEREO;
+            audio_mode = AUDIO_MODE_MERGE;  /* Processed mono: L+R → mono + DSP */
         }
     }
 
@@ -729,7 +732,10 @@ static int cmd_start(const struct at_command *cmd, char **response)
         return json_create_error("No active session", response);
     }
 
-    return json_create_kv("session", session_id, response);
+    /* Return session ID as quoted string for valid JSON */
+    char quoted_session[64];
+    snprintf(quoted_session, sizeof(quoted_session), "\"%s\"", session_id);
+    return json_create_kv("session", quoted_session, response);
 }
 
 static int cmd_stop(const struct at_command *cmd, char **response)

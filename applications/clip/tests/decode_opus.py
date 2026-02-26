@@ -115,22 +115,31 @@ def decode_raw_opus(input_file, output_file, sample_rate=16000, channels=1):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 decode_opus.py input.opus [output.wav]")
-        print("\nIf output.wav not specified, defaults to input.wav")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="Decode raw Opus frames to WAV")
+    parser.add_argument("input", help="Input Opus file")
+    parser.add_argument("output", nargs="?", help="Output WAV file (default: input.wav)")
+    parser.add_argument("--channels", type=int, default=1, choices=[1, 2],
+                       help="Number of audio channels (default: 1)")
+    parser.add_argument("--sample-rate", type=int, default=16000,
+                       help="Sample rate in Hz (default: 16000)")
+    args = parser.parse_args()
 
-    input_file = sys.argv[1]
+    input_file = args.input
 
     # Default output filename
-    if len(sys.argv) >= 3:
-        output_file = sys.argv[2]
+    if args.output:
+        output_file = args.output
     else:
         output_file = input_file.replace('.opus', '.wav')
         if output_file == input_file:
             output_file = input_file + '.wav'
 
-    decode_raw_opus(input_file, output_file)
+    print(f"Decoding: {input_file} -> {output_file}")
+    print(f"  Channels: {args.channels}")
+    print(f"  Sample rate: {args.sample_rate} Hz\n")
+
+    decode_raw_opus(input_file, output_file, sample_rate=args.sample_rate, channels=args.channels)
 
 
 if __name__ == "__main__":

@@ -926,11 +926,114 @@ class ClipClient:
         print("\n=== Stopping recording ===")
         await self.send_command("AT+STOP")
 
+    async def test_record(self, mode="stereo", duration=None):
+        """Test audio recording in specified mode with simultaneous transfer
+
+        Args:
+            mode: "mono" or "stereo" (default: stereo)
+            duration: Recording duration in seconds (default: None = wait for Enter)
+
+        Note:
+            - "stereo" uses normal mode (2 channels, no DSP)
+            - "mono" uses enhanced mode (DSP processing, L+R → mono)
+            - Transfer runs in background during recording
+            - If no duration specified, waits for Enter key to stop
+        """
+        print("\n" + "="*60)
+        if duration:
+            print(f"TEST: {mode.upper()} Recording ({duration}s)")
+        else:
+            print(f"TEST: {mode.upper()} Recording (Press Enter to stop)")
+        print("="*60)
+
+        # Set time first
+        if not await self.set_time():
+            return False
+
+        # Set mode (use correct device terminology)
+        mode_value = "normal" if mode == "stereo" else "enhanced"
+        print(f"\n=== Setting {mode} mode ({mode_value}) ===")
+        response = await self.send_command(f"AT+MODE={mode_value}")
+        if not response.get("ok"):
+            print(f"✗ Failed to set mode: {response.get('error')}")
+            return False
+        print(f"✓ Mode set to {mode_value}")
+
+        # Start continuous recording (no time limit)
+        print("\n=== Starting recording ===")
+        response = await self.send_command("AT+START", timeout=10)
+        if not response.get("ok"):
+            print(f"✗ Failed to start: {response.get('error')}")
+            return False
+
+        session = str(response.get("session", ""))
+        print(f"✓ Recording started, session: {session}")
+
+        # Start transfer immediately in background
+        print("\n=== Starting simultaneous transfer ===")
+        print("Transfer will continue in background as you record...")
+        try:
+            download_task = asyncio.create_task(self.download_session(session))
+            print("  (Download task created)")
+        except Exception as e:
+            print(f"  ✗ Failed to create download task: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+        # Wait for duration or user to press Enter
+        if duration:
+            print(f"\nRecording for {duration} seconds...")
+            await asyncio.sleep(duration)
+        else:
+            print("\nRecording... Press Enter to stop:")
+            await self.wait_for_enter()
+
+        # Stop recording
+        print("\n=== Stopping recording ===")
+        response = await self.send_command("AT+STOP")
+        if response.get("ok"):
+            print("✓ Recording stopped")
+        else:
+            print(f"✗ Failed to stop: {response.get('error')}")
+
+        # Signal download to stop after recording stops
+        print("\n=== Finishing transfer ===")
+        self.stop_download()
+
+        # Wait for transfer to complete
+        try:
+            await download_task
+        except Exception as e:
+            print(f"\n[!] Transfer interrupted: {e}")
+            if self.session_dir and self.completed_files:
+                print("[!] Merging received files...")
+                await self._save_and_merge_files(session)
+
+        print("\n" + "="*60)
+        print("Test complete!")
+        print("="*60)
+        print(f"\nFiles saved to: {DOWNLOAD_DIR.absolute()}")
+
+        # Show merged file info
+        merged_file = DOWNLOAD_DIR / f"{session}.opus"
+        if merged_file.exists():
+            size = merged_file.stat().st_size
+            print(f"  Merged file: {merged_file.name} ({size} bytes)")
+        else:
+            print(f"  Note: Merged file not created")
+
+        return True
+
 async def main():
     import argparse
     parser = argparse.ArgumentParser(description="Recording and Transfer Test")
     parser.add_argument("--test-disconnect", action="store_true",
                        help="Test disconnect and resume scenario")
+    parser.add_argument("--record", metavar="MODE", nargs="?", const="stereo",
+                       help="Test recording (mono/stereo, default: stereo)")
+    parser.add_argument("--duration", type=int, default=None,
+                       help="Recording duration in seconds (default: wait for Enter)")
     args = parser.parse_args()
 
     client = ClipClient()
@@ -939,6 +1042,9 @@ async def main():
 
     if args.test_disconnect:
         await client.test_disconnect_resume()
+    elif args.record:
+        mode = args.record if args.record in ["mono", "stereo"] else "stereo"
+        await client.test_record(mode=mode, duration=args.duration)
     else:
         await client.run_test()
 
