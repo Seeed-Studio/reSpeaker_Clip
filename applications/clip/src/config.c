@@ -13,6 +13,42 @@
 
 LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 
+/* Helper function to convert UTC date/time to Unix timestamp
+ * This replaces timegm() which is not available in picolibc
+ */
+static time_t utc_to_timestamp(int year, int month, int day, int hour, int min, int sec)
+{
+	/* Days in each month for non-leap years */
+	static const int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+	/* Calculate total days from 1970-01-01 */
+	time_t days = 0;
+
+	/* Add days for complete years */
+	for (int y = 1970; y < year; y++) {
+		days += 365;
+		/* Leap year check */
+		if ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)) {
+			days += 1;
+		}
+	}
+
+	/* Add days for complete months in current year */
+	for (int m = 1; m < month; m++) {
+		days += days_in_month[m - 1];
+		/* Add leap day for February in leap years */
+		if (m == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
+			days += 1;
+		}
+	}
+
+	/* Add days in current month */
+	days += day - 1;
+
+	/* Convert to seconds */
+	return days * 86400 + hour * 3600 + min * 60 + sec;
+}
+
 /* Settings name macros */
 #define SETTING_BITRATE         "config/bitrate"
 #define SETTING_COMPLEXITY      "config/complexity"
@@ -430,16 +466,13 @@ int config_get_time(int64_t *unix_time)
         int64_t elapsed_ms = k_uptime_get() - g_synced_time.base_uptime_ms;
         int64_t elapsed_sec = elapsed_ms / 1000;
 
-        /* Convert synced time to Unix timestamp */
-        struct tm tm = {
-            .tm_year = g_synced_time.year - 1900,
-            .tm_mon = g_synced_time.month - 1,
-            .tm_mday = g_synced_time.day,
-            .tm_hour = g_synced_time.hour,
-            .tm_min = g_synced_time.min,
-            .tm_sec = g_synced_time.sec,
-        };
-        time_t base_time = timegm(&tm);
+        /* Convert synced time to Unix timestamp using helper function */
+        time_t base_time = utc_to_timestamp(g_synced_time.year,
+                                            g_synced_time.month,
+                                            g_synced_time.day,
+                                            g_synced_time.hour,
+                                            g_synced_time.min,
+                                            g_synced_time.sec);
         *unix_time = (int64_t)base_time + elapsed_sec;
 
         return 0;

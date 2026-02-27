@@ -145,11 +145,6 @@ static void ui_screen_off(void)
 	last_logged_state = current;
 }
 
-static void ui_show_message(const char *msg)
-{
-	LOG_INF("[UI] MSG: %s", msg);
-}
-
 /* ========== External Trigger Functions ========== */
 
 void ui_trigger_mark(void)
@@ -257,13 +252,16 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 	}
 }
 
-/* UI thread configuration */
-#define UI_THREAD_STACK_SIZE 4096
-#define UI_THREAD_PRIORITY   5
+/* ========== UI Thread Management ========== */
 
-K_THREAD_DEFINE(ui_thread, UI_THREAD_STACK_SIZE,
-		ui_thread_main, NULL, NULL, NULL,
-		UI_THREAD_PRIORITY, 0, 0);
+/* UI thread configuration */
+#define UI_THREAD_STACK_SIZE CLIP_UI_THREAD_STACK_SIZE
+#define UI_THREAD_PRIORITY   CLIP_UI_THREAD_PRIORITY
+
+/* UI thread stack and data */
+K_THREAD_STACK_DEFINE(ui_thread_stack, UI_THREAD_STACK_SIZE);
+static struct k_thread ui_thread_data;
+static k_tid_t ui_thread_id;
 
 /* ========== Legacy Display API (for compatibility) ========== */
 
@@ -281,6 +279,20 @@ int display_init(void)
 
 	/* Initialize UI state */
 	ui_set_state(UI_STATE_IDLE);
+
+	/* Start UI thread */
+	ui_thread_id = k_thread_create(&ui_thread_data,
+				       ui_thread_stack,
+				       UI_THREAD_STACK_SIZE,
+				       ui_thread_main,
+				       NULL, NULL, NULL,
+				       UI_THREAD_PRIORITY, 0, K_NO_WAIT);
+	if (!ui_thread_id) {
+		LOG_WRN("Failed to create UI thread, running without UI");
+		/* Continue anyway, UI is optional */
+	} else {
+		LOG_INF("UI thread started");
+	}
 
 	LOG_INF("Display initialized");
 

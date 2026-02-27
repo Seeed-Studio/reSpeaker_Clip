@@ -70,6 +70,11 @@ static enum audio_mode current_mode = AUDIO_MODE_MERGE; /* Default to merge (mon
 static int opus_channels = 1;
 static uint32_t current_bitrate = 24000;
 
+/* Audio recording thread */
+K_THREAD_STACK_DEFINE(audio_thread_stack, CLIP_AUDIO_STACK_SIZE);
+static struct k_thread audio_thread_data;
+static k_tid_t audio_thread_id;
+
 /* Opus encoder state */
 static OpusEncoder *opus_encoder = NULL;
 
@@ -175,6 +180,21 @@ int audio_init(void)
 #endif
 
 	LOG_INF("audio: %dch %ukbps", opus_channels, current_bitrate/1000);
+
+	/* Start audio recording thread */
+	audio_thread_id = k_thread_create(&audio_thread_data,
+					  audio_thread_stack,
+					  CLIP_AUDIO_STACK_SIZE,
+					  audio_recording_thread,
+					  NULL, NULL, NULL,
+					  CLIP_AUDIO_THREAD_PRIORITY, 0, K_NO_WAIT);
+	if (!audio_thread_id) {
+		LOG_ERR("Failed to create audio thread");
+		cleanup_opus_encoder();
+		mic_power_off();
+		return -ENOMEM;
+	}
+	LOG_INF("Audio thread started");
 
 	return 0;
 }

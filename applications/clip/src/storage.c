@@ -691,7 +691,7 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 		sessions[count].session_id[sizeof(sessions[count].session_id) - 1] = '\0';
 
 		/* Count files and calculate size in this session */
-		char session_path[64];
+		char session_path[280];  /* /SD:/REC/ + 255 char filename + null */
 		struct fs_dir_t session_dir;
 		struct fs_dirent file_entry;
 
@@ -885,7 +885,7 @@ int storage_delete_session(const char *session_id)
 			}
 
 			if (entry.type == FS_DIR_ENTRY_FILE) {
-				char filepath[128];
+				char filepath[540];  /* /SD:/REC/ + 255 + / + 255 + null */
 				snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, entry.name);
 				rc = fs_unlink(filepath);
 				if (rc == 0) {

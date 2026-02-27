@@ -16,6 +16,7 @@
 #include "ble_svc.h"
 #include "at_cmd.h"
 #include "clip.h"
+#include "transfer.h"
 
 LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
 

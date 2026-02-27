@@ -102,11 +102,6 @@ bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_
     return true;
 }
 
-/* Audio recording thread */
-K_THREAD_DEFINE(audio_thread, CLIP_AUDIO_STACK_SIZE,
-                audio_recording_thread, NULL, NULL, NULL,
-                CLIP_AUDIO_THREAD_PRIORITY, 0, 0);
-
 /* Forward declarations */
 static void state_change_handler(enum clip_state old_state,
                                  enum clip_state new_state);

@@ -23,6 +23,7 @@
 #include "bookmarks.h"
 #include "battery.h"
 #include "config.h"
+#include "ble_svc.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -323,21 +324,6 @@ static int cmd_time(const struct at_command *cmd, char **response)
             return json_create_error("Time not set (use AT+TIME=<timestamp>)", response);
         }
     }
-}
-
-static int cmd_battery_get(const struct at_command *cmd, char **response)
-{
-    char data[256];
-
-    snprintf(data, sizeof(data),
-             "{\"level\":%u,"
-             "\"voltage\":%u,"
-             "\"charging\":%s}",
-             battery_get_level(),
-             battery_get_voltage(),
-             battery_is_charging() ? "true" : "false");
-
-    return json_create_success(data, response);
 }
 
 static int cmd_battery_set(const struct at_command *cmd, char **response)
@@ -732,13 +718,13 @@ static int cmd_mode(const struct at_command *cmd, char **response)
 #endif
 
         /* Return as quoted string */
-        char quoted_mode[32];
+        char quoted_mode[64];
         snprintf(quoted_mode, sizeof(quoted_mode), "\"%s\"", mode_str);
         return json_create_kv("value", quoted_mode, response);
     } else {
         /* GET mode - return as quoted string */
         const char *mode = (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced";
-        char quoted_mode[32];
+        char quoted_mode[64];
         snprintf(quoted_mode, sizeof(quoted_mode), "\"%s\"", mode);
         return json_create_kv("value", quoted_mode, response);
     }
