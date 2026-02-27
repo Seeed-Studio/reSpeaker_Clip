@@ -35,6 +35,7 @@
 		compatible = "regulator-fixed";
 		regulator-name = "oled_vdd";
 		enable-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;
+		regulator-boot-on;
 		status = "okay";
 	};
 

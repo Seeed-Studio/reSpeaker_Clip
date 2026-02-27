@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "display_ctrl.h"
+#include "display.h"
 #include "clip.h"
 #include "state_machine.h"
 #include "audio.h"
@@ -267,11 +268,20 @@ static k_tid_t ui_thread_id;
 
 int display_init(void)
 {
+	int ret;
+
 	LOG_INF("Initializing display controller...");
 
-	/* Serial logging mode - no display device needed */
-	display_ready = true;
-	LOG_INF("Display controller: Serial logging mode (no OLED device)");
+	/* Initialize OLED display hardware */
+	ret = display_init_hw();
+	if (ret) {
+		LOG_WRN("OLED display init failed: %d, using serial logging mode", ret);
+		display_ready = true;
+		LOG_INF("Display controller: Serial logging mode (no OLED device)");
+	} else {
+		display_ready = true;
+		LOG_INF("Display controller: OLED mode active");
+	}
 
 	/* Show welcome message */
 	LOG_INF("DISPLAY: reSpeaker Clip Ready");

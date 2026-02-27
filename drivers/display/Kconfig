@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+
+# CH1115 OLED display driver configuration
+
+config OLED_DISPLAY
+	bool "CH1115 OLED display driver"
+	default y
+	depends on DT_HAS_SOLOMON_CH1115_ENABLED
+	select I2C
+	select DISPLAY
+	help
+	  Enable CH1115-based OLED display driver (88x48 I2C).

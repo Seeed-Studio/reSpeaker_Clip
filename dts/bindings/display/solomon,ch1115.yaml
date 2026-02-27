@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: CH1115 OLED display controller
+
+compatible: "solomon,ch1115"
+
+include: i2c-device.yaml
+
+properties:
+  reset-gpios:
+    type: phandle-array
+    required: false
+    description: Reset GPIO
+
+  width:
+    type: int
+    required: true
+    description: Display width in pixels
+
+  height:
+    type: int
+    required: true
+    description: Display height in pixels
+
+  segment-offset:
+    type: int
+    required: false
+    default: 0
+    description: Segment offset
+
+  page-offset:
+    type: int
+    required: false
+    default: 0
+    description: Page offset
+
+  display-offset:
+    type: int
+    required: false
+    default: 0
+    description: Display offset
+
+  multiplex-ratio:
+    type: int
+    required: false
+    default: 63
+    description: Multiplex ratio
+
+  prechargep:
+    type: int
+    required: false
+    default: 0x22
+    description: Precharge period
+
+  segment-remap:
+    type: int
+    required: false
+    default: 0
+    description: Segment remap
+
+  com-invdir:
+    type: int
+    required: false
+    default: 0
+    description: COM output scan direction

@@ -3,3 +3,4 @@
 # ReSpeaker Lav custom drivers configuration
 
 rsource "input/Kconfig"
+rsource "display/Kconfig"
