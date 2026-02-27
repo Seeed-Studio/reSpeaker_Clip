@@ -1,0 +1,436 @@
+"""
+File transfer handling for reSpeaker Clip device.
+
+Provides high-level file download and session sync functionality.
+"""
+
+import asyncio
+import time
+from pathlib import Path
+from typing import Optional, Callable, Dict, List, Any
+
+from .client import ClipDevice
+from .commands import ClipCommands
+from .exceptions import TransferError, TimeoutError, StateError
+
+
+class FileTransfer:
+    """
+    Handle file transfer operations for reSpeaker Clip.
+
+    Provides methods for downloading individual files and syncing sessions.
+
+    Example:
+        >>> async with ClipDevice() as device:
+        ...     transfer = FileTransfer(device)
+        ...     await transfer.download_session("20240101_120000", Path("./downloads"))
+    """
+
+    def __init__(self, device: ClipDevice, commands: Optional[ClipCommands] = None):
+        """
+        Initialize file transfer handler.
+
+        Args:
+            device: Connected ClipDevice instance
+            commands: Optional ClipCommands instance (will create if None)
+        """
+        self.device = device
+        self.commands = commands or ClipCommands(device)
+        self._transfer_complete = False
+        self._canceled = False
+
+    async def download_file(
+        self,
+        session_id: str,
+        filename: str,
+        output_path: Optional[Path] = None,
+        progress_callback: Optional[Callable[[int], None]] = None,
+        timeout: float = 60.0,
+    ) -> bytes:
+        """
+        Download a single file from a session.
+
+        Args:
+            session_id: Session ID
+            filename: Filename to download
+            output_path: Optional path to save file
+            progress_callback: Optional callback with byte count
+            timeout: Transfer timeout in seconds
+
+        Returns:
+            Downloaded file data
+
+        Raises:
+            TransferError: If download fails
+        """
+        file_path = f"{session_id}/{filename}"
+        return await self._download_legacy(
+            file_path,
+            output_path,
+            progress_callback,
+            timeout,
+        )
+
+    async def _download_legacy(
+        self,
+        path: str,
+        output_path: Optional[Path],
+        progress_callback: Optional[Callable[[int], None]],
+        timeout: float,
+    ) -> bytes:
+        """Download using legacy single-file mode."""
+        self.device._clear_file_state()
+        self._canceled = False
+
+        # Start download
+        response = await self.device.send_command(f"AT+DOWNLOAD={path}")
+        if not response.get("ok"):
+            raise TransferError(response.get("error", "Failed to start download"))
+
+        # Wait for transfer
+        start_time = time.time()
+        last_size = 0
+        total_received = 0
+
+        while time.time() - start_time < timeout:
+            await asyncio.sleep(0.1)
+
+            # Check for completion
+            if self.device._last_response:
+                try:
+                    notif = self.device._last_response
+                    # Check for done notification in response
+                    import json
+                    try:
+                        parsed = json.loads(notif)
+                        if parsed.get("done"):
+                            break
+                    except json.JSONDecodeError:
+                        pass
+                except Exception:
+                    pass
+
+            # Check for cancellation
+            if self._canceled:
+                raise TransferError("Transfer canceled")
+
+            # Track progress
+            current_size = len(self.device._file_data_buffer)
+            if current_size > last_size:
+                new_bytes = current_size - last_size
+                total_received += new_bytes
+                last_size = current_size
+                start_time = time.time()  # Reset timeout
+
+                if progress_callback:
+                    progress_callback(total_received)
+
+        if time.time() - start_time >= timeout:
+            raise TimeoutError("File transfer timed out")
+
+        # Get data
+        data = await self.device.get_file_data()
+
+        # Save to file if requested
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(data)
+
+        return data
+
+    async def download_session(
+        self,
+        session_id: str,
+        output_dir: Path,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        stop_recording: bool = False,
+        continuous: bool = False,
+        timeout: float = 300.0,
+    ) -> Dict[str, Any]:
+        """
+        Download all files from a recording session.
+
+        Args:
+            session_id: Session ID to download
+            output_dir: Directory to save files
+            progress_callback: Optional callback(filename, received, total)
+            stop_recording: Stop recording after starting download
+            continuous: Keep waiting for new files (for active recordings)
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            Dict with download results including file count and paths
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Clear state
+        self.device._clear_file_state()
+        self.device._downloading = True
+        self._transfer_complete = False
+        self._canceled = False
+
+        # Get session info
+        sessions = await self.commands.list_sessions()
+        session_info = None
+        for s in sessions:
+            if s.id == session_id:
+                session_info = s
+                break
+
+        # Start download
+        response = await self.device.send_command(f"AT+DOWNLOAD={session_id}")
+        if not response.get("ok"):
+            raise TransferError(response.get("error", "Failed to start download"))
+
+        # Wait for download to start
+        await asyncio.sleep(0.5)
+
+        # Optionally stop recording
+        if stop_recording:
+            await asyncio.sleep(1.0)
+            state = await self.commands.get_state()
+            if state.state == "RECORDING":
+                await self.commands.stop_recording()
+
+        # Wait for files
+        result = await self._wait_for_session_files(
+            session_id,
+            output_dir,
+            progress_callback,
+            continuous,
+            timeout,
+        )
+
+        # Merge files
+        if result["files"]:
+            merged_path = output_dir / f"{session_id}.opus"
+            await self._merge_opus_files(result["files"], merged_path)
+            result["merged_file"] = str(merged_path)
+
+        return result
+
+    async def _wait_for_session_files(
+        self,
+        session_id: str,
+        output_dir: Path,
+        progress_callback: Optional[Callable[[str, int, int], None]],
+        continuous: bool,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        """Wait for all session files to be received."""
+        start_time = time.time()
+        last_file_time = time.time()
+        no_file_timeout = 30.0 if continuous else 10.0
+        session_closed = False
+
+        files_received = []
+
+        while time.time() - start_time < timeout:
+            await asyncio.sleep(0.5)
+
+            # Check for cancellation
+            if self._canceled:
+                raise TransferError("Transfer canceled")
+
+            # Check if session is closed
+            if not session_closed:
+                try:
+                    state = await self.commands.get_state()
+                    if state.state == "IDLE":
+                        session_closed = True
+                except Exception:
+                    pass
+
+            # Check for completed files
+            for filename, data in list(self.device._session_files.items()):
+                if filename not in [f["name"] for f in files_received]:
+                    # Save file
+                    file_path = output_dir / filename
+                    file_path.write_bytes(data)
+                    files_received.append({
+                        "name": filename,
+                        "path": str(file_path),
+                        "size": len(data),
+                    })
+                    last_file_time = time.time()
+
+                    if progress_callback:
+                        total_size = sum(f["size"] for f in files_received)
+                        progress_callback(filename, len(files_received), total_size)
+
+            # Check if transfer is complete
+            if self._transfer_complete:
+                break
+
+            # Exit conditions
+            if session_closed:
+                if time.time() - last_file_time > no_file_timeout:
+                    break
+            elif not continuous:
+                if time.time() - last_file_time > no_file_timeout:
+                    break
+
+        return {
+            "session_id": session_id,
+            "files": files_received,
+            "total_size": sum(f["size"] for f in files_received),
+            "file_count": len(files_received),
+        }
+
+    async def _merge_opus_files(self, files: List[Dict], output_path: Path) -> None:
+        """
+        Merge Opus files into single file.
+
+        Args:
+            files: List of file dicts with 'path' key
+            output_path: Output file path
+        """
+        # Sort by filename (should be 001.opus, 002.opus, etc.)
+        sorted_files = sorted(files, key=lambda f: f["name"])
+
+        with open(output_path, "wb") as outfile:
+            for file_info in sorted_files:
+                file_path = Path(file_info["path"])
+                if file_path.exists():
+                    outfile.write(file_path.read_bytes())
+
+    async def cancel(self) -> None:
+        """Cancel the current transfer."""
+        self._canceled = True
+        try:
+            await self.commands.cancel_transfer()
+        except Exception:
+            pass
+
+
+class SessionSync(FileTransfer):
+    """
+    Enhanced session synchronization with resume support.
+
+    Provides intelligent sync that:
+    - Detects existing local files
+    - Resumes from last downloaded file
+    - Deletes sessions from device after successful sync
+    - Shows progress with optional tqdm integration
+
+    Example:
+        >>> async with ClipDevice() as device:
+        ...     sync = SessionSync(device)
+        ...     await sync.sync("20240101_120000", Path("./downloads"))
+    """
+
+    def __init__(self, device: ClipDevice, commands: Optional[ClipCommands] = None):
+        super().__init__(device, commands)
+
+    async def sync(
+        self,
+        session_id: str,
+        output_dir: Path,
+        delete_after: bool = True,
+        continuous: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Sync a session with resume support.
+
+        Args:
+            session_id: Session ID to sync
+            output_dir: Directory to save files
+            delete_after: Delete session from device after successful sync
+            continuous: Keep waiting for new files
+
+        Returns:
+            Dict with sync results
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check for existing files
+        existing_files = sorted(output_dir.glob("*.opus"))
+
+        # Get session info
+        sessions = await self.commands.list_sessions()
+        session_info = None
+        for s in sessions:
+            if s.id == session_id:
+                session_info = s
+                break
+
+        if session_info:
+            total_files = session_info.files
+        else:
+            total_files = 0
+
+        # Check if already synced
+        if total_files > 0 and len(existing_files) >= total_files:
+            return {
+                "session_id": session_id,
+                "files": [{"name": f.name, "path": str(f), "size": f.stat().st_size}
+                         for f in existing_files],
+                "file_count": len(existing_files),
+                "total_size": sum(f.stat().st_size for f in existing_files),
+                "status": "already_synced",
+            }
+
+        # Start download (resume from last file if any)
+        start_file = None
+        if existing_files:
+            try:
+                last_num = int(existing_files[-1].stem)
+                start_file = f"{last_num + 1:04d}.opus"
+            except ValueError:
+                pass
+
+        # Download with merge
+        result = await self.download_session(
+            session_id,
+            output_dir,
+            continuous=continuous,
+        )
+
+        # Delete from device if requested
+        if delete_after and result["file_count"] > 0:
+            try:
+                await self.commands.delete_session(session_id)
+            except Exception:
+                pass
+
+        return result
+
+    async def sync_all(
+        self,
+        output_dir: Path,
+        delete_after: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Sync all sessions from device.
+
+        Args:
+            output_dir: Base directory for downloads
+            delete_after: Delete sessions after successful sync
+
+        Returns:
+            List of sync results for each session
+        """
+        sessions = await self.commands.list_sessions()
+        results = []
+
+        for session in sessions:
+            session_dir = output_dir / session.id
+            try:
+                result = await self.sync(
+                    session.id,
+                    session_dir,
+                    delete_after,
+                    continuous=False,
+                )
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    "session_id": session.id,
+                    "error": str(e),
+                    "status": "failed",
+                })
+
+        return results

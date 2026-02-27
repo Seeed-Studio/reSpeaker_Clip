@@ -1,0 +1,21 @@
+# Python dependencies for reSpeaker Clip test framework
+
+# BLE communication
+bleak>=0.21.0
+
+# Testing framework
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Progress bars
+tqdm>=4.66.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Audio processing (for decode_opus.py)
+pydub>=0.25.0
+
+# Note: Opus decoding uses ffmpeg instead of opuslib (more reliable cross-platform)
+# Install ffmpeg from: https://ffmpeg.org/download.html

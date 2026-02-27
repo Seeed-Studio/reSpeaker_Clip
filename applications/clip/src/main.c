@@ -144,6 +144,17 @@ int clip_init(void)
         return err;
     }
 
+    /* Initialize storage subsystem FIRST (before audio/BLE)
+     * SD card init can fail if called after audio/BLE initialization
+     * due to resource conflicts or timing issues
+     */
+    err = storage_init();
+    if (err)
+    {
+        LOG_WRN("Storage init failed: %d, SD card features disabled", err);
+        /* Continue anyway, SD card is optional */
+    }
+
     /* Initialize BLE service */
     err = ble_svc_init();
     if (err)
@@ -158,14 +169,6 @@ int clip_init(void)
     {
         LOG_WRN("Audio init failed: %d, audio features disabled", err);
         /* Continue anyway, audio is optional */
-    }
-
-    /* Initialize storage subsystem */
-    err = storage_init();
-    if (err)
-    {
-        LOG_WRN("Storage init failed: %d, SD card features disabled", err);
-        /* Continue anyway, SD card is optional */
     }
 
     /* Initialize button handler */
