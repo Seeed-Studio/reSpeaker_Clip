@@ -84,30 +84,13 @@ void ui_set_state(enum ui_state new_state)
 
 static void ui_show_recording_info(void)
 {
-	uint32_t seconds;
-	uint8_t hours, mins, secs;
-
 	if (!recording_active) {
 		return;
 	}
 
-	/* Calculate elapsed time */
-	int64_t elapsed_ms = k_uptime_get() - recording_start_time_ms;
-	seconds = elapsed_ms / 1000;
+	bool enhanced_mode = (g_config.mode == MODE_ENHANCED);
+	display_show_recording(enhanced_mode);
 
-	/* Format as HH:MM:SS */
-	hours = seconds / 3600;
-	mins = (seconds % 3600) / 60;
-	secs = seconds % 60;
-
-	/* Show recording time */
-	LOG_INF("[UI] REC %02u:%02u:%02u", hours, mins, secs);
-
-	/* Show waveform animation */
-	LOG_INF("[UI] WAVE: %s", waveform_frames[waveform_frame_index]);
-
-	/* Advance waveform frame for next time */
-	waveform_frame_index = (waveform_frame_index + 1) % ARRAY_SIZE(waveform_frames);
 }
 
 static void ui_show_recording_dot(void)
@@ -207,19 +190,15 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 		case UI_STATE_RECORDING_INFO:
 			ui_show_recording_info();
 
-			/* Check if 3 seconds elapsed */
-			if (k_uptime_get() - recording_state_start_ms >= UI_RECORDING_INFO_DURATION_MS) {
-				ui_set_state(UI_STATE_RECORDING_DOT);
-			}
-
 			/* Update every ~200ms for smooth animation */
-			k_sleep(K_MSEC(200));
+			k_sleep(K_MSEC(10));
 			break;
 
 		case UI_STATE_RECORDING_DOT:
-			ui_show_recording_dot();
-			/* Update every 500ms (dot doesn't animate) */
-			k_sleep(K_MSEC(500));
+			/* Continue showing animation in DOT state as well */
+			ui_show_recording_info();
+			/* Update every 200ms for smooth animation */
+			k_sleep(K_MSEC(200));
 			break;
 
 		case UI_STATE_MARKING:
