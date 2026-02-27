@@ -146,7 +146,7 @@ void clip_main_loop(void);
 
 /* Thread stack sizes */
 #ifndef CONFIG_AUDIO_STACK_SIZE
-#define CLIP_AUDIO_STACK_SIZE             32768
+#define CLIP_AUDIO_STACK_SIZE             65536
 #else
 #define CLIP_AUDIO_STACK_SIZE             CONFIG_AUDIO_STACK_SIZE
 #endif
