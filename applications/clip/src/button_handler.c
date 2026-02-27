@@ -82,7 +82,8 @@ static void button_start_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	mode = (g_config.mode == MODE_ENHANCED) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
+	/* Mode mapping: NORMAL=stereo, ENHANCED=mono+DSP */
+	mode = (g_config.mode == MODE_NORMAL) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
 	err = audio_start_recording(mode);
 	if (err == 0) {
 		state_transition(CLIP_STATE_RECORDING);
