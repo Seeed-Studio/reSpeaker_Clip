@@ -70,6 +70,12 @@ static enum audio_mode current_mode = AUDIO_MODE_MERGE; /* Default to merge (mon
 static int opus_channels = 1;
 static uint32_t current_bitrate = 24000;
 
+/* Thread-safe start/stop requests */
+static K_MUTEX_DEFINE(audio_state_mutex);
+static bool start_requested = false;
+static enum audio_mode pending_start_mode = AUDIO_MODE_MERGE;
+static bool stop_requested = false;
+
 /* Audio recording thread */
 K_THREAD_STACK_DEFINE(audio_thread_stack, CLIP_AUDIO_STACK_SIZE);
 static struct k_thread audio_thread_data;
@@ -194,6 +200,7 @@ int audio_init(void)
 		mic_power_off();
 		return -ENOMEM;
 	}
+	k_thread_name_set(&audio_thread_data, "audio_rec");
 	LOG_INF("Audio thread started");
 
 	return 0;
@@ -211,16 +218,157 @@ void audio_cleanup(void)
 	mic_power_off();
 }
 
+/* Internal function to perform recording initialization in audio thread context */
+static int audio_start_recording_internal(enum audio_mode mode);
+static int audio_stop_recording_internal(void);
+
 int audio_start_recording(enum audio_mode mode)
 {
-	int ret;
+	/* Just set the start request flag - audio thread will handle initialization */
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
 
 	if (recording_active) {
+		k_mutex_unlock(&audio_state_mutex);
 		LOG_WRN("Recording already active");
 		return -EBUSY;
 	}
 
-	LOG_INF("Starting recording in mode %d", mode);
+	start_requested = true;
+	pending_start_mode = mode;
+	k_mutex_unlock(&audio_state_mutex);
+
+	LOG_INF("Recording start requested (mode=%d)", mode);
+	return 0;
+}
+
+int audio_stop_recording(void)
+{
+	/* Just set the stop request flag - audio thread will handle cleanup */
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+
+	if (!recording_active) {
+		k_mutex_unlock(&audio_state_mutex);
+		return 0;
+	}
+
+	stop_requested = true;
+	k_mutex_unlock(&audio_state_mutex);
+
+	LOG_INF("Recording stop requested");
+	return 0;
+}
+
+bool audio_is_recording(void)
+{
+	return recording_active;
+}
+
+int audio_set_bitrate(uint32_t bitrate)
+{
+	int ret;
+
+	/* Validate bitrate (this is the mono bitrate) */
+	if (bitrate < 16000 || bitrate > 32000) {
+		return -EINVAL;
+	}
+
+	/* Store as mono bitrate in config */
+	g_config.bitrate = bitrate;
+
+	/* Calculate actual bitrate based on current mode */
+	if (current_mode == AUDIO_MODE_STEREO) {
+		current_bitrate = bitrate * 2;
+	} else {
+		current_bitrate = bitrate;
+	}
+
+	/* Reinitialize encoder with new bitrate */
+	ret = init_opus_encoder();
+	if (ret < 0) {
+		LOG_ERR("Failed to set bitrate: %d", ret);
+		return ret;
+	}
+
+	LOG_INF("Bitrate: mono=%u bps, actual=%u bps", bitrate, current_bitrate);
+	return 0;
+}
+
+uint32_t audio_get_bitrate(void)
+{
+	return current_bitrate;
+}
+
+int audio_set_complexity(uint8_t complexity)
+{
+	int ret;
+
+	if (complexity > 10) {
+		return -EINVAL;
+	}
+
+	if (!opus_encoder) {
+		return -ENOTSUP;
+	}
+
+	ret = opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(complexity));
+	if (ret != OPUS_OK) {
+		LOG_ERR("Failed to set complexity: %d", ret);
+		return ret;
+	}
+
+	g_config.complexity = complexity;
+
+	LOG_INF("Complexity set to %u", complexity);
+	return 0;
+}
+
+uint8_t audio_get_complexity(void)
+{
+	return g_config.complexity;
+}
+
+int audio_set_noise_suppress(bool enable)
+{
+#ifdef CONFIG_SPEEXDSP
+	g_config.noise_suppress = enable ? 1 : 0;
+	/* Note: speex_enabled is set based on mode during recording start */
+	LOG_INF("Noise suppression config: %s", enable ? "enabled" : "disabled");
+	return 0;
+#else
+	return -ENOTSUP;
+#endif
+}
+
+bool audio_get_noise_suppress(void)
+{
+#ifdef CONFIG_SPEEXDSP
+	return speex_enabled;
+#else
+	return false;
+#endif
+}
+
+int audio_get_stats(struct audio_stats *stats_out)
+{
+	if (!stats_out) {
+		return -EINVAL;
+	}
+
+	/* Calculate average if recording stopped */
+	if (!recording_active && stats.frames_encoded > 0) {
+		stats.encode_time_avg_ms = encode_time_total / stats.frames_encoded;
+	}
+
+	memcpy(stats_out, &stats, sizeof(stats));
+	return 0;
+}
+
+/* Internal recording initialization - executes in audio thread context */
+static int audio_start_recording_internal(enum audio_mode mode)
+{
+	int ret;
+
+	LOG_INF("Starting recording in mode %d (audio thread)", mode);
 
 	/* Update mode if changed */
 	if (mode != current_mode) {
@@ -341,7 +489,8 @@ int audio_start_recording(enum audio_mode mode)
 	return 0;
 }
 
-int audio_stop_recording(void)
+/* Internal stop function - executes in audio thread context */
+static int audio_stop_recording_internal(void)
 {
 	int ret;
 	uint32_t duration_sec;
@@ -355,10 +504,10 @@ int audio_stop_recording(void)
 	/* Stop DMIC */
 	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
 	if (ret < 0) {
-		LOG_ERR("dmic_stop: %d", ret);
+		LOG_ERR("Failed to stop DMIC: %d", ret);
 	}
 
-	/* Close SD card file if open */
+	/* Close recording file */
 	if (current_storage_file.is_open) {
 		/* Save filename and size before closing */
 		char completed_filename[64];
@@ -375,8 +524,6 @@ int audio_stop_recording(void)
 		/* Clear writing file mark */
 		storage_set_writing_file(NULL, NULL);
 		memset(&current_storage_file, 0, sizeof(current_storage_file));
-
-		/* NOTE: Recording and transfer are now separated - client initiates transfer via AT+DOWNLOAD */
 	}
 
 	/* Calculate duration */
@@ -406,111 +553,6 @@ int audio_stop_recording(void)
 	return 0;
 }
 
-bool audio_is_recording(void)
-{
-	return recording_active;
-}
-
-int audio_set_bitrate(uint32_t bitrate)
-{
-	int ret;
-
-	/* Validate bitrate (this is the mono bitrate) */
-	if (bitrate < 16000 || bitrate > 32000) {
-		return -EINVAL;
-	}
-
-	/* Store as mono bitrate in config */
-	g_config.bitrate = bitrate;
-
-	/* Calculate actual bitrate based on current mode */
-	if (current_mode == AUDIO_MODE_STEREO) {
-		current_bitrate = bitrate * 2;
-	} else {
-		current_bitrate = bitrate;
-	}
-
-	/* Reinitialize encoder with new bitrate */
-	ret = init_opus_encoder();
-	if (ret < 0) {
-		LOG_ERR("Failed to set bitrate: %d", ret);
-		return ret;
-	}
-
-	LOG_INF("Bitrate: mono=%u bps, actual=%u bps", bitrate, current_bitrate);
-	return 0;
-}
-
-uint32_t audio_get_bitrate(void)
-{
-	return current_bitrate;
-}
-
-int audio_set_complexity(uint8_t complexity)
-{
-	int ret;
-
-	if (complexity > 10) {
-		return -EINVAL;
-	}
-
-	if (!opus_encoder) {
-		return -ENOTSUP;
-	}
-
-	ret = opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(complexity));
-	if (ret != OPUS_OK) {
-		LOG_ERR("Failed to set complexity: %d", ret);
-		return ret;
-	}
-
-	g_config.complexity = complexity;
-
-	LOG_INF("Complexity set to %u", complexity);
-	return 0;
-}
-
-uint8_t audio_get_complexity(void)
-{
-	return g_config.complexity;
-}
-
-int audio_set_noise_suppress(bool enable)
-{
-#ifdef CONFIG_SPEEXDSP
-	g_config.noise_suppress = enable ? 1 : 0;
-	/* Note: speex_enabled is set based on mode during recording start */
-	LOG_INF("Noise suppression config: %s", enable ? "enabled" : "disabled");
-	return 0;
-#else
-	return -ENOTSUP;
-#endif
-}
-
-bool audio_get_noise_suppress(void)
-{
-#ifdef CONFIG_SPEEXDSP
-	return speex_enabled;
-#else
-	return false;
-#endif
-}
-
-int audio_get_stats(struct audio_stats *stats_out)
-{
-	if (!stats_out) {
-		return -EINVAL;
-	}
-
-	/* Calculate average if recording stopped */
-	if (!recording_active && stats.frames_encoded > 0) {
-		stats.encode_time_avg_ms = encode_time_total / stats.frames_encoded;
-	}
-
-	memcpy(stats_out, &stats, sizeof(stats));
-	return 0;
-}
-
 /* Audio recording thread */
 void audio_recording_thread(void *p1, void *p2, void *p3)
 {
@@ -518,10 +560,37 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 	void *buffer = NULL;
 	uint32_t size;
 	uint8_t opus_packet[AUDIO_MAX_PACKET_SIZE];
+	enum audio_mode start_mode;
 
 	LOG_INF("Audio recording thread started");
 
 	while (true) {
+		/* Check for start/stop requests (under mutex for thread safety) */
+		k_mutex_lock(&audio_state_mutex, K_FOREVER);
+
+		if (start_requested && !recording_active) {
+			start_mode = pending_start_mode;
+			start_requested = false;
+			k_mutex_unlock(&audio_state_mutex);
+
+			/* Perform all initialization in audio thread context */
+			ret = audio_start_recording_internal(start_mode);
+			if (ret < 0) {
+				LOG_ERR("Failed to start recording: %d", ret);
+				continue;
+			}
+			/* Continue to recording loop */
+		} else if (stop_requested && recording_active) {
+			stop_requested = false;
+			k_mutex_unlock(&audio_state_mutex);
+
+			/* Perform cleanup in audio thread context */
+			audio_stop_recording_internal();
+			continue;
+		} else {
+			k_mutex_unlock(&audio_state_mutex);
+		}
+
 		/* Wait for recording to be active */
 		if (!recording_active) {
 			k_msleep(100);

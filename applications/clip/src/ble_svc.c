@@ -379,6 +379,7 @@ int ble_svc_init(void)
         LOG_ERR("Failed to create AT command thread");
         return -ENOMEM;
     }
+    k_thread_name_set(&at_thread_data, "at_cmd");
 
     LOG_INF("AT command thread started");
 

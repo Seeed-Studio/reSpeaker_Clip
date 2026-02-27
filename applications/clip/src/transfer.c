@@ -69,6 +69,7 @@ int transfer_init(void)
 		transfer_thread_running = false;
 		return -ENOMEM;
 	}
+	k_thread_name_set(&transfer_thread_data, "transfer");
 
 	return 0;
 }

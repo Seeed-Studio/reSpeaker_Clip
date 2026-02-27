@@ -291,6 +291,7 @@ int display_init(void)
 		LOG_WRN("Failed to create UI thread, running without UI");
 		/* Continue anyway, UI is optional */
 	} else {
+		k_thread_name_set(&ui_thread_data, "ui_thread");
 		LOG_INF("UI thread started");
 	}
 
