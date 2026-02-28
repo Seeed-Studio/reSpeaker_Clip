@@ -11,6 +11,7 @@ Usage:
 import asyncio
 import sys
 import signal
+import time
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -18,6 +19,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from clip import ClipDevice, ClipCommands, SessionSync
 from clip.utils import format_bytes, format_duration
+
+
+def format_speed(bytes_per_sec: float) -> str:
+    """Format transfer speed."""
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.1f} B/s"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    else:
+        return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
 
 
 async def record_and_sync(
@@ -35,62 +46,55 @@ async def record_and_sync(
         output_dir: Output directory for recordings
         device_address: Device MAC address
     """
-    # Create device and commands (debug=False to reduce log spam)
     device = ClipDevice(address=device_address, debug=False)
     commands = ClipCommands(device)
     sync = SessionSync(device)
 
-    # State tracking
     recording = False
     session_id = None
     sync_task = None
-    stats = {
-        'files_received': 0,
-        'total_bytes': 0,
-    }
+    stop_event = asyncio.Event()
+
+    sync_start_time = time.time()
+    sync_stats = {'file_count': 0, 'total_bytes': 0, 'last_filename': ''}
+
+    def progress_callback(filename: str, file_count: int, total_size: int):
+        sync_stats['last_filename'] = filename
+        sync_stats['file_count'] = file_count
+        sync_stats['total_bytes'] = total_size
 
     def signal_handler(sig, frame):
-        """Handle Ctrl+C gracefully"""
         print("\n\nStopping...")
+        stop_event.set()
 
     try:
         signal.signal(signal.SIGINT, signal_handler)
     except ValueError:
-        pass  # Windows may not support all signals
+        pass
 
     try:
         print("=" * 60)
         print("ReSpeaker Clip - Record & Sync")
         print("=" * 60)
 
-        # Connect
         print("\nConnecting to device...")
         await device.connect()
-
-        # Ensure idle state
         await commands.ensure_idle()
 
-        # Get current state info
         state = await commands.get_state()
         print(f"Battery: {state.battery}%")
-        # free_space is in MB from firmware
         print(f"Storage: {format_bytes(state.free_space * 1024 * 1024)} free")
 
-        # Start recording
         print(f"\nStarting recording in {mode} mode...")
         session_id = await commands.start_recording(mode)
         print(f"Session ID: {session_id}")
 
-        # Wait for recording to actually start
         await asyncio.sleep(0.5)
-
         recording = True
 
-        # Create output directory
         output_path = output_dir / session_id
         output_path.mkdir(parents=True, exist_ok=True)
 
-        # Start sync in background
         print(f"Starting real-time sync to: {output_path}")
         print(f"Recording... (Press Ctrl+C to stop)\n")
 
@@ -98,85 +102,95 @@ async def record_and_sync(
             sync.sync(
                 session_id,
                 output_path,
-                delete_after=False,  # Keep on device
-                continuous=True,     # Keep waiting for new files
+                delete_after=True,   # Delete from device after sync
+                continuous=True,
+                progress_callback=progress_callback,
             )
         )
 
         # Monitor progress
-        last_files = 0
         start_time = asyncio.get_event_loop().time()
 
         while recording:
-            await asyncio.sleep(1)
-
-            # Get current session info
             try:
-                sessions = await commands.list_sessions()
-                current_session = next((s for s in sessions if s.id == session_id), None)
-
-                if current_session:
-                    files_on_device = current_session.files
-
-                    # Calculate synced files (rough estimate)
-                    # We can track this by checking the output directory
-                    if output_path.exists():
-                        files_synced = len(list(output_path.glob("*.opus")))
-                    else:
-                        files_synced = 0
-
-                    elapsed = asyncio.get_event_loop().time() - start_time
-
-                    # Display progress
-                    status = f"\r[Recording] {format_duration(elapsed).ljust(10)} | "
-                    status += f"Device: {files_on_device} files | "
-                    status += f"Synced: {files_synced} files"
-                    print(status, end='', flush=True)
-
-                    last_files = files_on_device
-
-            except Exception as e:
-                print(f"\nMonitor error: {e}")
+                await asyncio.wait_for(stop_event.wait(), timeout=1.0)
                 break
+            except asyncio.TimeoutError:
+                pass
 
-            # Check if duration reached
+            elapsed = asyncio.get_event_loop().time() - start_time
             if duration and elapsed >= duration:
                 print(f"\nDuration ({duration}s) reached")
                 break
+
+            # Display progress
+            try:
+                current_speed = sync_stats['total_bytes'] / (time.time() - sync_start_time) if (time.time() - sync_start_time) > 0 else 0
+                status = f"\r[Recording] {format_duration(elapsed).ljust(10)} | "
+                status += f"Files: {sync_stats['file_count']} | "
+                status += f"Total: {format_bytes(sync_stats['total_bytes'])} | "
+                status += f"Speed: {format_speed(current_speed)}"
+                print(status, end='', flush=True)
+            except Exception:
+                pass
 
         # Stop recording
         print(f"\n\nStopping recording...")
         result = await commands.stop_recording()
 
-        # Wait a bit for final files to be received
-        await asyncio.sleep(2.0)
-
-        # Cancel the sync task
+        # Wait for sync to complete
+        print("Waiting for sync to complete...")
         if sync_task and not sync_task.done():
-            print("Stopping sync...")
-            await sync.cancel()
+            wait_start = time.time()
+            last_count = 0
 
-        # Get stats from device
-        try:
-            sessions = await commands.list_sessions()
-            current_session = next((s for s in sessions if s.id == session_id), None)
-            if current_session:
-                stats['files_received'] = current_session.files
-        except:
-            pass
+            while not sync_task.done():
+                await asyncio.sleep(0.3)
+                elapsed = time.time() - wait_start
+
+                if elapsed > 1.0:
+                    current_files = sync_stats['file_count']
+                    if current_files > last_count:
+                        print(f"  Progress: {sync_stats['last_filename']} ({current_files} files, {elapsed:.0f}s)", flush=True)
+                        last_count = current_files
+                    else:
+                        print(f"  Waiting... ({current_files} files, {elapsed:.0f}s)", flush=True)
+
+                if elapsed > 60.0:
+                    print("  Timeout, stopping sync...")
+                    await sync.cancel()
+                    break
+
+            try:
+                sync_result = await sync_task
+            except Exception:
+                sync_result = None
 
         # Show summary
-        duration = result.get('duration', 0)
-        files = result.get('file_count', 0)
+        duration_sec = result.get('duration', 0)
+        sync_elapsed = time.time() - sync_start_time
+        avg_speed = sync_stats['total_bytes'] / sync_elapsed if sync_elapsed > 0 else 0
+
+        # Check for merged file
+        merged_path = output_path / f"{session_id}.opus"
+        if merged_path.exists():
+            total_bytes = merged_path.stat().st_size
+            individual_count = len([f for f in output_path.glob("*.opus") if f.name != f"{session_id}.opus"])
+        else:
+            total_bytes = sync_stats['total_bytes']
+            individual_count = sync_stats['file_count']
 
         print("\n" + "=" * 60)
         print("Recording Summary")
         print("=" * 60)
         print(f"  Session: {session_id}")
-        print(f"  Duration: {format_duration(duration)}")
-        print(f"  Files on device: {files}")
-        print(f"  Files synced: {stats['files_received']}")
-        print(f"  Total synced: {format_bytes(stats['total_bytes'])}")
+        print(f"  Duration: {format_duration(duration_sec)}")
+        if merged_path.exists():
+            print(f"  Merged file: {merged_path.name} ({format_bytes(total_bytes)})")
+        else:
+            print(f"  Files synced: {individual_count}")
+        print(f"  Total synced: {format_bytes(total_bytes)}")
+        print(f"  Avg speed: {format_speed(avg_speed)}")
         print(f"  Location: {output_path}")
         print("=" * 60)
 
@@ -185,7 +199,6 @@ async def record_and_sync(
     except KeyboardInterrupt:
         print("\n\nInterrupted by user")
         if recording and session_id:
-            print("Stopping recording...")
             await commands.stop_recording()
         return 0
     except Exception as e:
@@ -194,7 +207,10 @@ async def record_and_sync(
         traceback.print_exc()
         return 1
     finally:
-        await device.disconnect()
+        try:
+            await device.disconnect()
+        except Exception:
+            pass
 
 
 async def main():

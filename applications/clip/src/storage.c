@@ -206,6 +206,15 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 	file->is_open = true;
 	total_files++;
 
+	/* Sync immediately to ensure directory entry is flushed to filesystem.
+	 * This allows the transfer thread to see the new file immediately.
+	 */
+	rc = fs_sync(current_file_ptr);
+	if (rc != 0) {
+		LOG_WRN("File sync failed after create: %d", rc);
+		/* Continue anyway - file is still valid */
+	}
+
 	/* Mark this file as being written */
 	storage_set_writing_file(session_id, file->filename);
 

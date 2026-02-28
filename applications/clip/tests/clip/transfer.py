@@ -36,7 +36,6 @@ class FileTransfer:
         """
         self.device = device
         self.commands = commands or ClipCommands(device)
-        self._transfer_complete = False
         self._canceled = False
 
     async def download_file(
@@ -168,7 +167,7 @@ class FileTransfer:
         # Clear state
         self.device._clear_file_state()
         self.device._downloading = True
-        self._transfer_complete = False
+        self.device._transfer_complete = False
         self._canceled = False
 
         # Get session info
@@ -223,7 +222,6 @@ class FileTransfer:
         start_time = time.time()
         last_file_time = time.time()
         no_file_timeout = 30.0 if continuous else 10.0
-        session_closed = False
 
         files_received = []
 
@@ -233,15 +231,6 @@ class FileTransfer:
             # Check for cancellation
             if self._canceled:
                 raise TransferError("Transfer canceled")
-
-            # Check if session is closed
-            if not session_closed:
-                try:
-                    state = await self.commands.get_state()
-                    if state.state == "IDLE":
-                        session_closed = True
-                except Exception:
-                    pass
 
             # Check for completed files
             for filename, data in list(self.device._session_files.items()):
@@ -260,17 +249,46 @@ class FileTransfer:
                         total_size = sum(f["size"] for f in files_received)
                         progress_callback(filename, len(files_received), total_size)
 
-            # Check if transfer is complete
-            if self._transfer_complete:
+            # Check if transfer is complete (check device flag, not FileTransfer flag)
+            if self.device._transfer_complete:
+                # Before breaking, check one more time for any pending files
+                for filename, data in list(self.device._session_files.items()):
+                    if filename not in [f["name"] for f in files_received]:
+                        # Save file
+                        file_path = output_dir / filename
+                        file_path.write_bytes(data)
+                        files_received.append({
+                            "name": filename,
+                            "path": str(file_path),
+                            "size": len(data),
+                        })
+                        last_file_time = time.time()
+
+                        if progress_callback:
+                            total_size = sum(f["size"] for f in files_received)
+                            progress_callback(filename, len(files_received), total_size)
                 break
 
             # Exit conditions
-            if session_closed:
+            if not continuous:
                 if time.time() - last_file_time > no_file_timeout:
                     break
-            elif not continuous:
+            else:
+                # Continuous mode: wait longer for new files
                 if time.time() - last_file_time > no_file_timeout:
                     break
+
+        # Final check for any remaining files before returning
+        for filename, data in list(self.device._session_files.items()):
+            if filename not in [f["name"] for f in files_received]:
+                # Save file
+                file_path = output_dir / filename
+                file_path.write_bytes(data)
+                files_received.append({
+                    "name": filename,
+                    "path": str(file_path),
+                    "size": len(data),
+                })
 
         return {
             "session_id": session_id,
@@ -330,6 +348,7 @@ class SessionSync(FileTransfer):
         output_dir: Path,
         delete_after: bool = True,
         continuous: bool = False,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> Dict[str, Any]:
         """
         Sync a session with resume support.
@@ -339,6 +358,7 @@ class SessionSync(FileTransfer):
             output_dir: Directory to save files
             delete_after: Delete session from device after successful sync
             continuous: Keep waiting for new files
+            progress_callback: Optional callback(filename, file_count, total_size)
 
         Returns:
             Dict with sync results
@@ -386,6 +406,7 @@ class SessionSync(FileTransfer):
         result = await self.download_session(
             session_id,
             output_dir,
+            progress_callback=progress_callback,
             continuous=continuous,
         )
 
