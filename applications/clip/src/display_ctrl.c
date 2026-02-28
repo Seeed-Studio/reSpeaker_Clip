@@ -98,13 +98,20 @@ void ui_set_state(enum ui_state new_state)
 
 static void ui_show_recording_info(void)
 {
+	static bool logged_once = false;
+
 	if (!recording_active) {
+		logged_once = false;
 		return;
 	}
-	LOG_INF("[UI] REC wave");
+
+	if (!logged_once) {
+		LOG_INF("[UI] REC wave");
+		logged_once = true;
+	}
+
 	bool enhanced_mode = (g_config.mode == MODE_ENHANCED);
 	display_show_recording(enhanced_mode);
-
 }
 
 /* Mark animation configuration */
