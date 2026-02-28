@@ -48,3 +48,4 @@ Thumbs.db
 # Clip tools (under testing, not ready to commit)
 applications/clip/tools/clip-cli.py
 applications/clip/tests/tests/test_edge_cases.py
+bootloader/
