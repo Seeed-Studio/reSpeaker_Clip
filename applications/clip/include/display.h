@@ -57,4 +57,18 @@ void display_show_info(uint8_t battery_percent, bool charging, bool ble_connecte
  */
 void display_show_mark_cross_frame(int frame);
 
+/**
+ * @brief Show a single frame of the mark animation
+ * @param frame Animation frame number (0 to total_frames-1)
+ * @param fast_mode true for fast mode (30 frames), false for normal mode (60 frames)
+ *
+ * Renders the mark animation with:
+ * - White circle: stable -> max -> stable
+ * - Black circle: 0 -> max -> stable (inside white circle)
+ * - Vertical lines: stable -> max -> stable (top and bottom)
+ *
+ * Call repeatedly with incrementing frame numbers for smooth animation.
+ */
+void display_show_mark_animation_frame(int frame, bool fast_mode);
+
 #endif /* DISPLAY_H */

@@ -29,6 +29,48 @@ LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 #define UI_MIRROR_X 1
 #define UI_MIRROR_Y 0
 
+/* ========================================
+ * Recording Dot Circle Animation Configuration
+ * ======================================== */
+
+#define DOT_CIRCLE_STABLE_RADIUS    4    /* Stable circle radius (pixels) */
+#define DOT_CIRCLE_MAX_RADIUS       8   /* Maximum circle radius (pixels) */
+#define DOT_CIRCLE_ANIM_FRAMES      8    /* Total animation frames */
+
+/* ========================================
+ * Mark Animation Configuration (for MARK display)
+ * ======================================== */
+
+/* Mark animation frame counts */
+#define MARK_ANIM_FRAMES_FAST        15    /* Total frames for fast mode */
+#define MARK_ANIM_FRAMES_NORMAL      30    /* Total frames for normal mode (reserved) */
+
+/* White circle parameters */
+#define MARK_WHITE_CIRCLE_MAX_RADIUS     6   /* Maximum radius of white circle */
+#define MARK_WHITE_CIRCLE_STABLE_RADIUS  4   /* Stable radius of white circle */
+
+/* Black circle parameters */
+#define MARK_BLACK_CIRCLE_MAX_RADIUS     4   /* Maximum radius of black circle */
+#define MARK_BLACK_CIRCLE_STABLE_RADIUS  2   /* Stable radius of black circle */
+
+/* Vertical line parameters */
+#define MARK_LINE_THICKNESS             2    /* Line thickness in pixels */
+#define MARK_LINE_STABLE_LENGTH         12    /* Stable length of each line segment */
+#define MARK_LINE_MAX_LENGTH            14   /* Maximum length of each line segment */
+#define MARK_LINE_OFFSET_FROM_WHITE     2    /* Pixels offset from white circle stable radius */
+
+/* Animation timing */
+#define MARK_EXPAND_PHASE_RATIO         0.5f /* Ratio of frames for expansion phase (0.0-1.0) */
+
+/* ========================================
+ * Info Page Display Layout Constants
+ * ======================================== */
+
+#define BATTERY_TO_DIGITS_OFFSET 2    /* Pixels between battery icon and first digit */
+#define PERCENT_OFFSET_FROM_DIGITS 1  /* Pixels between last digit and % sign */
+#define DIGIT_WIDTH 6                 /* Width of each digit in pixels */
+#define DIGIT_GAP 1                   /* Gap between digits in pixels */
+
 /* Frame buffer */
 static uint8_t display_buffer[OLED_BUF_SIZE];
 
@@ -428,12 +470,6 @@ void display_fill(void)
  * Info Page Display - Battery & Status
  * ======================================== */
 
-/* Display layout constants */
-#define BATTERY_TO_DIGITS_OFFSET 2    /* Pixels between battery icon and first digit */
-#define PERCENT_OFFSET_FROM_DIGITS 1  /* Pixels between last digit and % sign */
-#define DIGIT_WIDTH 6                 /* Width of each digit in pixels */
-#define DIGIT_GAP 1                   /* Gap between digits in pixels */
-
 /**
  * @brief 6x12 Digits in Row-Major Format (for icon_draw_bitmap)
  * Converted from Spleen 6x12 BDF
@@ -680,17 +716,19 @@ static void render_mark_page(uint8_t *buf, int frame)
 	clear_screen(buf);
 
 	/* Animation parameters */
-	const int circle_radius = 16;   /* Circle radius */
-	const int total_frames = 8;     /* Total frames in animation */
+	const int total_frames = DOT_CIRCLE_ANIM_FRAMES;
 
-	/* Calculate scale based on frame (expand from 0.5 to 1.0, then back to 0.5) */
-	/* Using sine wave for smooth animation - same as recording animation */
+	/* Calculate current radius: stable → max → stable */
+	/* Using sine wave for smooth animation (0 → 1 → 0) */
 	float phase = (float)frame / (float)total_frames;  /* 0.0 to 1.0 */
 	float sine_val = (1.0f - (float)cosf(phase * 6.28318f)) / 2.0f;  /* 0 to 1 to 0 */
-	float scale = 0.5f + (sine_val * 0.5f);  /* 0.5 to 1.0 to 0.5 */
 
-	/* Draw the animated circle */
-	draw_circle_mark(buf, circle_radius, scale);
+	/* Map sine value to radius range */
+	int current_radius = DOT_CIRCLE_STABLE_RADIUS +
+		(int)((DOT_CIRCLE_MAX_RADIUS - DOT_CIRCLE_STABLE_RADIUS) * sine_val);
+
+	/* Draw the animated circle with current radius (no scale) */
+	draw_circle_mark(buf, current_radius, 1.0f);
 }
 
 /**
@@ -705,3 +743,159 @@ void display_show_mark_cross_frame(int frame)
 	render_mark_page(display_buffer, frame);
 	flush_display();
 }
+
+/* ========================================
+ * Mark Animation Implementation
+ * (Macro definitions at top of file)
+ * ======================================== */
+
+/**
+ * @brief Draw a black circle (clears pixels) at the center
+ * @param buf Frame buffer
+ * @param radius Circle radius
+ * @param scale Current scale factor for animation (0.0 to 1.0)
+ */
+static void draw_black_circle(uint8_t *buf, int radius, float scale)
+{
+	const int x_mid = OLED_WIDTH / 2;
+	const int y_mid = OLED_HEIGHT / 2;
+
+	/* Calculate scaled radius */
+	int scaled_radius = (int)(radius * scale);
+	if (scaled_radius < 0) scaled_radius = 0;
+
+	/* Clear pixels for filled circle using distance check */
+	for (int dy = -scaled_radius; dy <= scaled_radius; dy++) {
+		for (int dx = -scaled_radius; dx <= scaled_radius; dx++) {
+			int x = x_mid + dx;
+			int y = y_mid + dy;
+
+			/* Check bounds */
+			if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) {
+				continue;
+			}
+
+			/* Check if point is inside circle */
+			int dist_sq = dx * dx + dy * dy;
+			int radius_sq = scaled_radius * scaled_radius;
+
+			if (dist_sq <= radius_sq) {
+				clear_pixel_direct(buf, x, y);
+			}
+		}
+	}
+}
+
+/**
+ * @brief Draw vertical lines (top and bottom) on the center axis
+ * @param buf Frame buffer
+ * @param white_circle_radius Current white circle radius
+ * @param line_length Length of each line segment
+ * @param thickness Line thickness
+ * @param offset_pixels Offset from white circle stable radius
+ */
+static void draw_vertical_lines(uint8_t *buf, int white_circle_radius, int line_length,
+				 int thickness, int offset_pixels)
+{
+	const int x_mid = OLED_WIDTH / 2;
+	const int y_mid = OLED_HEIGHT / 2;
+
+	/* Calculate starting positions */
+	/* Top line: starts at (white_radius + offset) above center */
+	int top_start_y = y_mid - white_circle_radius - offset_pixels;
+	/* Bottom line: starts at (white_radius + offset) below center */
+	int bottom_start_y = y_mid + white_circle_radius + offset_pixels;
+
+	/* Draw top line (going up) */
+	for (int i = 0; i < line_length; i++) {
+		for (int t = 0; t < thickness; t++) {
+			int x = x_mid - (thickness / 2) + t;
+			int y = top_start_y - i;
+			if (x >= 0 && x < OLED_WIDTH && y >= 0 && y < OLED_HEIGHT) {
+				set_pixel_direct(buf, x, y);
+			}
+		}
+	}
+
+	/* Draw bottom line (going down) */
+	for (int i = 0; i < line_length; i++) {
+		for (int t = 0; t < thickness; t++) {
+			int x = x_mid - (thickness / 2) + t;
+			int y = bottom_start_y + i;
+			if (x >= 0 && x < OLED_WIDTH && y >= 0 && y < OLED_HEIGHT) {
+				set_pixel_direct(buf, x, y);
+			}
+		}
+	}
+}
+
+/**
+ * @brief Calculate animation progress (0.0 to 1.0 and back to 0.0) using sine wave
+ * @param frame Current frame number
+ * @param total_frames Total frames in animation
+ * @return Synchronized value (0.0 = start/end, 1.0 = peak at middle)
+ */
+static float get_animation_progress(int frame, int total_frames)
+{
+	/* Use sine wave for smooth 0 → 1 → 0 transition */
+	float phase = (float)frame / (float)total_frames;  /* 0.0 to 1.0 */
+	float sine_val = (1.0f - (float)cosf(phase * 6.28318f)) / 2.0f;  /* 0 to 1 to 0 */
+	return sine_val;
+}
+
+/**
+ * @brief Render mark animation frame
+ * @param buf Frame buffer
+ * @param frame Animation frame number
+ * @param total_frames Total frames in animation
+ */
+static void render_mark_animation_frame(uint8_t *buf, int frame, int total_frames)
+{
+	clear_screen(buf);
+
+	/* Get synchronized animation value (0.0 → 1.0 → 0.0) */
+	float anim_value = get_animation_progress(frame, total_frames);
+
+	/* 1. Draw white circle first (base layer) */
+	/* White circle: stable → max → stable */
+	int white_radius = MARK_WHITE_CIRCLE_STABLE_RADIUS +
+		(int)((MARK_WHITE_CIRCLE_MAX_RADIUS - MARK_WHITE_CIRCLE_STABLE_RADIUS) * anim_value);
+	draw_circle_mark(buf, white_radius, 1.0f);
+
+	/* 2. Draw black circle on top */
+	/* Black circle: 0 → max → stable (smaller than white stable) */
+	int black_radius;
+	if (anim_value <= 0.5f) {
+		/* First half: 0 → max (scale 0→1, anim_value is 0→0.5, so multiply by 2) */
+		black_radius = (int)(MARK_BLACK_CIRCLE_MAX_RADIUS * (anim_value * 2.0f));
+	} else {
+		/* Second half: max → stable (anim_value is 0.5→1, map to 1→0) */
+		float contract = 1.0f - ((anim_value - 0.5f) * 2.0f);  /* 1.0 → 0.0 */
+		black_radius = MARK_BLACK_CIRCLE_STABLE_RADIUS +
+			(int)((MARK_BLACK_CIRCLE_MAX_RADIUS - MARK_BLACK_CIRCLE_STABLE_RADIUS) * contract);
+	}
+	draw_black_circle(buf, black_radius, 1.0f);
+
+	/* 3. Draw vertical lines */
+	/* Lines: stable → max → stable */
+	int line_length = MARK_LINE_STABLE_LENGTH +
+		(int)((MARK_LINE_MAX_LENGTH - MARK_LINE_STABLE_LENGTH) * anim_value);
+	draw_vertical_lines(buf, white_radius, line_length, MARK_LINE_THICKNESS,
+			    MARK_LINE_OFFSET_FROM_WHITE);
+}
+
+/**
+ * @brief Show a single frame of the mark animation
+ * @param frame Animation frame number
+ * @param fast_mode true for fast mode (30 frames), false for normal mode (60 frames)
+ *
+ * Renders the mark animation with white circle, black circle, and vertical lines.
+ * Call repeatedly with incrementing frame numbers for smooth animation.
+ */
+void display_show_mark_animation_frame(int frame, bool fast_mode)
+{
+	int total_frames = fast_mode ? MARK_ANIM_FRAMES_FAST : MARK_ANIM_FRAMES_NORMAL;
+	render_mark_animation_frame(display_buffer, frame, total_frames);
+	flush_display();
+}
+

@@ -107,14 +107,23 @@ static void ui_show_recording_info(void)
 
 }
 
-static void ui_show_mark_cross(void)
+/* Mark animation configuration */
+#define MARK_ANIM_FRAMES        15    /* Number of frames to play (matches MARK_ANIM_FRAMES_FAST) */
+#define MARK_ANIM_FRAME_MS      10    /* Duration per frame (ms) */
+#define MARK_ANIM_USE_FAST_MODE true  /* Use fast mode */
+
+static void ui_show_mark(void)
 {
-	/* Reset waveform index for next recording start */
-	waveform_frame_index = 0;
-	LOG_INF("[UI] REC mark");
+	LOG_INF("[UI] MARK animation");
+
+	/* Play the mark animation */
+	for (int frame = 0; frame < MARK_ANIM_FRAMES; frame++) {
+		display_show_mark_animation_frame(frame, MARK_ANIM_USE_FAST_MODE);
+		k_sleep(K_MSEC(MARK_ANIM_FRAME_MS));
+	}
 }
 
-/* Mark circle animation configuration */
+/* Dot circle animation configuration */
 #define MARK_CIRCLE_FRAMES      8    /* Number of animation frames */
 #define MARK_CIRCLE_FRAME_MS    60   /* Duration per frame (ms) */
 #define MARK_STABLE_FRAME       7    /* Stable frame to hold (0.5x scale) */
@@ -245,8 +254,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 			break;
 
 		case UI_STATE_MARKING:
-			 ui_show_mark_cross();
-			k_sleep(K_MSEC(UI_MARKING_DURATION_MS));
+			ui_show_mark();
 			/* Return to dot after mark display */
 			ui_set_state(UI_STATE_RECORDING_DOT);
 			break;
