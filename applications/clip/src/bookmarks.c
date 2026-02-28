@@ -260,8 +260,26 @@ int bookmarks_load(const char *session_id)
 	fs_file_t_init(&file);
 	ret = fs_open(&file, filepath, FS_O_READ);
 	if (ret != 0) {
-		/* File doesn't exist yet, not an error */
-		LOG_DBG("No bookmark file for session: %s", session_id);
+		/* File doesn't exist yet - create empty file */
+		fs_file_t_init(&file);
+		ret = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
+		if (ret != 0) {
+			/* Still can't create, log but don't fail */
+			LOG_DBG("Could not create bookmark file: %d", ret);
+			return 0;
+		}
+
+		/* Write empty header */
+		char header[6] = BOOKMARK_MAGIC;
+		memset(&header[4], 0, 2);  /* count = 0 */
+		ssize_t written = fs_write(&file, header, 6);
+		fs_close(&file);
+
+		if (written < 6) {
+			LOG_WRN("Failed to write empty bookmark header");
+		}
+
+		LOG_DBG("Created empty bookmark file for session: %s", session_id);
 		return 0;
 	}
 
