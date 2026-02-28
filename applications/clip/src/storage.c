@@ -1041,10 +1041,17 @@ int storage_set_synced_files(const char *session_id, uint32_t count)
 		return -EINVAL;
 	}
 
-	/* Read existing session.json */
+	/* Check if session.json exists before trying to open it */
 	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	struct fs_dirent entry;
+	bool file_exists = (fs_stat(filepath, &entry) == 0);
+
+	/* Read existing session.json if it exists */
 	fs_file_t_init(&file);
-	rc = fs_open(&file, filepath, FS_O_READ);
+	rc = -ENOENT;  /* Default to file not existing */
+	if (file_exists) {
+		rc = fs_open(&file, filepath, FS_O_READ);
+	}
 	if (rc != 0) {
 		return -ENOENT;
 	}
