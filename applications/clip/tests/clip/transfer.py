@@ -237,6 +237,24 @@ class FileTransfer:
                 if filename not in [f["name"] for f in files_received]:
                     # Save file
                     file_path = output_dir / filename
+
+                    # Skip if already exists with same size
+                    if file_path.exists():
+                        existing_size = file_path.stat().st_size
+                        if existing_size == len(data):
+                            files_received.append({
+                                "name": filename,
+                                "path": str(file_path),
+                                "size": len(data),
+                            })
+                            last_file_time = time.time()
+
+                            if progress_callback:
+                                total_size = sum(f["size"] for f in files_received)
+                                progress_callback(filename, len(files_received), total_size)
+                            continue
+
+                    # File doesn't exist or size differs, write it
                     file_path.write_bytes(data)
                     files_received.append({
                         "name": filename,
@@ -256,6 +274,24 @@ class FileTransfer:
                     if filename not in [f["name"] for f in files_received]:
                         # Save file
                         file_path = output_dir / filename
+
+                        # Skip if already exists with same size
+                        if file_path.exists():
+                            existing_size = file_path.stat().st_size
+                            if existing_size == len(data):
+                                files_received.append({
+                                    "name": filename,
+                                    "path": str(file_path),
+                                    "size": len(data),
+                                })
+                                last_file_time = time.time()
+
+                                if progress_callback:
+                                    total_size = sum(f["size"] for f in files_received)
+                                    progress_callback(filename, len(files_received), total_size)
+                                continue
+
+                        # File doesn't exist or size differs, write it
                         file_path.write_bytes(data)
                         files_received.append({
                             "name": filename,
@@ -283,6 +319,19 @@ class FileTransfer:
             if filename not in [f["name"] for f in files_received]:
                 # Save file
                 file_path = output_dir / filename
+
+                # Skip if already exists with same size
+                if file_path.exists():
+                    existing_size = file_path.stat().st_size
+                    if existing_size == len(data):
+                        files_received.append({
+                            "name": filename,
+                            "path": str(file_path),
+                            "size": len(data),
+                        })
+                        continue
+
+                # File doesn't exist or size differs, write it
                 file_path.write_bytes(data)
                 files_received.append({
                     "name": filename,
@@ -382,9 +431,11 @@ class SessionSync(FileTransfer):
         else:
             total_files = 0
 
-        # Check if already synced
-        if total_files > 0 and len(existing_files) >= total_files:
-            return {
+        # Check if already synced (all files exist locally)
+        # Skip this check in continuous mode - always check for new files
+        if not continuous and total_files > 0 and len(existing_files) >= total_files:
+            merged_path = output_dir / f"{session_id}.opus"
+            result = {
                 "session_id": session_id,
                 "files": [{"name": f.name, "path": str(f), "size": f.stat().st_size}
                          for f in existing_files],
@@ -392,6 +443,9 @@ class SessionSync(FileTransfer):
                 "total_size": sum(f.stat().st_size for f in existing_files),
                 "status": "already_synced",
             }
+            if merged_path.exists():
+                result["merged_file"] = str(merged_path)
+            return result
 
         # Start download (resume from last file if any)
         start_file = None
