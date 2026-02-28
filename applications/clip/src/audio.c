@@ -748,9 +748,21 @@ create_new_segment:
 				recording_frame_count, current_file_index + 1, segment_duration_sec, is_transferring);
 
 			if (current_storage_file.is_open) {
-				LOG_INF("Closing current segment: %s (%u bytes)",
+				/* Calculate segment statistics */
+				uint32_t segment_frames = recording_frame_count - file_start_frame_count;
+				uint32_t bitrate_kbps = (current_storage_file.bytes_written * 8) / (segment_frames * AUDIO_FRAME_MS);
+
+				/* Calculate encode time average */
+				uint64_t encode_avg = stats.frames_encoded > 0 ?
+					encode_time_total / stats.frames_encoded : 0;
+
+				LOG_INF("Closing current segment: %s (%u bytes, %u frames, %u kbps, encode: avg %lld ms, max %lld ms)",
 					current_storage_file.filename,
-					current_storage_file.bytes_written);
+					current_storage_file.bytes_written,
+					segment_frames,
+					bitrate_kbps,
+					encode_avg,
+					stats.encode_time_max_ms);
 
 				/* Save filename and size before closing */
 				char completed_filename[64];
