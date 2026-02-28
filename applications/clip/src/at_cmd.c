@@ -1269,17 +1269,21 @@ static int cmd_resume(const struct at_command *cmd, char **response)
 
 static int cmd_cancel(const struct at_command *cmd, char **response)
 {
-    int err;
+     int err;
 
-    err = transfer_cancel();
-    if (err != 0) {
-        return json_create_error("No transfer to cancel", response);
-    }
+     err = transfer_cancel();
+     if (err != 0) {
+         return json_create_error("No transfer to cancel", response);
+     }
 
-    /* Transition to idle state */
-    state_transition(CLIP_STATE_IDLE);
+     /* Only transition to idle if we were in TRANSMITTING state
+      * If recording is in progress, don't change the state */
+     enum clip_state current_state = state_get_current();
+     if (current_state == CLIP_STATE_TRANSMITTING) {
+         state_transition(CLIP_STATE_IDLE);
+     }
 
-    return json_create_success(NULL, response);
+     return json_create_success(NULL, response);
 }
 
 static int cmd_reboot(const struct at_command *cmd, char **response)
