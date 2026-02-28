@@ -148,15 +148,22 @@ async def record_and_sync(
         print(f"\n\nStopping recording...")
         result = await commands.stop_recording()
 
-        # Wait for sync to finish
-        print("Waiting for sync to complete...")
-        if sync_task:
-            try:
-                sync_result = await asyncio.wait_for(sync_task, timeout=10.0)
-                stats['files_received'] = sync_result.get('file_count', 0)
-                stats['total_bytes'] = sync_result.get('total_size', 0)
-            except asyncio.TimeoutError:
-                print("Sync timeout (some files may not be synced)")
+        # Wait a bit for final files to be received
+        await asyncio.sleep(2.0)
+
+        # Cancel the sync task
+        if sync_task and not sync_task.done():
+            print("Stopping sync...")
+            await sync.cancel()
+
+        # Get stats from device
+        try:
+            sessions = await commands.list_sessions()
+            current_session = next((s for s in sessions if s.id == session_id), None)
+            if current_session:
+                stats['files_received'] = current_session.files
+        except:
+            pass
 
         # Show summary
         duration = result.get('duration', 0)
