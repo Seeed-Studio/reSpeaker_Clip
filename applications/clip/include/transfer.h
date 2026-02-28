@@ -38,6 +38,7 @@ struct transfer_info {
 	char current_file[64];    /* Current file being transferred */
 	uint32_t file_index;      /* Current file index in session */
 	uint32_t total_files;     /* Total files to transfer */
+	uint32_t synced_files;    /* Number of files successfully synced */
 	uint64_t bytes_transferred;  /* Bytes transferred so far */
 	uint64_t total_bytes;     /* Total bytes to transfer */
 	uint8_t progress_percent; /* 0-100 */

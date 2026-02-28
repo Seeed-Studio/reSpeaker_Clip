@@ -142,6 +142,15 @@ int transfer_start(const char *session_id, const char *filename)
 
 	strncpy(current_transfer.session_id, session_id, sizeof(current_transfer.session_id) - 1);
 
+	/* Read synced files count from session.json for cleanup tracking */
+	current_transfer.synced_files = storage_get_synced_files(session_id);
+	if (current_transfer.synced_files < 0) {
+		/* session.json doesn't exist, create it with synced=0 */
+		storage_set_synced_files(session_id, 0);
+		current_transfer.synced_files = 0;
+		LOG_DBG("Created session.json with synced=0");
+	}
+
 	if (filename) {
 		/* Transfer single file - check if file exists */
 		char filepath[128];
@@ -684,8 +693,9 @@ process_next_file:
 					/* Notify client that file transfer is complete */
 					ble_svc_send_file_complete(current_transfer.current_file);
 
-					/* Update synced files counter */
-					storage_increment_synced(current_transfer.session_id);
+					/* Update synced files counter in memory only */
+					/* Will be saved to session.json in transfer_cleanup() */
+					current_transfer.synced_files++;
 
 					/* Close file */
 					fs_close(&transfer_file);
@@ -883,11 +893,19 @@ static void transfer_cleanup(void)
 		transfer_file_open = false;
 	}
 
+	/* Save synced count to session.json if any files were transferred */
+	if (current_transfer.synced_files > 0 && current_transfer.session_id[0] != '\0') {
+		storage_set_synced_files(current_transfer.session_id, current_transfer.synced_files);
+		LOG_DBG("Saved synced count: %u for session %s",
+		        current_transfer.synced_files, current_transfer.session_id);
+	}
+
 	/* Always reset state to IDLE after cleanup */
 	current_transfer.state = TRANSFER_STATE_IDLE;
 	memset(&current_transfer.current_file, 0, sizeof(current_transfer.current_file));
 	current_transfer.file_index = 0;
 	current_transfer.total_files = 0;
+	current_transfer.synced_files = 0;
 	current_transfer.bytes_transferred = 0;
 	current_transfer.total_bytes = 0;
 	current_transfer.progress_percent = 0;
