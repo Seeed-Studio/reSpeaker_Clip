@@ -79,6 +79,12 @@ async def record_and_sync(
 
         print("\nConnecting to device...")
         await device.connect()
+
+        # Print device name
+        if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
+            device_name = device._client._ble_device.name
+            print(f"Device: {device_name}")
+
         await commands.ensure_idle()
 
         state = await commands.get_state()
