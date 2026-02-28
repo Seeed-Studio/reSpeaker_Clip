@@ -341,6 +341,9 @@ static int ch1115_init(const struct device *dev)
         return -ENOMEM;
     }
 
+    /* Clear the display to prevent showing random RAM content on startup */
+    ch1115_clear(dev);
+
     return 0;
 }
 
