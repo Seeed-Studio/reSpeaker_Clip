@@ -121,13 +121,15 @@ class ClipCommands:
         ...     print(version.firmware)
     """
 
-    # Valid audio modes
+    # Valid audio modes for AT+MODE (only these are accepted by AT+MODE)
     MODE_NORMAL = "normal"
     MODE_ENHANCED = "enhanced"
-    MODE_STEREO = "stereo"
-    MODE_MERGE = "merge"
 
-    # Valid modes for recording start
+    # Additional mode aliases for AT+START (map to above)
+    MODE_STEREO = "stereo"  # Alias for normal
+    MODE_MERGE = "merge"    # Alias for enhanced
+
+    # Valid modes for AT+START command
     RECORDING_MODES = [MODE_NORMAL, MODE_ENHANCED, MODE_STEREO, MODE_MERGE]
 
     def __init__(self, device: ClipDevice):
@@ -253,16 +255,19 @@ class ClipCommands:
 
     async def set_mode(self, mode: str) -> bool:
         """
-        Set audio mode.
+        Set audio mode (AT+MODE).
+
+        Note: AT+MODE only accepts "normal" and "enhanced".
+              For AT+START, you can also use "stereo" and "merge" as aliases.
 
         Args:
-            mode: Mode (normal, enhanced, stereo, merge)
+            mode: Mode (normal or enhanced)
 
         Returns:
             True if successful
         """
-        if mode not in self.RECORDING_MODES:
-            raise ValueError(f"Invalid mode: {mode}. Must be one of {self.RECORDING_MODES}")
+        if mode not in [self.MODE_NORMAL, self.MODE_ENHANCED]:
+            raise ValueError(f"Invalid mode: {mode}. AT+MODE only accepts 'normal' or 'enhanced'")
         await self._send_and_check(f"AT+MODE={mode}")
         return True
 
@@ -316,48 +321,124 @@ class ClipCommands:
 
     # Noise suppression (if supported)
     async def get_noise_suppression(self) -> int:
-        """Get noise suppression level."""
+        """
+        Get noise suppression level.
+
+        Returns:
+            Noise suppression level in dB (0-60)
+        """
         response = await self._send_and_check("AT+NOISE?")
-        return response.get('value', 0)
+        # Firmware returns {"ok":true,"data":{"value":N}}
+        data = response.get('data', {})
+        return data.get('value', response.get('value', 0))
 
     async def set_noise_suppression(self, level: int) -> bool:
-        """Set noise suppression level (0-3)."""
+        """
+        Set noise suppression level.
+
+        Args:
+            level: Noise suppression level in dB (0-60)
+
+        Returns:
+            True if successful
+        """
         await self._send_and_check(f"AT+NOISE={level}")
         return True
 
     # AGC (if supported)
-    async def get_agc(self) -> int:
-        """Get AGC level."""
-        response = await self._send_and_check("AT+AGC?")
-        return response.get('value', 0)
+    async def get_agc(self) -> bool:
+        """
+        Get AGC enabled state.
 
-    async def set_agc(self, level: int) -> bool:
-        """Set AGC level (0-3)."""
-        await self._send_and_check(f"AT+AGC={level}")
+        Returns:
+            True if AGC is enabled
+        """
+        response = await self._send_and_check("AT+AGC?")
+        # Firmware returns {"ok":true,"data":{"enabled":true/false,"target":N}}
+        data = response.get('data', {})
+        enabled = data.get('enabled', response.get('value', False))
+        # Handle string boolean from JSON
+        if isinstance(enabled, str):
+            return enabled.lower() == 'true'
+        return bool(enabled)
+
+    async def set_agc(self, enabled: bool, target: int = 0) -> bool:
+        """
+        Enable/disable AGC.
+
+        Args:
+            enabled: True to enable AGC
+            target: Target level in dB (0-30, default 0)
+
+        Returns:
+            True if successful
+        """
+        value = "on" if enabled else "off"
+        await self._send_and_check(f"AT+AGC={value},{target}")
         return True
 
     # Dereverb (if supported)
     async def get_dereverb(self) -> bool:
-        """Get dereverb state."""
-        response = await self._send_and_check("AT+DEREVERB?")
-        return response.get('value', False)
+        """
+        Get dereverb enabled state.
 
-    async def set_dereverb(self, enabled: bool) -> bool:
-        """Enable/disable dereverb."""
-        value = 1 if enabled else 0
-        await self._send_and_check(f"AT+DEREVERB={value}")
+        Returns:
+            True if dereverb is enabled
+        """
+        response = await self._send_and_check("AT+DEREVERB?")
+        # Firmware returns {"ok":true,"data":{"enabled":true/false,"level":N,"decay":M}}
+        data = response.get('data', {})
+        enabled = data.get('enabled', response.get('value', False))
+        # Handle string boolean from JSON
+        if isinstance(enabled, str):
+            return enabled.lower() == 'true'
+        return bool(enabled)
+
+    async def set_dereverb(self, enabled: bool, level: int = 5, decay: int = 0) -> bool:
+        """
+        Enable/disable dereverb.
+
+        Args:
+            enabled: True to enable dereverb
+            level: Dereverb level (0-10, default 5)
+            decay: Decay value (0-5, default 0)
+
+        Returns:
+            True if successful
+        """
+        value = "on" if enabled else "off"
+        await self._send_and_check(f"AT+DEREVERB={value},{level},{decay}")
         return True
 
     # Auto-delete (if supported)
     async def get_auto_delete(self) -> bool:
-        """Get auto-delete state."""
-        response = await self._send_and_check("AT+AUTODEL?")
-        return response.get('value', False)
+        """
+        Get auto-delete enabled state.
 
-    async def set_auto_delete(self, enabled: bool) -> bool:
-        """Enable/disable auto-delete after sync."""
-        value = 1 if enabled else 0
-        await self._send_and_check(f"AT+AUTODEL={value}")
+        Returns:
+            True if auto-delete is enabled (non-negative days)
+        """
+        response = await self._send_and_check("AT+AUTODEL?")
+        # Firmware returns {"ok":true,"data":{"value":"off"} or {"value":N}}
+        data = response.get('data', {})
+        value = data.get('value', response.get('value', "off"))
+        # "off" means disabled, any number means enabled
+        return value != "off" and int(value) >= 0
+
+    async def set_auto_delete(self, days: int) -> bool:
+        """
+        Set auto-delete policy.
+
+        Args:
+            days: Number of days (0-30), or -1 to disable
+
+        Returns:
+            True if successful
+        """
+        if days < 0:
+            await self._send_and_check("AT+AUTODEL=off")
+        else:
+            await self._send_and_check(f"AT+AUTODEL={days}")
         return True
 
     # ==================== Recording Commands ====================
@@ -368,6 +449,7 @@ class ClipCommands:
 
         Args:
             mode: Recording mode (normal, enhanced, stereo, merge)
+                   Note: "stereo" is alias for "normal", "merge" is alias for "enhanced"
 
         Returns:
             Session ID of the new recording
@@ -379,9 +461,18 @@ class ClipCommands:
         if state.state == "RECORDING":
             raise StateError("Already recording")
 
-        response = await self._send_and_check(f"AT+START={mode}")
-        data = response.get('data', {})
-        return data.get('session', '')
+        # Map mode aliases to what firmware expects for AT+START
+        # Firmware accepts: normal/stereo (stereo) or enhanced/mono (mono+DSP)
+        mode_mapping = {
+            self.MODE_STEREO: self.MODE_NORMAL,    # stereo -> normal
+            self.MODE_MERGE: self.MODE_ENHANCED,   # merge -> enhanced
+        }
+        firmware_mode = mode_mapping.get(mode, mode)
+
+        response = await self._send_and_check(f"AT+START={firmware_mode}")
+        # Session ID might be at top level or under 'data'
+        session_id = response.get('session', response.get('data', {}).get('session', ''))
+        return session_id
 
     async def stop_recording(self) -> Dict[str, Any]:
         """
@@ -553,27 +644,70 @@ class ClipCommands:
         """
         Ensure device is in IDLE state.
 
+        Will attempt to stop recording if in RECORDING state.
+        Handles error states by waiting and retrying.
+
+        Note: After stopping recording, waits for audio thread to finish
+        stopping before returning. This is important because the audio
+        thread processes asynchronously from the main thread.
+
         Raises:
-            StateError: If device cannot be made idle
+            StateError: If device cannot be made idle after retries
         """
-        state = await self.get_state()
+        max_retries = 5
+        retry_count = 0
+        check_interval = 0.3  # Check every 300ms
 
-        if state.state == "IDLE":
-            return
+        while retry_count < max_retries:
+            try:
+                state = await self.get_state()
 
-        if state.state == "RECORDING":
-            await self.stop_recording()
-            await asyncio.sleep(0.5)
+                if state.state == "IDLE":
+                    return
 
-        # Check again
-        state = await self.get_state()
-        if state.state != "IDLE":
-            raise StateError(f"Device is in {state.state} state, expected IDLE")
+                if state.state == "RECORDING":
+                    # Try to stop recording
+                    try:
+                        await self.stop_recording()
+                    except CommandError:
+                        # May already be stopping or in error state, continue
+                        pass
+
+                    # After stop, wait for audio thread to finish (can take 1-2 seconds)
+                    await asyncio.sleep(1.0)
+                    # Then poll for IDLE state
+                    for _ in range(10):  # Wait up to 3 more seconds
+                        await asyncio.sleep(check_interval)
+                        state = await self.get_state()
+                        if state.state == "IDLE":
+                            return
+
+                elif state.state == "UNKNOWN" or state.state not in ["IDLE", "RECORDING", "TRANSMITTING", "PAUSED"]:
+                    # Device in unusual state, wait and retry
+                    await asyncio.sleep(1.0)
+
+                retry_count += 1
+
+            except CommandError as e:
+                # Device may be in error state, wait and retry
+                retry_count += 1
+                if retry_count >= max_retries:
+                    raise StateError(f"Device error: {e}")
+                await asyncio.sleep(1.0)
+
+        # Final check
+        try:
+            state = await self.get_state()
+            if state.state != "IDLE":
+                raise StateError(f"Device is in {state.state} state, expected IDLE")
+        except CommandError as e:
+            raise StateError(f"Failed to get state: {e}")
 
     async def wait_for_state(
         self,
         target_state: str,
         timeout: float = 10.0,
+        check_interval: float = 0.2,
     ) -> bool:
         """
         Wait for device to enter a specific state.
@@ -581,17 +715,52 @@ class ClipCommands:
         Args:
             target_state: State to wait for (e.g., "IDLE", "RECORDING")
             timeout: Maximum wait time in seconds
+            check_interval: How often to check state (default 0.2s)
 
         Returns:
             True if target state reached, False if timeout
         """
         start = time.time()
         while time.time() - start < timeout:
-            state = await self.get_state()
-            if state.state == target_state:
-                return True
-            await asyncio.sleep(0.2)
+            try:
+                state = await self.get_state()
+                if state.state == target_state:
+                    return True
+            except CommandError:
+                # Ignore errors during polling, just retry
+                pass
+            await asyncio.sleep(check_interval)
         return False
+
+    async def wait_for_recording_to_start(self, timeout: float = 5.0) -> bool:
+        """
+        Wait for recording to actually start.
+
+        After sending AT+START, the audio thread takes time to initialize.
+        This method waits until the device reports RECORDING state.
+
+        Args:
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            True if recording started, False if timeout
+        """
+        return await self.wait_for_state("RECORDING", timeout=timeout)
+
+    async def wait_for_recording_to_stop(self, timeout: float = 5.0) -> bool:
+        """
+        Wait for recording to actually stop.
+
+        After sending AT+STOP, the audio thread takes time to cleanup.
+        This method waits until the device reports IDLE state.
+
+        Args:
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            True if recording stopped, False if timeout
+        """
+        return await self.wait_for_state("IDLE", timeout=timeout)
 
     async def get_config_dict(self) -> Dict[str, Any]:
         """
@@ -611,23 +780,61 @@ class ClipCommands:
             'auto_delete': await self.get_auto_delete(),
         }
 
-    async def set_config_dict(self, config: Dict[str, Any]) -> None:
+    async def set_config_dict(self, config: Dict[str, Any], ignore_errors: bool = True) -> None:
         """
         Set multiple configuration values.
 
         Args:
             config: Dict with configuration keys and values
+            ignore_errors: If True, continue on individual errors (useful for restore)
+
+        Note:
+            - agc: Use boolean (True/False) to enable/disable
+            - dereverb: Use boolean (True/False) to enable/disable
+            - auto_delete: Use boolean (True/False) to enable/disable, or integer for days
+            - Mode is set FIRST before bitrate (bitrate range depends on mode)
         """
-        for key, value in config.items():
-            setter_map = {
-                'bitrate': self.set_bitrate,
-                'mode': self.set_mode,
-                'complexity': self.set_complexity,
-                'chunk_size': self.set_chunk_size,
-                'noise_suppression': self.set_noise_suppression,
-                'agc': self.set_agc,
-                'dereverb': lambda v: self.set_dereverb(bool(v)),
-                'auto_delete': lambda v: self.set_auto_delete(bool(v)),
-            }
-            if key in setter_map:
-                await setter_map[key](value)
+        # Order matters: set mode before bitrate (bitrate range depends on mode)
+        order = ['mode', 'bitrate', 'complexity', 'chunk_size',
+                 'noise_suppression', 'agc', 'dereverb', 'auto_delete']
+
+        for key in order:
+            if key not in config:
+                continue
+
+            value = config[key]
+            try:
+                if key == 'mode':
+                    await self.set_mode(value)
+                elif key == 'bitrate':
+                    await self.set_bitrate(value)
+                elif key == 'complexity':
+                    await self.set_complexity(value)
+                elif key == 'chunk_size':
+                    await self.set_chunk_size(value)
+                elif key == 'noise_suppression':
+                    await self.set_noise_suppression(value)
+                elif key == 'agc':
+                    # value can be boolean or integer (for target level)
+                    if isinstance(value, bool):
+                        await self.set_agc(value)
+                    elif isinstance(value, int):
+                        await self.set_agc(True, target=value)
+                    else:
+                        await self.set_agc(value[0], target=value[1])
+                elif key == 'dereverb':
+                    # value is boolean to enable/disable
+                    await self.set_dereverb(bool(value))
+                elif key == 'auto_delete':
+                    # value can be boolean (True=7 days, False=off) or integer (days)
+                    if isinstance(value, bool):
+                        days = 7 if value else -1
+                        await self.set_auto_delete(days)
+                    else:
+                        await self.set_auto_delete(int(value))
+            except (CommandError, ValueError) as e:
+                if not ignore_errors:
+                    raise
+                # Silently skip invalid values during restore
+                # (e.g., bitrate out of range for current mode)
+                pass

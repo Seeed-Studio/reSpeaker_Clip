@@ -107,7 +107,11 @@ def mock_commands(mock_device):
     mock.get_chunk_size = AsyncMock(return_value=500)
     mock.set_chunk_size = AsyncMock(return_value=True)
     mock.ensure_idle = AsyncMock()
-    mock.start_recording = AsyncMock(return_value="20240101_120000")
+    mock.wait_for_recording_to_start = AsyncMock(return_value=True)
+    mock.wait_for_recording_to_stop = AsyncMock(return_value=True)
+    mock.wait_for_state = AsyncMock(return_value=True)
+    # Session ID format: YYYYMMDDHHMMSS (14 digits, no underscore)
+    mock.start_recording = AsyncMock(return_value="20240101120000")
     mock.stop_recording = AsyncMock(return_value={"duration": 5.0})
     mock.add_bookmark = AsyncMock()
     return mock
@@ -115,8 +119,20 @@ def mock_commands(mock_device):
 
 @pytest.fixture
 async def commands(device: ClipDevice) -> ClipCommands:
-    """Provide a ClipCommands instance for tests."""
-    return ClipCommands(device)
+    """
+    Provide a ClipCommands instance for tests.
+
+    Automatically ensures device is in IDLE state after each test.
+    """
+    cmds = ClipCommands(device)
+    yield cmds
+
+    # Cleanup: ensure device is back to IDLE state
+    try:
+        await cmds.ensure_idle()
+    except Exception:
+        # Ignore cleanup errors, device may already be disconnected
+        pass
 
 
 @pytest.fixture

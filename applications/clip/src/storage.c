@@ -136,6 +136,9 @@ int storage_create_session(const char *session_id)
 			LOG_ERR("Failed to create session directory: %d", rc);
 			return rc;
 		}
+
+		/* Small delay to ensure filesystem metadata is written to SD card */
+		k_msleep(50);
 	}
 
 	/* Store current session directory */
@@ -177,11 +180,25 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 	buffer_pos = 0;
 	current_file_ptr = &file->_internal_file;
 
+	/* Try to open file with retry for filesystem timing */
 	fs_file_t_init(current_file_ptr);
-	rc = fs_open(current_file_ptr, filepath, FS_O_CREATE | FS_O_WRITE);
+	for (int retry = 0; retry < 3; retry++) {
+		rc = fs_open(current_file_ptr, filepath, FS_O_CREATE | FS_O_WRITE);
+
+		if (rc == 0) {
+			break;  /* Success */
+		}
+
+		if (retry < 2) {
+			/* Wait a bit before retry */
+			k_msleep(50);
+			/* Re-initialize file handle before retry */
+			fs_file_t_init(current_file_ptr);
+		}
+	}
 
 	if (rc != 0) {
-		LOG_ERR("File create failed: %s", file->filename);
+		LOG_ERR("File create failed after retries: %s (rc=%d)", file->filename, rc);
 		current_file_ptr = NULL;
 		return rc;
 	}

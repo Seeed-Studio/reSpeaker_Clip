@@ -31,7 +31,8 @@
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
-/* Memory slab for DMIC buffers (increased for double-buffering) */
+/* Memory slab for DMIC buffers (increased for stereo mode) */
+/* Stereo mode requires more buffers due to higher data rate */
 K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 32, 4);
 
 /* DMIC device */
@@ -68,7 +69,6 @@ static int16_t processed_buffer[AUDIO_OPUS_FRAME_SIZE];
 static bool recording_active = false;
 static enum audio_mode current_mode = AUDIO_MODE_MERGE; /* Default to merge (mono) */
 static int opus_channels = 1;
-static uint32_t current_bitrate = 24000;
 
 /* Thread-safe start/stop requests */
 static K_MUTEX_DEFINE(audio_state_mutex);
@@ -132,13 +132,11 @@ int audio_init(void)
 	/* MODE_NORMAL = stereo, MODE_ENHANCED = mono with DSP */
 	current_mode = (g_config.mode == MODE_NORMAL) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
 
-	/* Calculate actual bitrate: mono = configured, stereo = configured * 2 */
+	/* Set channels (bitrate calculated in init_opus_encoder) */
 	if (current_mode == AUDIO_MODE_STEREO) {
 		opus_channels = 2;
-		current_bitrate = g_config.bitrate * 2;
 	} else {
 		opus_channels = 1;
-		current_bitrate = g_config.bitrate;
 	}
 
 	/* Initialize Opus encoder */
@@ -185,7 +183,12 @@ int audio_init(void)
 	nrf_pdm_gain_set(NRF_PDM0_NS, 0x3C, 0x3C);
 #endif
 
-	LOG_INF("audio: %dch %ukbps", opus_channels, current_bitrate/1000);
+	{
+		/* Calculate actual bitrate for logging */
+		uint32_t actual_bitrate = (current_mode == AUDIO_MODE_STEREO) ?
+			g_config.bitrate * 2 : g_config.bitrate;
+		LOG_INF("audio: %dch %ukbps", opus_channels, actual_bitrate/1000);
+	}
 
 	/* Start audio recording thread */
 	audio_thread_id = k_thread_create(&audio_thread_data,
@@ -224,7 +227,11 @@ static int audio_stop_recording_internal(void);
 
 int audio_start_recording(enum audio_mode mode)
 {
-	/* Just set the start request flag - audio thread will handle initialization */
+	/* Generate session ID early so it's available for AT command response */
+	uint16_t year;
+	uint8_t month, day, hour, min, sec;
+
+	/* Lock to protect session_id and state variables */
 	k_mutex_lock(&audio_state_mutex, K_FOREVER);
 
 	if (recording_active) {
@@ -233,11 +240,32 @@ int audio_start_recording(enum audio_mode mode)
 		return -EBUSY;
 	}
 
+	/* Generate session ID: always 14 digits */
+	if (clip_get_current_time(&year, &month, &day, &hour, &min, &sec)) {
+		/* Time synchronized: YYYYMMDDHHMMSS (14 digits) */
+		snprintf(current_session_id, sizeof(current_session_id),
+			"%04d%02d%02d%02d%02d%02d",
+			year, month, day, hour, min, sec);
+	} else {
+		/* Time not set: use 0 + uptime (14 digits total) */
+		uint32_t uptime_sec = (uint32_t)(k_uptime_get() / 1000);
+		snprintf(current_session_id, sizeof(current_session_id),
+			"0%013u", uptime_sec);  /* 0 + 13-digit uptime = 14 digits */
+		LOG_WRN("Time not synchronized, using uptime-based session ID");
+	}
+
+	/* Initialize session-dependent variables */
+	current_file_index = 1;
+	file_start_frame_count = 0;
+	was_transferring = false;
+	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
+
+	/* Set start request flag with mode */
 	start_requested = true;
 	pending_start_mode = mode;
 	k_mutex_unlock(&audio_state_mutex);
 
-	LOG_INF("Recording start requested (mode=%d)", mode);
+	LOG_INF("Recording start requested (mode=%d, session=%s)", mode, current_session_id);
 	return 0;
 }
 
@@ -258,15 +286,8 @@ int audio_stop_recording(void)
 	return 0;
 }
 
-bool audio_is_recording(void)
-{
-	return recording_active;
-}
-
 int audio_set_bitrate(uint32_t bitrate)
 {
-	int ret;
-
 	/* Validate bitrate (this is the mono bitrate) */
 	if (bitrate < 16000 || bitrate > 32000) {
 		return -EINVAL;
@@ -275,27 +296,28 @@ int audio_set_bitrate(uint32_t bitrate)
 	/* Store as mono bitrate in config */
 	g_config.bitrate = bitrate;
 
-	/* Calculate actual bitrate based on current mode */
-	if (current_mode == AUDIO_MODE_STEREO) {
-		current_bitrate = bitrate * 2;
-	} else {
-		current_bitrate = bitrate;
+#ifdef CONFIG_SETTINGS
+	save_setting_now("config/bitrate", &bitrate, sizeof(bitrate));
+#endif
+
+	/* Reinitialize encoder with new bitrate if recording */
+	if (recording_active) {
+		int ret = init_opus_encoder();
+		if (ret < 0) {
+			LOG_ERR("Failed to set bitrate: %d", ret);
+			return ret;
+		}
 	}
 
-	/* Reinitialize encoder with new bitrate */
-	ret = init_opus_encoder();
-	if (ret < 0) {
-		LOG_ERR("Failed to set bitrate: %d", ret);
-		return ret;
-	}
-
-	LOG_INF("Bitrate: mono=%u bps, actual=%u bps", bitrate, current_bitrate);
+	LOG_INF("Bitrate set: mono=%u bps", bitrate);
 	return 0;
 }
 
 uint32_t audio_get_bitrate(void)
 {
-	return current_bitrate;
+	/* Return stored mono bitrate (not the actual encoded bitrate) */
+	/* The actual encoded bitrate depends on mode: stereo = mono * 2 */
+	return g_config.bitrate;
 }
 
 int audio_set_complexity(uint8_t complexity)
@@ -374,16 +396,14 @@ static int audio_start_recording_internal(enum audio_mode mode)
 	if (mode != current_mode) {
 		current_mode = mode;
 
-		/* Update Opus channels and bitrate based on mode */
+		/* Update Opus channels based on mode */
 		if (mode == AUDIO_MODE_STEREO) {
 			opus_channels = 2;
-			current_bitrate = g_config.bitrate * 2;  /* Stereo = mono * 2 */
 		} else {
 			opus_channels = 1;
-			current_bitrate = g_config.bitrate;  /* Mono = configured */
 		}
 
-		/* Reinitialize encoder */
+		/* Reinitialize encoder (calculates actual bitrate based on mode) */
 		ret = init_opus_encoder();
 		if (ret < 0) {
 			LOG_ERR("Failed to reinitialize Opus encoder: %d", ret);
@@ -419,28 +439,13 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
 	/* Reset recording counters */
 	recording_frame_count = 0;
-	current_file_index = 1;
-	file_start_frame_count = 0;
-	was_transferring = false;
-	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
+	/* Note: current_file_index, file_start_frame_count, was_transferring, and
+	 * recording_start_time are already initialized in audio_start_recording() */
 
-	/* Generate session ID: always 14 digits */
-	uint16_t year;
-	uint8_t month, day, hour, min, sec;
-	if (clip_get_current_time(&year, &month, &day, &hour, &min, &sec)) {
-		/* Time synchronized: YYYYMMDDHHMMSS (14 digits) */
-		snprintf(current_session_id, sizeof(current_session_id),
-			"%04d%02d%02d%02d%02d%02d",
-			year, month, day, hour, min, sec);
-	} else {
-		/* Time not set: use 0 + uptime (14 digits total) */
-		uint32_t uptime_sec = (uint32_t)(k_uptime_get() / 1000);
-		snprintf(current_session_id, sizeof(current_session_id),
-			"0%013u", uptime_sec);  /* 0 + 13-digit uptime = 14 digits */
-		LOG_WRN("Time not synchronized, using uptime-based session ID");
-	}
-
-	LOG_INF("Session ID: %s", current_session_id);
+	/* Session ID was already generated in audio_start_recording() */
+	LOG_INF("Starting recording with session: %s", current_session_id);
+	LOG_INF("Audio config: %d Hz, %d ch, frame=%u samples, %u ms, block=%u bytes",
+		AUDIO_SAMPLE_RATE, opus_channels, AUDIO_OPUS_FRAME_SIZE, AUDIO_FRAME_MS, AUDIO_BLOCK_SIZE);
 
 	/* Create session directory and first file */
 	if (storage_enabled && storage_is_mounted()) {
@@ -483,9 +488,12 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
 	recording_active = true;
 
-	LOG_INF("Recording started: %s mode, %u kbps",
+	/* Calculate actual bitrate for logging */
+	uint32_t actual_bitrate = (current_mode == AUDIO_MODE_STEREO) ?
+		g_config.bitrate * 2 : g_config.bitrate;
+	LOG_INF("Recording started: %s mode, %u kbps (mono=%u)",
 		(current_mode == AUDIO_MODE_STEREO) ? "stereo" : "mono",
-		current_bitrate/1000);
+		actual_bitrate/1000, g_config.bitrate/1000);
 	return 0;
 }
 
@@ -549,6 +557,9 @@ static int audio_stop_recording_internal(void)
 	}
 
 	LOG_INF("Recording stopped: %u sec, %u KB", duration_sec, stats.total_bytes/1024);
+
+	/* Transition to IDLE state now that recording has actually stopped */
+	state_transition(CLIP_STATE_IDLE);
 
 	return 0;
 }
@@ -684,10 +695,23 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 			stats.encode_time_max_ms = encode_time;
 		}
 
+		/* Warn if encoding takes too long (should be < 15ms for 20ms frame) */
+		if (encode_time > 15) {
+			LOG_WRN("Encode time too high: %lld ms (frame %u)", encode_time, recording_frame_count);
+		}
+
 		/* Update statistics */
 		stats.frames_encoded++;
 		stats.total_bytes += encoded_bytes;
 		recording_frame_count++;
+
+		/* Print encode time stats every second (50 frames) */
+		if (recording_frame_count % 50 == 0) {
+			int64_t avg_time = encode_time_total / stats.frames_encoded;
+			LOG_INF("Encode: avg=%lld ms, min=%lld ms, max=%lld ms, pkt=%u bytes (frame %u)",
+				avg_time, stats.encode_time_min_ms, stats.encode_time_max_ms,
+				encoded_bytes, recording_frame_count);
+		}
 
 		/* Check if we need to create a new file (segmentation)
 		 * Use different segment durations based on transfer state:
@@ -798,12 +822,32 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	/* Set bitrate */
-	err = opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(current_bitrate));
+	LOG_INF("Opus encoder created: %d Hz, %d ch, application=VOIP",
+		AUDIO_SAMPLE_RATE, opus_channels);
+
+	/* Query and print default encoder parameters before configuration */
+	opus_int32 lookhead;
+	err = opus_encoder_ctl(opus_encoder, OPUS_GET_LOOKAHEAD(&lookhead));
+	if (err == OPUS_OK) {
+		LOG_INF("Opus lookahead: %d samples", lookhead);
+	}
+
+	/* Set bitrate (stereo = mono * 2) */
+	uint32_t actual_bitrate;
+	if (current_mode == AUDIO_MODE_STEREO) {
+		actual_bitrate = g_config.bitrate * 2;
+	} else {
+		actual_bitrate = g_config.bitrate;
+	}
+	err = opus_encoder_ctl(opus_encoder, OPUS_SET_BITRATE(actual_bitrate));
 	if (err != OPUS_OK) {
 		LOG_ERR("Failed to set bitrate: %d", err);
 		return err;
 	}
+
+	/* Verify bitrate was set correctly */
+	opus_int32 configured_bitrate;
+	opus_encoder_ctl(opus_encoder, OPUS_GET_BITRATE(&configured_bitrate));
 
 	/* Set complexity */
 	err = opus_encoder_ctl(opus_encoder, OPUS_SET_COMPLEXITY(g_config.complexity));
@@ -812,6 +856,14 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
+	/* Verify complexity */
+	opus_int32 configured_complexity;
+	opus_encoder_ctl(opus_encoder, OPUS_GET_COMPLEXITY(&configured_complexity));
+
+	/* Get max payload size */
+	opus_int32 max_payload;
+	opus_encoder_ctl(opus_encoder, OPUS_GET_MAX_PACKET_SIZE(&max_payload));
+
 	/* Disable FEC */
 	err = opus_encoder_ctl(opus_encoder, OPUS_SET_INBAND_FEC(0));
 	if (err != OPUS_OK) {
@@ -819,8 +871,8 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	LOG_INF("Opus: %d ch, %u bps, complexity=%u",
-		opus_channels, current_bitrate, g_config.complexity);
+	LOG_INF("Opus config: %d ch, bitrate=%u bps (requested=%u), complexity=%u, max_payload=%u",
+		opus_channels, configured_bitrate, actual_bitrate, configured_complexity, max_payload);
 
 	return 0;
 }
@@ -962,9 +1014,31 @@ int audio_add_bookmark(const char *note)
 
 const char *audio_get_session_id(void)
 {
-	if (!recording_active) {
+	/* Return session ID if recording is active or if start was requested
+	 * (session ID is generated early in audio_start_recording) */
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+	bool has_session = (recording_active || start_requested);
+	k_mutex_unlock(&audio_state_mutex);
+
+	if (!has_session) {
+		return NULL;
+	}
+
+	/* Check if session_id is not empty */
+	if (current_session_id[0] == '\0') {
 		return NULL;
 	}
 
 	return current_session_id;
+}
+
+bool audio_is_recording(void)
+{
+	/* Check if audio is actively recording (or starting/stopping)
+	 * This is more accurate than the state machine for button handling */
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+	bool is_active = recording_active || start_requested;
+	k_mutex_unlock(&audio_state_mutex);
+
+	return is_active;
 }

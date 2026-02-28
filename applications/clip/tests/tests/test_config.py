@@ -7,7 +7,7 @@ Tests configuration commands: BITRATE, MODE, COMPLEXITY, CHUNKSIZE, etc.
 import pytest
 
 from clip import ClipCommands
-from clip.exceptions import CommandError, ValueError
+from clip.exceptions import CommandError
 
 
 @pytest.mark.asyncio
@@ -33,7 +33,9 @@ class TestBitrate:
     async def test_set_multiple_bitrates(self, commands: ClipCommands, saved_state):
         """Should set multiple different bitrates."""
         async with saved_state:
-            bitrates = [16000, 24000, 32000, 48000, 64000]
+            # For mono mode, valid range is 16000-32000
+            # For stereo mode, valid range is 32000-64000 (mono * 2)
+            bitrates = [16000, 24000, 32000]
 
             for br in bitrates:
                 await commands.set_bitrate(br)
@@ -57,7 +59,8 @@ class TestMode:
     async def test_get_mode(self, commands: ClipCommands):
         """Should get current mode."""
         mode = await commands.get_mode()
-        assert mode in ["normal", "enhanced", "stereo", "merge"]
+        # AT+MODE only returns "normal" or "enhanced"
+        assert mode in ["normal", "enhanced"]
 
     async def test_set_mode_normal(self, commands: ClipCommands, saved_state):
         """Should set normal mode."""
@@ -73,24 +76,20 @@ class TestMode:
             assert result is True
             assert await commands.get_mode() == "enhanced"
 
-    async def test_set_mode_stereo(self, commands: ClipCommands, saved_state):
-        """Should set stereo mode."""
-        async with saved_state:
-            result = await commands.set_mode("stereo")
-            assert result is True
-            assert await commands.get_mode() == "stereo"
-
-    async def test_set_mode_merge(self, commands: ClipCommands, saved_state):
-        """Should set merge mode."""
-        async with saved_state:
-            result = await commands.set_mode("merge")
-            assert result is True
-            assert await commands.get_mode() == "merge"
-
     async def test_invalid_mode(self, commands: ClipCommands):
         """Should reject invalid mode."""
         with pytest.raises(ValueError):
             await commands.set_mode("invalid_mode")
+
+    async def test_mode_stereo_alias_rejected(self, commands: ClipCommands):
+        """Should reject 'stereo' for AT+MODE (only valid for AT+START)."""
+        with pytest.raises(ValueError):
+            await commands.set_mode("stereo")
+
+    async def test_mode_merge_alias_rejected(self, commands: ClipCommands):
+        """Should reject 'merge' for AT+MODE (only valid for AT+START)."""
+        with pytest.raises(ValueError):
+            await commands.set_mode("merge")
 
 
 @pytest.mark.asyncio
@@ -164,24 +163,27 @@ class TestAudioProcessing:
     async def test_get_noise_suppression(self, commands: ClipCommands):
         """Should get noise suppression level."""
         level = await commands.get_noise_suppression()
-        assert 0 <= level <= 3
+        assert 0 <= level <= 60  # Firmware returns 0-60 dB
 
     async def test_set_noise_suppression(self, commands: ClipCommands, saved_state):
         """Should set noise suppression."""
         async with saved_state:
-            await commands.set_noise_suppression(2)
-            assert await commands.get_noise_suppression() == 2
+            await commands.set_noise_suppression(30)
+            assert await commands.get_noise_suppression() == 30
 
     async def test_get_agc(self, commands: ClipCommands):
-        """Should get AGC level."""
-        level = await commands.get_agc()
-        assert 0 <= level <= 3
+        """Should get AGC enabled state."""
+        enabled = await commands.get_agc()
+        assert isinstance(enabled, bool)
 
     async def test_set_agc(self, commands: ClipCommands, saved_state):
-        """Should set AGC level."""
+        """Should set AGC enabled state."""
         async with saved_state:
-            await commands.set_agc(1)
-            assert await commands.get_agc() == 1
+            await commands.set_agc(True, target=10)
+            assert await commands.get_agc() is True
+
+            await commands.set_agc(False)
+            assert await commands.get_agc() is False
 
     async def test_get_dereverb(self, commands: ClipCommands):
         """Should get dereverb state."""
@@ -208,12 +210,12 @@ class TestAutoDelete:
         assert isinstance(state, bool)
 
     async def test_set_auto_delete(self, commands: ClipCommands, saved_state):
-        """Should set auto-delete state."""
+        """Should set auto-delete days."""
         async with saved_state:
-            await commands.set_auto_delete(True)
+            await commands.set_auto_delete(7)  # 7 days
             assert await commands.get_auto_delete() is True
 
-            await commands.set_auto_delete(False)
+            await commands.set_auto_delete(-1)  # Disable
             assert await commands.get_auto_delete() is False
 
 
@@ -238,7 +240,7 @@ class TestConfigBulk:
         """Should set multiple config values."""
         async with saved_state:
             new_config = {
-                'bitrate': 48000,
+                'bitrate': 24000,  # Valid for mono mode (16000-32000)
                 'mode': 'enhanced',
                 'complexity': 8,
             }
@@ -246,7 +248,7 @@ class TestConfigBulk:
             await commands.set_config_dict(new_config)
 
             # Verify
-            assert await commands.get_bitrate() == 48000
+            assert await commands.get_bitrate() == 24000
             assert await commands.get_mode() == 'enhanced'
             assert await commands.get_complexity() == 8
 

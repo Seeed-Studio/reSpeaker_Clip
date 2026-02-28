@@ -82,12 +82,20 @@ static void button_start_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	/* Check if audio is actually recording (more accurate than state machine) */
+	if (audio_is_recording()) {
+		LOG_WRN("Button: Start work but audio is recording, ignoring");
+		return;
+	}
+
 	/* Mode mapping: NORMAL=stereo, ENHANCED=mono+DSP */
 	mode = (g_config.mode == MODE_NORMAL) ? AUDIO_MODE_STEREO : AUDIO_MODE_MERGE;
 	err = audio_start_recording(mode);
 	if (err == 0) {
 		state_transition(CLIP_STATE_RECORDING);
 		LOG_INF("Button: Started recording");
+	} else if (err == -EBUSY) {
+		LOG_WRN("Button: Audio module busy (stopping previous recording), ignoring");
 	} else {
 		LOG_ERR("Button: Failed to start recording: %d", err);
 	}
@@ -99,10 +107,18 @@ static void button_stop_work_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
+	/* Check if audio is actually recording (more accurate than state machine) */
+	if (!audio_is_recording()) {
+		LOG_WRN("Button: Stop work but audio is not recording, ignoring");
+		return;
+	}
+
+	/* Stop recording - state transition will be handled by audio thread */
 	err = audio_stop_recording();
 	if (err == 0) {
-		state_transition(CLIP_STATE_IDLE);
-		LOG_INF("Button: Stopped recording");
+		LOG_INF("Button: Stop requested, audio thread will transition to IDLE");
+	} else if (err == -EBUSY) {
+		LOG_WRN("Button: Audio module busy (stopping previous recording)");
 	} else {
 		LOG_ERR("Button: Failed to stop recording: %d", err);
 	}
@@ -152,13 +168,20 @@ static void button_event_callback(const struct device *dev,
 		break;
 
 	case BUTTON_LONG_PRESS:
-		/* Long press: Toggle recording */
+	case BUTTON_LONG_PRESS_LEVEL_1:
+	case BUTTON_LONG_PRESS_LEVEL_2:
+	case BUTTON_LONG_PRESS_LEVEL_3:
+		/* Long press: Toggle recording based on current state */
 		if (current_state == CLIP_STATE_IDLE || current_state == CLIP_STATE_PAUSED) {
 			/* Start recording - defer to work queue */
+			LOG_INF("Button: Long press - submitting start work");
 			k_work_submit_to_queue(&button_work_q, &button_start_work);
 		} else if (current_state == CLIP_STATE_RECORDING) {
 			/* Stop recording - defer to work queue */
+			LOG_INF("Button: Long press - submitting stop work");
 			k_work_submit_to_queue(&button_work_q, &button_stop_work);
+		} else {
+			LOG_INF("Button: Long press ignored (state=%d)", current_state);
 		}
 		break;
 

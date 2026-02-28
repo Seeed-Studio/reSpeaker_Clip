@@ -842,17 +842,15 @@ static int cmd_stop(const struct at_command *cmd, char **response)
         return json_create_error("Not recording", response);
     }
 
-    /* Stop audio recording */
+    /* Stop audio recording - state transition will be handled by audio thread */
     err = audio_stop_recording();
     if (err) {
         LOG_WRN("Failed to stop audio: %d", err);
+        return json_create_error("Failed to stop recording", response);
     }
 
-    /* Transition to idle state */
-    err = state_transition(CLIP_STATE_IDLE);
-    if (err) {
-        return json_create_error("Cannot stop recording", response);
-    }
+    /* Note: State transition to IDLE is handled by audio thread after
+     * it has actually stopped recording. This prevents race condition. */
 
     /* Get audio statistics */
     audio_get_stats(&audio_stats);
