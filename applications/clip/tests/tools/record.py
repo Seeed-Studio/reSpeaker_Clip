@@ -180,6 +180,9 @@ async def record_and_sync(
             total_bytes = sync_stats['total_bytes']
             individual_count = sync_stats['file_count']
 
+        # Get bookmarks from sync result
+        bookmarks = sync_result.get('bookmarks', []) if sync_result else []
+
         print("\n" + "=" * 60)
         print("Recording Summary")
         print("=" * 60)
@@ -191,6 +194,16 @@ async def record_and_sync(
             print(f"  Files synced: {individual_count}")
         print(f"  Total synced: {format_bytes(total_bytes)}")
         print(f"  Avg speed: {format_speed(avg_speed)}")
+
+        # Show bookmarks
+        if bookmarks:
+            print(f"  Bookmarks: {len(bookmarks)}")
+            for bm in bookmarks[:3]:
+                note = f" - {bm.note}" if bm.note else ""
+                print(f"    {bm.offset}s{note}")
+            if len(bookmarks) > 3:
+                print(f"    ... and {len(bookmarks) - 3} more")
+
         print(f"  Location: {output_path}")
         print("=" * 60)
 

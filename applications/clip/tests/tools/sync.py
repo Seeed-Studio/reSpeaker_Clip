@@ -46,8 +46,8 @@ Examples:
     parser.add_argument("--all-sessions", "-a", action="store_true",
                        help="Sync all sessions from device")
     parser.add_argument("--status", action="store_true", help="Show status and exit")
-    parser.add_argument("--output", "-o", type=Path, default=Path("downloads"),
-                       help="Output directory (default: downloads/)")
+    parser.add_argument("--output", "-o", type=Path, default=Path("recordings"),
+                       help="Output directory (default: recordings/)")
     parser.add_argument("--keep", "-k", action="store_true",
                        help="Keep sessions on device after sync")
     parser.add_argument("--oneshot", action="store_true",
@@ -259,6 +259,18 @@ Examples:
         print(f"  Files: {result.get('file_count', 0)}")
         print(f"  Total: {format_bytes(result.get('total_size', 0))}")
         print(f"  Avg speed: {format_speed(avg_speed)}")
+
+        # Show bookmarks
+        bookmarks = result.get('bookmarks', [])
+        if bookmarks:
+            print(f"  Bookmarks: {len(bookmarks)}")
+            for bm in bookmarks[:3]:  # Show first 3
+                note = f" - {bm.note}" if bm.note else ""
+                print(f"    {bm.offset}s{note}")
+            if len(bookmarks) > 3:
+                print(f"    ... and {len(bookmarks) - 3} more")
+            print(f"  Saved: {result.get('bookmarks_path', 'bookmarks.json')}")
+
         if result.get('merged_file'):
             print(f"  Merged: {result['merged_file']}")
         print(f"  Location: {args.output / session_id}")

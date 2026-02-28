@@ -5,6 +5,7 @@ Provides high-level file download and session sync functionality.
 """
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Optional, Callable, Dict, List, Any
@@ -344,11 +345,30 @@ class FileTransfer:
                     "size": len(data),
                 })
 
+        # Fetch bookmarks after all files are downloaded and save as JSON
+        bookmarks = []
+        bookmarks_path = output_dir / "bookmarks.json"
+        try:
+            bookmarks = await self.commands.get_bookmarks(session_id)
+        except Exception as e:
+            # Don't fail sync if bookmarks fetch fails
+            pass
+
+        # Always create bookmarks.json (empty if no bookmarks)
+        # Simplified format: only offset and note
+        bookmarks_data = [
+            {"offset": b.offset, "note": b.note}
+            for b in bookmarks
+        ]
+        bookmarks_path.write_text(json.dumps(bookmarks_data, indent=2))
+
         return {
             "session_id": session_id,
             "files": files_received,
             "total_size": sum(f["size"] for f in files_received),
             "file_count": len(files_received),
+            "bookmarks": bookmarks,
+            "bookmarks_path": str(bookmarks_path),
         }
 
     async def _merge_opus_files(self, files: List[Dict], output_path: Path) -> None:

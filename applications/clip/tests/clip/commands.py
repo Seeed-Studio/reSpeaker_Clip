@@ -79,17 +79,22 @@ class SessionInfo:
 
 @dataclass
 class BookmarkInfo:
-    """Bookmark information."""
-    offset: float
-    file: str
-    note: str
+    """Bookmark information - simplified."""
+    offset: int         # Seconds from session start
+    note: str           # Optional note
 
     @classmethod
     def from_response(cls, response: dict) -> 'BookmarkInfo':
         data = response.get('data', {})
         return cls(
-            offset=data.get('offset', 0.0),
-            file=data.get('file', ''),
+            offset=data.get('offset', 0),
+            note=data.get('note', ''),
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'BookmarkInfo':
+        return cls(
+            offset=data.get('offset', 0),
             note=data.get('note', ''),
         )
 
@@ -508,6 +513,97 @@ class ClipCommands:
         return True
 
     async def add_bookmark(self, note: str = "") -> BookmarkInfo:
+        """
+        Add a bookmark during recording.
+
+        Args:
+            note: Optional bookmark note/description
+
+        Returns:
+            BookmarkInfo with offset, file, and note
+
+        Raises:
+            StateError: If not recording
+        """
+        if note:
+            response = await self._send_and_check(f"AT+MARK={note}")
+        else:
+            response = await self._send_and_check("AT+MARK")
+        return BookmarkInfo.from_response(response)
+
+    async def get_bookmarks(self, session_id: str, fetch_all: bool = True) -> List[BookmarkInfo]:
+        """
+        Get all bookmarks for a session.
+
+        Args:
+            session_id: Session ID (e.g., "20250227_120000")
+            fetch_all: If True, fetch all bookmarks (with pagination if needed).
+                      If False, only return what's in the first response.
+
+        Returns:
+            List of BookmarkInfo objects
+
+        Raises:
+            CommandError: If session not found or request fails
+        """
+        all_bookmarks = []
+        start = 0
+
+        while True:
+            if start == 0:
+                response = await self._send_and_check(f"AT+MARKS={session_id}")
+            else:
+                response = await self._send_and_check(f"AT+MARKS={session_id}?{start}")
+
+            data = response.get('data', {})
+
+            # Check if response has bookmarks array (detailed response)
+            if 'bookmarks' in data:
+                bookmarks = data.get('bookmarks', [])
+                all_bookmarks.extend([BookmarkInfo.from_dict(b) for b in bookmarks])
+
+                total = data.get('total', len(all_bookmarks))
+                returned_start = data.get('start', 0)
+
+                # Check if we got all bookmarks
+                if len(all_bookmarks) >= total or not fetch_all:
+                    break
+
+                # Next page starts after the last bookmark we got
+                start = returned_start + len(bookmarks)
+
+                # Safety check to prevent infinite loop
+                if start >= total or len(bookmarks) == 0:
+                    break
+            else:
+                # Summary response only (no bookmarks array)
+                # This means there are many bookmarks, use fetch_all=True to paginate
+                if fetch_all and start == 0:
+                    start = 0  # Will request with ?0 next
+                    continue
+                else:
+                    break
+
+        return all_bookmarks
+
+    async def get_bookmarks_count(self, session_id: str) -> int:
+        """
+        Get the number of bookmarks for a session (without fetching details).
+
+        Args:
+            session_id: Session ID (e.g., "20250227_120000")
+
+        Returns:
+            Number of bookmarks
+
+        Raises:
+            CommandError: If session not found or request fails
+        """
+        response = await self._send_and_check(f"AT+MARKS={session_id}")
+        data = response.get('data', {})
+        return data.get('count', 0)
+
+    # ==================== Session Management ====================
         """
         Add a bookmark during recording.
 

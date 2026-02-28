@@ -132,7 +132,7 @@ static void button_bookmark_work_handler(struct k_work *work)
 
 	err = audio_add_bookmark(NULL);
 	if (err == 0) {
-		LOG_INF("Button: Bookmark added");
+		LOG_INF("Button: Bookmark added at %u seconds", g_recording_time);
 		/* Trigger UI mark display */
 		ui_trigger_mark();
 	} else {

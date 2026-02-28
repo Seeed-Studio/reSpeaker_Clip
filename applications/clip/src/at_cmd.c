@@ -27,8 +27,11 @@
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
-/* Shared JSON response buffer to reduce stack usage */
-static char json_buffer[1024];
+/* Shared JSON response buffer to reduce stack usage
+ * Increased size to support many bookmarks (up to BOOKMARKS_MAX_COUNT)
+ * Each bookmark ~100 bytes in JSON, so 100 bookmarks = ~10KB
+ */
+static char json_buffer[16384];
 
 /* Helper function to trim whitespace */
 static void trim_whitespace(char *str)
@@ -1074,8 +1077,12 @@ static int cmd_format(const struct at_command *cmd, char **response)
 
 static int cmd_marks(const struct at_command *cmd, char **response)
 {
-    struct bookmark *bookmarks;
-    int count;
+    struct bookmark *bookmarks = NULL;
+    int total_count;
+    int start_index = 0;
+    int return_count;
+    char *ptr = json_buffer;
+    int remaining = sizeof(json_buffer);
 
     if (!cmd->value) {
         return json_create_error("Missing session ID", response);
@@ -1086,41 +1093,99 @@ static int cmd_marks(const struct at_command *cmd, char **response)
         return json_create_error("Session not found", response);
     }
 
-    /* Allocate buffer for bookmarks on heap */
-    bookmarks = k_malloc(32 * sizeof(struct bookmark));
+    /* Get total bookmark count */
+    total_count = bookmarks_count(cmd->value);
+    if (total_count < 0) {
+        total_count = 0;
+    }
+
+    /* Parse start index from value (format: "session_id?start" or "session_id") */
+    const char *query = strchr(cmd->value, '?');
+    char session_id[32];
+
+    if (query) {
+        /* Extract session_id */
+        size_t len = query - cmd->value;
+        if (len >= sizeof(session_id)) {
+            len = sizeof(session_id) - 1;
+        }
+        strncpy(session_id, cmd->value, len);
+        session_id[len] = '\0';
+
+        /* Parse start index */
+        start_index = atoi(query + 1);
+        if (start_index < 0 || start_index >= total_count) {
+            start_index = 0;
+        }
+    } else {
+        strncpy(session_id, cmd->value, sizeof(session_id) - 1);
+        session_id[sizeof(session_id) - 1] = '\0';
+    }
+
+    /* Check if query requested (has ?) or total is small enough to return all */
+    bool want_detail = (query != NULL) || (total_count <= 20);
+
+    if (!want_detail) {
+        /* Return summary only */
+        snprintf(json_buffer, sizeof(json_buffer),
+                 "{\"count\":%d,\"marks_file\":\"marks.bin\"}",
+                 total_count);
+        return json_create_success(json_buffer, response);
+    }
+
+    /* Allocate buffer for bookmarks */
+    bookmarks = k_malloc(BOOKMARKS_MAX_COUNT * sizeof(struct bookmark));
     if (!bookmarks) {
         return json_create_error("Out of memory", response);
     }
 
     /* Get bookmarks for session */
-    count = bookmarks_get_all(cmd->value, bookmarks, 32);
-    if (count < 0) {
+    return_count = bookmarks_get_all(session_id, bookmarks, BOOKMARKS_MAX_COUNT);
+    if (return_count < 0) {
         k_free(bookmarks);
         return json_create_error("Failed to get bookmarks", response);
     }
 
-    /* Build JSON response in shared buffer */
-    char *ptr = json_buffer;
-    int remaining = sizeof(json_buffer);
+    /* Clamp start_index */
+    if (start_index >= return_count) {
+        start_index = 0;
+    }
 
-    ptr += snprintf(ptr, remaining, "{\"bookmarks\":[");
+    /* Build JSON response - simplified: only offset and note */
+    if (query) {
+        /* Paginated response */
+        ptr += snprintf(ptr, remaining, "{\"total\":%d,\"start\":%d,\"bookmarks\":[",
+                       total_count, start_index);
+    } else {
+        /* Full response */
+        ptr += snprintf(ptr, remaining, "{\"total\":%d,\"bookmarks\":[", total_count);
+    }
     remaining = sizeof(json_buffer) - (ptr - json_buffer);
 
-    for (int i = 0; i < count && remaining > 100; i++) {
-        char escaped_note[64];
+    /* Add bookmarks (from start_index) - only offset and note */
+    for (int i = start_index; i < return_count && remaining > 50; i++) {
+        char escaped_note[32];
         json_escape_string(escaped_note, bookmarks[i].note, sizeof(escaped_note));
 
-        int len = snprintf(ptr, remaining,
-                          "%s{\"time\":%u,\"offset\":%u,\"file\":%u,"
-                          "\"file_offset\":%u,\"note\":\"%s\"}",
-                          i > 0 ? "," : "",
-                          bookmarks[i].timestamp,
+        /* Format: {"offset":30,"note":"xxx"} or {"offset":30} if no note */
+        const char *fmt;
+        if (bookmarks[i].note[0] != '\0') {
+            fmt = "%s{\"offset\":%u,\"note\":\"%s\"}";
+        } else {
+            fmt = "%s{\"offset\":%u}";
+        }
+
+        int len = snprintf(ptr, remaining, fmt,
+                          (i > start_index) ? "," : "",
                           bookmarks[i].offset_sec,
-                          bookmarks[i].file_index,
-                          bookmarks[i].file_offset,
                           escaped_note);
         ptr += len;
         remaining -= len;
+
+        /* Stop if buffer is getting full */
+        if (remaining < 80) {
+            break;
+        }
     }
 
     snprintf(ptr, remaining, "]}");
