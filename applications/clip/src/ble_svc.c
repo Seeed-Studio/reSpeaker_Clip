@@ -12,6 +12,7 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
+#include <hal/nrf_ficr.h>
 #include <string.h>
 #include "ble_svc.h"
 #include "at_cmd.h"
@@ -23,8 +24,27 @@ LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
 /* Reboot work item - delays reboot to allow response to be sent */
 static struct k_work_delayable reboot_work;
 
-#define DEVICE_NAME CONFIG_BT_DEVICE_NAME
-#define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
+/* Dynamic device name: "Clip XXXX" where XXXX is last 4 hex of device ID */
+static char device_name[16];
+static uint8_t device_name_len;
+static struct bt_data ad[2];
+static struct bt_data sd[1];
+
+/* Generate device name from FICR device ID */
+static void generate_device_name(void)
+{
+    uint32_t device_id_low = nrf_ficr_deviceid_get(NRF_FICR, 0);
+
+    /* Get last 16 bits (4 hex digits) of device ID */
+    uint16_t id_suffix = device_id_low & 0xFFFF;
+
+    /* Format: "Clip XXXX" */
+    snprintf(device_name, sizeof(device_name), "Clip %04X", id_suffix);
+    device_name_len = strlen(device_name);
+
+    LOG_INF("Device name: %s", device_name);
+}
+
 #define MTU_SIZE 247
 
 /* Command queue configuration */
@@ -211,17 +231,8 @@ static ssize_t cmd_recv_write(struct bt_conn *conn,
     return len;
 }
 
-/* Advertising data */
-static const struct bt_data ad[] = {
-    BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
-};
-
-static const struct bt_data sd[] = {
-    BT_DATA_BYTES(BT_DATA_UUID128_ALL,
-                  0x01, 0x00, 0x40, 0x6E, 0xA3, 0xB5, 0x93, 0xF3,
-                  0xA9, 0xE0, 0x9E, 0xCA, 0xCC, 0x4D, 0x0E, 0xE5),
-};
+static uint8_t svc_uuid_bytes[16];
+static struct bt_data sd[1];
 
 /* Work queue for operations */
 static struct k_work adv_work;
@@ -344,6 +355,25 @@ static struct bt_conn_cb conn_callbacks = {
 int ble_svc_init(void)
 {
     int err;
+
+    /* Generate device name from chip ID */
+    generate_device_name();
+
+    /* Build advertising data dynamically */
+    static uint8_t flags = BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR;
+    ad[0].type = BT_DATA_FLAGS;
+    ad[0].data_len = sizeof(flags);
+    ad[0].data = &flags;
+
+    ad[1].type = BT_DATA_NAME_COMPLETE;
+    ad[1].data_len = device_name_len;
+    ad[1].data = (uint8_t *)device_name;
+
+    /* Build service UUID data */
+    bt_uuid_to_str(&svc_uuid.uuid, (char *)svc_uuid_bytes, sizeof(svc_uuid_bytes));
+    sd[0].type = BT_DATA_UUID128_ALL;
+    sd[0].data_len = sizeof(svc_uuid_bytes);
+    sd[0].data = svc_uuid_bytes;
 
     /* Initialize work queue */
     k_work_init(&adv_work, adv_work_handler);
