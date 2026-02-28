@@ -39,6 +39,7 @@ class DeviceState:
     charging: bool
     mode: str
     bitrate: int
+    free_space: int = 0  # Free storage space in KB
     session_id: Optional[str] = None
     session_files: int = 0
     duration: Optional[float] = None
@@ -52,6 +53,7 @@ class DeviceState:
             charging=data.get('charging', False),
             mode=data.get('mode', 'normal'),
             bitrate=data.get('bitrate', 32000),
+            free_space=data.get('free_space', 0),
             session_id=data.get('session'),
             session_files=data.get('session_files', 0),
             duration=data.get('duration'),

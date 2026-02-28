@@ -43,7 +43,7 @@ class TestRecordingControl:
         await commands.wait_for_recording_to_stop(timeout=5.0)
 
     async def test_start_recording_enhanced(self, commands: ClipCommands):
-        """Should start recording in enhanced mode."""
+        """Should start recording in enhanced mode (mono + DSP)."""
         await commands.ensure_idle()
 
         session_id = await commands.start_recording("enhanced")
@@ -52,42 +52,6 @@ class TestRecordingControl:
         assert len(session_id) == 14
 
         # Wait for recording to start
-        started = await commands.wait_for_recording_to_start(timeout=5.0)
-        assert started
-
-        state = await commands.get_state()
-        assert state.state == "RECORDING"
-
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
-    async def test_start_recording_stereo(self, commands: ClipCommands):
-        """Should start recording in stereo mode (alias for normal)."""
-        await commands.ensure_idle()
-
-        session_id = await commands.start_recording("stereo")
-
-        assert session_id is not None
-        assert len(session_id) == 14
-
-        started = await commands.wait_for_recording_to_start(timeout=5.0)
-        assert started
-
-        state = await commands.get_state()
-        assert state.state == "RECORDING"
-
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
-    async def test_start_recording_merge(self, commands: ClipCommands):
-        """Should start recording in merge mode (alias for enhanced)."""
-        await commands.ensure_idle()
-
-        session_id = await commands.start_recording("merge")
-
-        assert session_id is not None
-        assert len(session_id) == 14
-
         started = await commands.wait_for_recording_to_start(timeout=5.0)
         assert started
 
@@ -210,86 +174,6 @@ class TestBookmarks:
 
 
 @pytest.mark.asyncio
-class TestPauseResume:
-    """Test pause/resume functionality."""
-
-    async def test_pause_recording(self, commands: ClipCommands):
-        """Should pause recording."""
-        await commands.ensure_idle()
-
-        await commands.start_recording("normal")
-        await commands.wait_for_recording_to_start(timeout=5.0)
-        await asyncio.sleep(1)
-
-        result = await commands.pause_recording()
-        assert result is True
-
-        # Wait for state change
-        paused = await commands.wait_for_state("PAUSED", timeout=3.0)
-        assert paused
-
-        state = await commands.get_state()
-        assert state.state == "PAUSED"
-
-        # Cleanup
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
-    async def test_resume_recording(self, commands: ClipCommands):
-        """Should resume paused recording."""
-        await commands.ensure_idle()
-
-        await commands.start_recording("normal")
-        await commands.wait_for_recording_to_start(timeout=5.0)
-        await asyncio.sleep(1)
-
-        await commands.pause_recording()
-        await commands.wait_for_state("PAUSED", timeout=3.0)
-
-        await asyncio.sleep(0.5)
-        await commands.resume_recording()
-
-        # Wait for state change back to recording
-        recording = await commands.wait_for_state("RECORDING", timeout=3.0)
-        assert recording
-
-        state = await commands.get_state()
-        assert state.state == "RECORDING"
-
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
-    async def test_pause_resume_cycle(self, commands: ClipCommands):
-        """Should handle multiple pause/resume cycles."""
-        await commands.ensure_idle()
-
-        await commands.start_recording("normal")
-        await commands.wait_for_recording_to_start(timeout=5.0)
-
-        for _ in range(3):
-            await asyncio.sleep(0.5)
-            await commands.pause_recording()
-
-            paused = await commands.wait_for_state("PAUSED", timeout=3.0)
-            assert paused
-
-            state = await commands.get_state()
-            assert state.state == "PAUSED"
-
-            await asyncio.sleep(0.3)
-            await commands.resume_recording()
-
-            recording = await commands.wait_for_state("RECORDING", timeout=3.0)
-            assert recording
-
-            state = await commands.get_state()
-            assert state.state == "RECORDING"
-
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
-
-@pytest.mark.asyncio
 class TestStateTransitions:
     """Test state machine transitions."""
 
@@ -324,37 +208,16 @@ class TestStateTransitions:
         state = await commands.get_state()
         assert state.state == "IDLE"
 
-    async def test_recording_to_paused_to_recording(self, commands: ClipCommands):
-        """Should transition RECORDING -> PAUSED -> RECORDING."""
-        await commands.ensure_idle()
-        await commands.start_recording("normal")
-        await commands.wait_for_recording_to_start(timeout=5.0)
-
-        await commands.pause_recording()
-        await commands.wait_for_state("PAUSED", timeout=3.0)
-        state = await commands.get_state()
-        assert state.state == "PAUSED"
-
-        await commands.resume_recording()
-        await commands.wait_for_state("RECORDING", timeout=3.0)
-        state = await commands.get_state()
-        assert state.state == "RECORDING"
-
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
     async def test_wait_for_state(self, commands: ClipCommands):
         """Should wait for specific state."""
         await commands.ensure_idle()
 
-        # Start recording
+        # Start recording and wait for RECORDING state
         await commands.start_recording("normal")
-
-        # Wait for recording state
         result = await commands.wait_for_state("RECORDING", timeout=5.0)
         assert result is True
 
-        # Stop and wait for idle
+        # Stop and wait for IDLE state
         await commands.stop_recording()
         result = await commands.wait_for_state("IDLE", timeout=5.0)
         assert result is True

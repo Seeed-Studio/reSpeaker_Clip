@@ -51,11 +51,12 @@ class ClipDevice:
     communication between WinRT background notifications and asyncio.
     """
 
-    def __init__(self, address: Optional[str] = None, name_filter: str = DEVICE_NAME_FILTER):
+    def __init__(self, address: Optional[str] = None, name_filter: str = DEVICE_NAME_FILTER, debug: bool = False):
         self.address = address
         self.name_filter = name_filter
         self.client: Optional[BleakClient] = None
         self._connected = False
+        self._debug = debug  # Enable/disable debug logging
 
         # Message queue for receiving notifications
         self._response_queue: Optional[asyncio.Queue] = None
@@ -140,7 +141,8 @@ class ClipDevice:
         while True:
             try:
                 stale = self._response_queue.get_nowait()
-                print(f"[send_command] Discarding stale response: {stale[:50] if len(stale) > 50 else stale}")
+                if self._debug:
+                    print(f"[send_command] Discarding stale response: {stale[:50] if len(stale) > 50 else stale}")
             except asyncio.QueueEmpty:
                 break
 
@@ -148,7 +150,8 @@ class ClipDevice:
             self._response_buffer.clear()
 
         # Send command
-        print(f"[send_command] Sending: {command}")
+        if self._debug:
+            print(f"[send_command] Sending: {command}")
         await self.client.write_gatt_char(CMD_RECV_UUID, command.encode('utf-8'))
 
         # Wait for response from queue (with timeout)
@@ -164,7 +167,8 @@ class ClipDevice:
                     self._response_queue.get(),
                     timeout=timeout - elapsed
                 )
-                print(f"[send_command] Received response: {response_data[:100]}")
+                if self._debug:
+                    print(f"[send_command] Received response: {response_data[:100]}")
 
                 # Parse JSON to check if it's a state_change event
                 try:
@@ -176,7 +180,8 @@ class ClipDevice:
                         # Check for nested event in data
                         if 'data' in response and isinstance(response['data'], dict):
                             if response['data'].get('event') == 'state_change':
-                                print(f"[send_command] Filtering out state_change event, waiting for actual response")
+                                if self._debug:
+                                    print(f"[send_command] Filtering out state_change event, waiting for actual response")
                                 continue  # Skip this and wait for next response
 
                     # Not a state_change event, this is the actual response
@@ -199,7 +204,8 @@ class ClipDevice:
         This decouples the background thread receiving notifications
         from the async tasks sending commands.
         """
-        print(f"[Notification] Received {len(data)} bytes")
+        if self._debug:
+            print(f"[Notification] Received {len(data)} bytes")
 
         with self._buffer_lock:
             self._response_buffer.extend(data)
@@ -211,16 +217,19 @@ class ClipDevice:
                 response_str = self._response_buffer.decode('utf-8')
             except UnicodeDecodeError:
                 # Incomplete UTF-8 sequence, wait for more data
-                print(f"[Notification] Incomplete UTF-8 sequence, waiting for more data")
+                if self._debug:
+                    print(f"[Notification] Incomplete UTF-8 sequence, waiting for more data")
                 return
 
-            print(f"[Notification] Data: {response_str}")
+            if self._debug:
+                print(f"[Notification] Data: {response_str}")
 
             # Try to parse and queue complete JSON objects
             try:
                 parsed = json.loads(response_str)
                 # Successfully parsed complete JSON
-                print(f"[Notification] Complete response, queuing to event loop")
+                if self._debug:
+                    print(f"[Notification] Complete response, queuing to event loop")
                 self._response_buffer.clear()
 
                 if self._loop and not self._loop.is_closed() and self._response_queue:
@@ -246,7 +255,8 @@ class ClipDevice:
 
                     # Success - queue this response
                     processed_count += 1
-                    print(f"[Notification] Complete response #{processed_count}, queuing")
+                    if self._debug:
+                        print(f"[Notification] Complete response #{processed_count}, queuing")
 
                     if self._loop and not self._loop.is_closed() and self._response_queue:
                         self._loop.call_soon_threadsafe(
@@ -262,7 +272,8 @@ class ClipDevice:
                     # Try to find a complete JSON object by brace matching
                     if not remaining.startswith('{') and not remaining.startswith('['):
                         # Skip leading non-JSON characters
-                        print(f"[Notification] Skipping non-JSON prefix: {remaining[:20]}")
+                        if self._debug:
+                            print(f"[Notification] Skipping non-JSON prefix: {remaining[:20]}")
                         # Find start of JSON
                         start_idx = -1
                         for i, c in enumerate(remaining):
@@ -274,7 +285,8 @@ class ClipDevice:
                             continue
                         else:
                             # No JSON found, clear buffer
-                            print(f"[Notification] No JSON found, clearing buffer")
+                            if self._debug:
+                                print(f"[Notification] No JSON found, clearing buffer")
                             self._response_buffer.clear()
                             break
 
@@ -332,7 +344,8 @@ class ClipDevice:
                             continue
                         else:
                             # Incomplete JSON, wait for more data
-                            print(f"[Notification] Incomplete JSON, waiting for more data")
+                            if self._debug:
+                                print(f"[Notification] Incomplete JSON, waiting for more data")
                             break
 
             # Update buffer if there's remaining data
