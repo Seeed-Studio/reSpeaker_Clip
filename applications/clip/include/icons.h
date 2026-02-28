@@ -40,6 +40,7 @@ typedef enum {
 	ICON_MIC_MUTED,          /**< Muted microphone icon */
 	ICON_CONNECTED,          /**< Generic connected icon */
 	ICON_DISCONNECTED,       /**< Generic disconnected icon */
+	ICON_PHONE,              /**< Phone icon */
 } icon_id_t;
 
 /**
