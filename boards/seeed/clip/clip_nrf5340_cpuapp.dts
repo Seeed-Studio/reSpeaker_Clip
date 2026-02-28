@@ -205,11 +205,11 @@
 		reg = <0x3c>;
 		reset-gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
 		width = <88>;
-		height = <48>;
+		height = <48>;  /* Actual display resolution */
 		segment-offset = <0>;
-		page-offset = <0>;
-		display-offset = <0>;
-		multiplex-ratio = <47>;
+		page-offset = <1>;  /* +1 page (8 pixels) to center content visually */
+		display-offset = <0>;  /* Hardware COM start from 0 */
+		multiplex-ratio = <63>;  /* Activate all 64 COM lines */
 		prechargep = <0x22>;
 		segment-remap = <0>;
 		com-invdir = <0>;

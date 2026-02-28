@@ -24,4 +24,5 @@ target_sources(app PRIVATE
     src/battery.c
     src/display_ctrl.c
     src/display.c
+    src/icons.c
 )

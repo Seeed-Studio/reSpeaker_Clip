@@ -17,6 +17,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "ble_svc.h"
+#include "transfer.h"
 
 LOG_MODULE_REGISTER(display_ctrl, LOG_LEVEL_INF);
 
@@ -36,6 +37,9 @@ static enum ui_state ui_current_state = UI_STATE_IDLE;
 
 /* Recording info state: track when to transition to dot */
 static int64_t recording_state_start_ms;
+
+/* Dot animation: track if animation has played */
+static bool dot_animation_played = false;
 
 /* Waveform frames (8 frames loop) - Unicode block elements */
 static const char *waveform_frames[] = {
@@ -74,6 +78,16 @@ void ui_set_state(enum ui_state new_state)
 		if (new_state == UI_STATE_RECORDING_INFO) {
 			recording_state_start_ms = k_uptime_get();
 		}
+
+		/* Reset dot animation flag when entering DOT state from other states */
+		if (new_state == UI_STATE_RECORDING_DOT) {
+			dot_animation_played = false;
+		}
+
+		/* Reset dot animation flag when recording stops (leaving to IDLE) */
+		if (new_state == UI_STATE_IDLE) {
+			dot_animation_played = false;
+		}
 	}
 
 	ui_current_state = new_state;
@@ -87,34 +101,69 @@ static void ui_show_recording_info(void)
 	if (!recording_active) {
 		return;
 	}
-
+	LOG_INF("[UI] REC wave");
 	bool enhanced_mode = (g_config.mode == MODE_ENHANCED);
 	display_show_recording(enhanced_mode);
 
 }
 
-static void ui_show_recording_dot(void)
+/* Mark animation configuration */
+#define MARK_ANIM_FRAMES        15    /* Number of frames to play (matches MARK_ANIM_FRAMES_FAST) */
+#define MARK_ANIM_FRAME_MS      10    /* Duration per frame (ms) */
+#define MARK_ANIM_USE_FAST_MODE true  /* Use fast mode */
+
+static void ui_show_mark(void)
 {
-	/* Reset waveform index for next recording start */
-	waveform_frame_index = 0;
-	LOG_INF("[UI] REC ●");
+	LOG_INF("[UI] MARK animation");
+
+	/* Play the mark animation */
+	for (int frame = 0; frame < MARK_ANIM_FRAMES; frame++) {
+		display_show_mark_animation_frame(frame, MARK_ANIM_USE_FAST_MODE);
+		k_sleep(K_MSEC(MARK_ANIM_FRAME_MS));
+	}
 }
 
-static void ui_show_mark_cross(void)
+/* Dot circle animation configuration */
+#define MARK_CIRCLE_FRAMES      8    /* Number of animation frames */
+#define MARK_CIRCLE_FRAME_MS    60   /* Duration per frame (ms) */
+#define MARK_STABLE_FRAME       7    /* Stable frame to hold (0.5x scale) */
+
+static void ui_show_recording_dot(void)
 {
-	LOG_INF("[UI] MARK ✚");
+	/* Track if animation has played once */
+	static bool dot_animation_played = false;
+
+	if (!dot_animation_played) {
+		LOG_INF("[UI] DOT ● animation (first time)");
+
+		/* Play the circle animation once */
+		for (int frame = 0; frame < MARK_CIRCLE_FRAMES; frame++) {
+			display_show_dot_circle_frame(frame);
+			k_sleep(K_MSEC(MARK_CIRCLE_FRAME_MS));
+		}
+
+		dot_animation_played = true;
+	} else {
+		/* Just show stable frame */
+		display_show_dot_circle_frame(MARK_STABLE_FRAME);
+	}
 }
 
 static void ui_show_status_bar(void)
 {
 	uint8_t batt_percent;
+	bool charging;
 	bool ble_connected;
+	bool transferring;
 
+	/* Get system status */
 	batt_percent = battery_get_level();
+	charging = battery_is_charging();
 	ble_connected = (ble_svc_get_connection() != NULL);
+	transferring = transfer_is_active();
 
-	LOG_INF("[UI] BAT:%u%% BLE:%s",
-		batt_percent, ble_connected ? "OK" : "--");
+	/* Display on OLED */
+	display_show_info(batt_percent, charging, ble_connected, transferring);
 }
 
 static void ui_screen_off(void)
@@ -135,8 +184,8 @@ void ui_trigger_mark(void)
 {
 	enum ui_state current = ui_get_state();
 
-	/* Only show mark during recording (dot state) */
-	if (current == UI_STATE_RECORDING_DOT) {
+	/* Show mark during recording (INFO or DOT state) */
+	if (current == UI_STATE_RECORDING_INFO || current == UI_STATE_RECORDING_DOT) {
 		ui_set_state(UI_STATE_MARKING);
 	}
 }
@@ -161,16 +210,16 @@ void ui_handle_recording_change(bool recording)
 		ui_set_state(UI_STATE_RECORDING_INFO);
 		LOG_INF("[UI] Recording started");
 	} else {
-		/* Recording stopped */
+		/* Recording stopped - show status page */
 		recording_active = false;
-		ui_set_state(UI_STATE_IDLE);
-		LOG_INF("[UI] Recording stopped");
+		ui_set_state(UI_STATE_STATUS_SHOW);
+		LOG_INF("[UI] Recording stopped, showing status");
 	}
 }
 
 /* ========== UI Thread Main Loop ========== */
 
-#define UI_RECORDING_INFO_DURATION_MS  3000  /* 3 seconds */
+#define UI_RECORDING_INFO_DURATION_MS  5000  /* 5 seconds */
 #define UI_MARKING_DURATION_MS         500   /* 0.5 seconds */
 #define UI_STATUS_SHOW_DURATION_MS     3000  /* 3 seconds */
 #define UI_IDLE_POLL_MS                100   /* Low power polling */
@@ -190,29 +239,49 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 		case UI_STATE_RECORDING_INFO:
 			ui_show_recording_info();
 
-			/* Update every ~200ms for smooth animation */
+			/* Check if 5 seconds elapsed, then transition to DOT */
+			if (k_uptime_get() - recording_state_start_ms >= UI_RECORDING_INFO_DURATION_MS) {
+				ui_set_state(UI_STATE_RECORDING_DOT);
+			}
+
+			/* Update every 10ms for smooth animation */
 			k_sleep(K_MSEC(10));
 			break;
 
 		case UI_STATE_RECORDING_DOT:
-			/* Continue showing animation in DOT state as well */
-			ui_show_recording_info();
-			/* Update every 200ms for smooth animation */
-			k_sleep(K_MSEC(200));
+			/* Show circle animation */
+			ui_show_recording_dot();
 			break;
 
 		case UI_STATE_MARKING:
-			ui_show_mark_cross();
-			k_sleep(K_MSEC(UI_MARKING_DURATION_MS));
+			ui_show_mark();
 			/* Return to dot after mark display */
 			ui_set_state(UI_STATE_RECORDING_DOT);
 			break;
 
 		case UI_STATE_STATUS_SHOW:
 			ui_show_status_bar();
-			k_sleep(K_MSEC(UI_STATUS_SHOW_DURATION_MS));
-			/* Screen off after 3 seconds */
-			ui_set_state(UI_STATE_IDLE);
+
+			/* Periodically check state change to allow interrupt */
+			{
+				int64_t show_start = k_uptime_get();
+				enum ui_state new_state;
+
+				while (k_uptime_get() - show_start < 60000) {
+					/* Check state every 100ms */
+					k_sleep(K_MSEC(100));
+					new_state = ui_get_state();
+					if (new_state != UI_STATE_STATUS_SHOW) {
+						/* State changed, break to handle new state */
+						break;
+					}
+				}
+
+				/* Only transition to IDLE if still in STATUS_SHOW after 60s */
+				if (ui_get_state() == UI_STATE_STATUS_SHOW) {
+					ui_set_state(UI_STATE_IDLE);
+				}
+			}
 			break;
 
 		case UI_STATE_MESSAGE:
