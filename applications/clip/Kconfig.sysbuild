@@ -1,0 +1,14 @@
+#
+# Copyright (c) 2025 Seeed Technology Co., Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+source "${ZEPHYR_BASE}/share/sysbuild/Kconfig"
+
+# Enable Network Core IPC Radio for BLE
+config NRF_DEFAULT_IPC_RADIO
+	default y
+
+config NETCORE_IPC_RADIO_BT_HCI_IPC
+	default y
