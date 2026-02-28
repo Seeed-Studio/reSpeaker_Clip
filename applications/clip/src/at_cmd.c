@@ -845,6 +845,12 @@ static int cmd_stop(const struct at_command *cmd, char **response)
         return json_create_error("Not recording", response);
     }
 
+    /* Get session ID before stopping (same format as AT+START) */
+    const char *session_id = audio_get_session_id();
+    if (!session_id) {
+        return json_create_error("No active session", response);
+    }
+
     /* Stop audio recording - state transition will be handled by audio thread */
     err = audio_stop_recording();
     if (err) {
@@ -863,12 +869,12 @@ static int cmd_stop(const struct at_command *cmd, char **response)
 
     char data[256];
     snprintf(data, sizeof(data),
-             "{\"session\":\"%08u\","
+             "{\"session\":\"%s\","
              "\"duration\":%u,"
              "\"frames\":%u,"
              "\"file_count\":1,"
              "\"total_size\":%u}",
-             (uint32_t)(k_uptime_get() / 1000),
+             session_id,
              (uint32_t)(audio_stats.recording_time_ms / 1000),
              audio_stats.frames_encoded,
              audio_stats.total_bytes);
