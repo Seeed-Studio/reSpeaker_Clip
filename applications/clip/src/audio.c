@@ -705,14 +705,6 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		stats.total_bytes += encoded_bytes;
 		recording_frame_count++;
 
-		/* Print encode time stats every second (50 frames) */
-		if (recording_frame_count % 50 == 0) {
-			int64_t avg_time = encode_time_total / stats.frames_encoded;
-			LOG_INF("Encode: avg=%lld ms, min=%lld ms, max=%lld ms, pkt=%u bytes (frame %u)",
-				avg_time, stats.encode_time_min_ms, stats.encode_time_max_ms,
-				encoded_bytes, recording_frame_count);
-		}
-
 		/* Check if we need to create a new file (segmentation)
 		 * Use different segment durations based on transfer state:
 		 * - When transferring: shorter segments (CLIP_AUDIO_SEGMENT_DURATION_SYNC)
