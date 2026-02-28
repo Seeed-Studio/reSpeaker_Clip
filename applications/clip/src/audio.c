@@ -28,6 +28,7 @@
 #include "bookmarks.h"
 #include "ble_svc.h"
 #include "transfer.h"
+#include "state_machine.h"
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
@@ -296,9 +297,7 @@ int audio_set_bitrate(uint32_t bitrate)
 	/* Store as mono bitrate in config */
 	g_config.bitrate = bitrate;
 
-#ifdef CONFIG_SETTINGS
-	save_setting_now("config/bitrate", &bitrate, sizeof(bitrate));
-#endif
+	/* Note: Bitrate will be saved when config_save() is called */
 
 	/* Reinitialize encoder with new bitrate if recording */
 	if (recording_active) {
@@ -860,10 +859,6 @@ static int init_opus_encoder(void)
 	opus_int32 configured_complexity;
 	opus_encoder_ctl(opus_encoder, OPUS_GET_COMPLEXITY(&configured_complexity));
 
-	/* Get max payload size */
-	opus_int32 max_payload;
-	opus_encoder_ctl(opus_encoder, OPUS_GET_MAX_PACKET_SIZE(&max_payload));
-
 	/* Disable FEC */
 	err = opus_encoder_ctl(opus_encoder, OPUS_SET_INBAND_FEC(0));
 	if (err != OPUS_OK) {
@@ -871,8 +866,8 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	LOG_INF("Opus config: %d ch, bitrate=%u bps (requested=%u), complexity=%u, max_payload=%u",
-		opus_channels, configured_bitrate, actual_bitrate, configured_complexity, max_payload);
+	LOG_INF("Opus config: %d ch, bitrate=%u bps (requested=%u), complexity=%u",
+		opus_channels, configured_bitrate, actual_bitrate, configured_complexity);
 
 	return 0;
 }
