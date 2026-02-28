@@ -88,7 +88,7 @@ static void ui_show_recording_info(void)
 	if (!recording_active) {
 		return;
 	}
-
+	LOG_INF("[UI] REC wave");
 	bool enhanced_mode = (g_config.mode == MODE_ENHANCED);
 	display_show_recording(enhanced_mode);
 
@@ -204,7 +204,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 			/* Continue showing animation in DOT state as well */
 			ui_show_recording_info();
 			/* Update every 200ms for smooth animation */
-			k_sleep(K_MSEC(200));
+			k_sleep(K_MSEC(10));
 			break;
 
 		case UI_STATE_MARKING:
@@ -216,9 +216,27 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 
 		case UI_STATE_STATUS_SHOW:
 			ui_show_status_bar();
-			k_sleep(K_MSEC(UI_STATUS_SHOW_DURATION_MS));
-			/* Screen off after 3 seconds */
-			ui_set_state(UI_STATE_IDLE);
+
+			/* Periodically check state change to allow interrupt */
+			{
+				int64_t show_start = k_uptime_get();
+				enum ui_state new_state;
+
+				while (k_uptime_get() - show_start < 60000) {
+					/* Check state every 100ms */
+					k_sleep(K_MSEC(100));
+					new_state = ui_get_state();
+					if (new_state != UI_STATE_STATUS_SHOW) {
+						/* State changed, break to handle new state */
+						break;
+					}
+				}
+
+				/* Only transition to IDLE if still in STATUS_SHOW after 60s */
+				if (ui_get_state() == UI_STATE_STATUS_SHOW) {
+					ui_set_state(UI_STATE_IDLE);
+				}
+			}
 			break;
 
 		case UI_STATE_MESSAGE:

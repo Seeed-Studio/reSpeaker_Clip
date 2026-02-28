@@ -300,7 +300,6 @@ static void render_recording_page(uint8_t *buf, bool enhanced_mode)
 	clear_screen(buf);
 
 	/* Draw wave animation */
-	/* Note: fast_anim_init() is already called by display_show_recording() */
 	draw_fast_animation(buf);
 }
 
