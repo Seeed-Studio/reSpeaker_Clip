@@ -149,8 +149,9 @@ static void button_event_callback(const struct device *dev,
 
 	enum clip_state current_state = state_get_current();
 
-	LOG_INF("Button event: %d (current state: %d)",
-		action, current_state);
+	/* Log both state machine and actual audio state for debugging */
+	LOG_INF("Button event: %d (state_machine=%d, audio_recording=%d)",
+		action, current_state, audio_is_recording());
 
 	switch (action) {
 	case BUTTON_SINGLE_CLICK:
@@ -171,17 +172,16 @@ static void button_event_callback(const struct device *dev,
 	case BUTTON_LONG_PRESS_LEVEL_1:
 	case BUTTON_LONG_PRESS_LEVEL_2:
 	case BUTTON_LONG_PRESS_LEVEL_3:
-		/* Long press: Toggle recording based on current state */
-		if (current_state == CLIP_STATE_IDLE || current_state == CLIP_STATE_PAUSED) {
-			/* Start recording - defer to work queue */
-			LOG_INF("Button: Long press - submitting start work");
-			k_work_submit_to_queue(&button_work_q, &button_start_work);
-		} else if (current_state == CLIP_STATE_RECORDING) {
+		/* Long press: Toggle recording based on actual audio state */
+		/* Use audio_is_recording() for more reliable state detection */
+		if (audio_is_recording()) {
 			/* Stop recording - defer to work queue */
 			LOG_INF("Button: Long press - submitting stop work");
 			k_work_submit_to_queue(&button_work_q, &button_stop_work);
 		} else {
-			LOG_INF("Button: Long press ignored (state=%d)", current_state);
+			/* Start recording - defer to work queue */
+			LOG_INF("Button: Long press - submitting start work");
+			k_work_submit_to_queue(&button_work_q, &button_start_work);
 		}
 		break;
 
