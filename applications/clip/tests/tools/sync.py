@@ -10,12 +10,13 @@ Usage:
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from clip import ClipDevice, SessionSync
+from clip import ClipDevice, SessionSync, ClipCommands
 from clip.utils import format_bytes, format_duration
 
 
@@ -66,7 +67,6 @@ Examples:
 
         # Show status
         if args.status:
-            from clip import ClipCommands
             cmds = ClipCommands(device)
 
             state = await cmds.get_state()
@@ -97,7 +97,7 @@ Examples:
             print("Summary")
             print("=" * 60)
 
-            success = sum(1 for r in results if r.get("status") != "failed")
+            success = sum(1 for r in results if r.get("file_count", 0) > 0)
             failed = len(results) - success
 
             print(f"  Total: {len(results)}")
@@ -109,10 +109,15 @@ Examples:
         # Sync single session
         session_id = args.session
         continuous = not args.oneshot
+        sync_stats = {'file_count': 0, 'total_bytes': 0, 'last_filename': ''}
+
+        def progress_callback(filename: str, file_count: int, total_size: int):
+            sync_stats['last_filename'] = filename
+            sync_stats['file_count'] = file_count
+            sync_stats['total_bytes'] = total_size
 
         # Auto-detect session if not specified
         if not session_id:
-            from clip import ClipCommands
             cmds = ClipCommands(device)
 
             state = await cmds.get_state()
@@ -143,26 +148,119 @@ Examples:
         # Sync the session
         print("\n" + "=" * 60)
         print(f"Sync Session: {session_id}")
+        if continuous:
+            print("  (Recording in progress - will sync files as they are created)")
+            print("  (Press Ctrl+C to stop)")
         print("=" * 60)
 
-        result = await sync.sync(
-            session_id,
-            args.output / session_id,
-            delete_after=not args.keep,
-            continuous=continuous,
+        sync_start = time.time()
+        stop_event = asyncio.Event()
+
+        def signal_handler(sig, frame):
+            print("\n\nStopping...")
+            stop_event.set()
+
+        try:
+            import signal
+            signal.signal(signal.SIGINT, signal_handler)
+        except ValueError:
+            pass
+
+        # Create sync task
+        sync_task = asyncio.create_task(
+            sync.sync(
+                session_id,
+                args.output / session_id,
+                delete_after=not args.keep,
+                continuous=continuous,
+                progress_callback=progress_callback,
+            )
         )
 
+        # Show progress while syncing
+        last_count = 0
+        last_shown = 0.0
+        no_progress_count = 0
+
+        while not sync_task.done():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+                # User pressed Ctrl+C
+                print("\nStopping sync...")
+                await sync.cancel()
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            elapsed = time.time() - sync_start
+
+            # Show progress every 3 seconds (only if files received)
+            if elapsed - last_shown > 3.0 and sync_stats['file_count'] > 0:
+                speed = sync_stats['total_bytes'] / elapsed if elapsed > 0 else 0
+                print(f"  Progress: {sync_stats['last_filename']} ({sync_stats['file_count']} files, "
+                      f"{format_bytes(sync_stats['total_bytes'])}, {format_duration(elapsed)}, "
+                      f"{format_speed(speed)})")
+                last_count = sync_stats['file_count']
+                last_shown = elapsed
+                no_progress_count = 0
+
+            # Check for no progress (60 seconds without new files)
+            if sync_stats['file_count'] > 0 and elapsed - last_shown > 60:
+                no_progress_count += 1
+                if no_progress_count >= 2:  # 120 seconds with no progress
+                    print(f"\nNo new files for 2 minutes, assuming transfer complete")
+                    await sync.cancel()
+                    break
+            elif sync_stats['file_count'] == 0 and elapsed > 120:
+                # No files at all after 2 minutes - something wrong
+                print(f"\nNo files received after 2 minutes, aborting")
+                await sync.cancel()
+                break
+
+        # Get result (handle TransferError gracefully)
+        try:
+            result = await sync_task
+        except Exception as e:
+            # Check if it's just a canceled transfer
+            if "canceled" in str(e).lower() or "cancel" in str(e).lower():
+                # User canceled or timeout - get partial results from filesystem
+                print(f"\nSync was stopped ({type(e).__name__})")
+
+                # Check what we actually got
+                output_path = args.output / session_id
+                if output_path.exists():
+                    files = list(output_path.glob("*.opus"))
+                    merged_file = output_path / f"{session_id}.opus"
+
+                    result = {
+                        'session_id': session_id,
+                        'file_count': len([f for f in files if f.name != f"{session_id}.opus"]),
+                        'total_size': sum(f.stat().st_size for f in files),
+                    }
+                    if merged_file.exists():
+                        result['merged_file'] = str(merged_file)
+                else:
+                    print("No files received")
+                    return 1
+            else:
+                print(f"\nSync error: {e}")
+                import traceback
+                traceback.print_exc()
+                return 1
+
         # Show results
+        elapsed = time.time() - sync_start
+        avg_speed = result.get('total_size', 0) / elapsed if elapsed > 0 else 0
+
         print("\n" + "=" * 60)
         print("Sync Complete!")
         print("=" * 60)
         print(f"  Session: {result['session_id']}")
-        print(f"  Status: {result.get('status', 'unknown')}")
-        if result.get('file_count', 0) > 0:
-            print(f"  Files: {result['file_count']}")
-            print(f"  Total: {format_bytes(result.get('total_size', 0))}")
-            if result.get('merged_file'):
-                print(f"  Merged: {result['merged_file']}")
+        print(f"  Files: {result.get('file_count', 0)}")
+        print(f"  Total: {format_bytes(result.get('total_size', 0))}")
+        print(f"  Avg speed: {format_speed(avg_speed)}")
+        if result.get('merged_file'):
+            print(f"  Merged: {result['merged_file']}")
         print(f"  Location: {args.output / session_id}")
         print("=" * 60)
 
@@ -178,6 +276,16 @@ Examples:
         return 1
     finally:
         await device.disconnect()
+
+
+def format_speed(bytes_per_sec: float) -> str:
+    """Format transfer speed."""
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.1f} B/s"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    else:
+        return f"{bytes_per_sec / (1024 * 1024):.2f} MB/s"
 
 
 if __name__ == "__main__":
