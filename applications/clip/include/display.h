@@ -48,4 +48,13 @@ void display_show_recording(bool enhanced_mode);
  */
 void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring);
 
+/**
+ * @brief Show a single frame of the circle mark animation
+ * @param frame Animation frame number (0-7 for 8-frame loop)
+ *
+ * Renders an animated circle (●) that pulses in size.
+ * Call repeatedly with incrementing frame numbers for smooth animation.
+ */
+void display_show_mark_cross_frame(int frame);
+
 #endif /* DISPLAY_H */

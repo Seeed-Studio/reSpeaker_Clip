@@ -38,6 +38,9 @@ static enum ui_state ui_current_state = UI_STATE_IDLE;
 /* Recording info state: track when to transition to dot */
 static int64_t recording_state_start_ms;
 
+/* Dot animation: track if animation has played */
+static bool dot_animation_played = false;
+
 /* Waveform frames (8 frames loop) - Unicode block elements */
 static const char *waveform_frames[] = {
 	"▂▃▅▇▅▃▂",
@@ -75,6 +78,16 @@ void ui_set_state(enum ui_state new_state)
 		if (new_state == UI_STATE_RECORDING_INFO) {
 			recording_state_start_ms = k_uptime_get();
 		}
+
+		/* Reset dot animation flag when entering DOT state from other states */
+		if (new_state == UI_STATE_RECORDING_DOT) {
+			dot_animation_played = false;
+		}
+
+		/* Reset dot animation flag when recording stops (leaving to IDLE) */
+		if (new_state == UI_STATE_IDLE) {
+			dot_animation_played = false;
+		}
 	}
 
 	ui_current_state = new_state;
@@ -94,16 +107,37 @@ static void ui_show_recording_info(void)
 
 }
 
-static void ui_show_recording_dot(void)
+static void ui_show_mark_cross(void)
 {
 	/* Reset waveform index for next recording start */
 	waveform_frame_index = 0;
-	LOG_INF("[UI] REC ●");
+	LOG_INF("[UI] REC mark");
 }
 
-static void ui_show_mark_cross(void)
+/* Mark circle animation configuration */
+#define MARK_CIRCLE_FRAMES      8    /* Number of animation frames */
+#define MARK_CIRCLE_FRAME_MS    60   /* Duration per frame (ms) */
+#define MARK_STABLE_FRAME       7    /* Stable frame to hold (0.5x scale) */
+
+static void ui_show_recording_dot(void)
 {
-	LOG_INF("[UI] MARK ✚");
+	/* Track if animation has played once */
+	static bool dot_animation_played = false;
+
+	if (!dot_animation_played) {
+		LOG_INF("[UI] DOT ● animation (first time)");
+
+		/* Play the circle animation once */
+		for (int frame = 0; frame < MARK_CIRCLE_FRAMES; frame++) {
+			display_show_mark_cross_frame(frame);
+			k_sleep(K_MSEC(MARK_CIRCLE_FRAME_MS));
+		}
+
+		dot_animation_played = true;
+	} else {
+		/* Just show stable frame */
+		display_show_mark_cross_frame(MARK_STABLE_FRAME);
+	}
 }
 
 static void ui_show_status_bar(void)
@@ -141,8 +175,8 @@ void ui_trigger_mark(void)
 {
 	enum ui_state current = ui_get_state();
 
-	/* Only show mark during recording (dot state) */
-	if (current == UI_STATE_RECORDING_DOT) {
+	/* Show mark during recording (INFO or DOT state) */
+	if (current == UI_STATE_RECORDING_INFO || current == UI_STATE_RECORDING_DOT) {
 		ui_set_state(UI_STATE_MARKING);
 	}
 }
@@ -176,7 +210,7 @@ void ui_handle_recording_change(bool recording)
 
 /* ========== UI Thread Main Loop ========== */
 
-#define UI_RECORDING_INFO_DURATION_MS  3000  /* 3 seconds */
+#define UI_RECORDING_INFO_DURATION_MS  5000  /* 5 seconds */
 #define UI_MARKING_DURATION_MS         500   /* 0.5 seconds */
 #define UI_STATUS_SHOW_DURATION_MS     3000  /* 3 seconds */
 #define UI_IDLE_POLL_MS                100   /* Low power polling */
@@ -196,19 +230,22 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 		case UI_STATE_RECORDING_INFO:
 			ui_show_recording_info();
 
-			/* Update every ~200ms for smooth animation */
+			/* Check if 5 seconds elapsed, then transition to DOT */
+			if (k_uptime_get() - recording_state_start_ms >= UI_RECORDING_INFO_DURATION_MS) {
+				ui_set_state(UI_STATE_RECORDING_DOT);
+			}
+
+			/* Update every 10ms for smooth animation */
 			k_sleep(K_MSEC(10));
 			break;
 
 		case UI_STATE_RECORDING_DOT:
-			/* Continue showing animation in DOT state as well */
-			ui_show_recording_info();
-			/* Update every 200ms for smooth animation */
-			k_sleep(K_MSEC(10));
+			/* Show circle animation */
+			ui_show_recording_dot();
 			break;
 
 		case UI_STATE_MARKING:
-			ui_show_mark_cross();
+			 ui_show_mark_cross();
 			k_sleep(K_MSEC(UI_MARKING_DURATION_MS));
 			/* Return to dot after mark display */
 			ui_set_state(UI_STATE_RECORDING_DOT);

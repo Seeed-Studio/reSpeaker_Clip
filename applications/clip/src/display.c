@@ -632,3 +632,76 @@ void display_show_info(uint8_t battery_percent, bool charging, bool ble_connecte
 	render_info_page(display_buffer, &info);
 	flush_display();
 }
+
+/**
+ * @brief Draw a circle mark (●) at the center
+ * @param buf Frame buffer
+ * @param radius Circle radius
+ * @param scale Current scale factor for animation (0.0 to 1.0)
+ */
+static void draw_circle_mark(uint8_t *buf, int radius, float scale)
+{
+	const int x_mid = OLED_WIDTH / 2;
+	const int y_mid = OLED_HEIGHT / 2;
+
+	/* Calculate scaled radius */
+	int scaled_radius = (int)(radius * scale);
+	if (scaled_radius < 1) scaled_radius = 1;
+
+	/* Draw filled circle using distance check */
+	for (int dy = -scaled_radius; dy <= scaled_radius; dy++) {
+		for (int dx = -scaled_radius; dx <= scaled_radius; dx++) {
+			int x = x_mid + dx;
+			int y = y_mid + dy;
+
+			/* Check bounds */
+			if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT) {
+				continue;
+			}
+
+			/* Check if point is inside circle (using squared distance to avoid sqrt) */
+			int dist_sq = dx * dx + dy * dy;
+			int radius_sq = scaled_radius * scaled_radius;
+
+			if (dist_sq <= radius_sq) {
+				set_pixel_direct(buf, x, y);
+			}
+		}
+	}
+}
+
+/**
+ * @brief Render mark page with circle animation
+ * @param buf Frame buffer
+ * @param frame Animation frame (0-7 for 8-frame loop)
+ */
+static void render_mark_page(uint8_t *buf, int frame)
+{
+	clear_screen(buf);
+
+	/* Animation parameters */
+	const int circle_radius = 16;   /* Circle radius */
+	const int total_frames = 8;     /* Total frames in animation */
+
+	/* Calculate scale based on frame (expand from 0.5 to 1.0, then back to 0.5) */
+	/* Using sine wave for smooth animation - same as recording animation */
+	float phase = (float)frame / (float)total_frames;  /* 0.0 to 1.0 */
+	float sine_val = (1.0f - (float)cosf(phase * 6.28318f)) / 2.0f;  /* 0 to 1 to 0 */
+	float scale = 0.5f + (sine_val * 0.5f);  /* 0.5 to 1.0 to 0.5 */
+
+	/* Draw the animated circle */
+	draw_circle_mark(buf, circle_radius, scale);
+}
+
+/**
+ * @brief Show a single frame of the circle mark animation
+ * @param frame Animation frame number (0-7 for 8-frame loop)
+ *
+ * Renders an animated circle (●) that pulses in size.
+ * Call repeatedly with incrementing frame numbers for smooth animation.
+ */
+void display_show_mark_cross_frame(int frame)
+{
+	render_mark_page(display_buffer, frame);
+	flush_display();
+}
