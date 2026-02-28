@@ -146,6 +146,7 @@ class FileTransfer:
         stop_recording: bool = False,
         continuous: bool = False,
         timeout: float = 300.0,
+        start_file: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Download all files from a recording session.
@@ -157,6 +158,7 @@ class FileTransfer:
             stop_recording: Stop recording after starting download
             continuous: Keep waiting for new files (for active recordings)
             timeout: Maximum wait time in seconds
+            start_file: Optional filename to start from (e.g., "0012.opus")
 
         Returns:
             Dict with download results including file count and paths
@@ -179,7 +181,10 @@ class FileTransfer:
                 break
 
         # Start download
-        response = await self.device.send_command(f"AT+DOWNLOAD={session_id}")
+        if start_file:
+            response = await self.device.send_command(f"AT+DOWNLOAD={session_id}:{start_file}")
+        else:
+            response = await self.device.send_command(f"AT+DOWNLOAD={session_id}")
         if not response.get("ok"):
             raise TransferError(response.get("error", "Failed to start download"))
 
@@ -418,22 +423,43 @@ class SessionSync(FileTransfer):
         # Check for existing files
         existing_files = sorted(output_dir.glob("*.opus"))
 
-        # Get session info
-        sessions = await self.commands.list_sessions()
-        session_info = None
-        for s in sessions:
-            if s.id == session_id:
-                session_info = s
-                break
-
-        if session_info:
+        # Get session info from device (includes synced_files count)
+        try:
+            session_info = await self.commands.get_session_info(session_id)
             total_files = session_info.files
-        else:
-            total_files = 0
+            synced_files = session_info.synced_files
+        except Exception:
+            # Fallback to list_sessions if get_session_info fails
+            sessions = await self.commands.list_sessions()
+            session_info = None
+            synced_files = 0
+            for s in sessions:
+                if s.id == session_id:
+                    session_info = s
+                    break
+            if session_info:
+                total_files = session_info.files
+            else:
+                total_files = 0
+
+        # Determine start file based on synced_files from device
+        start_file = None
+        if synced_files > 0 and synced_files < total_files:
+            # Start from the file after the last synced file
+            next_num = synced_files + 1
+            start_file = f"{next_num:04d}.opus"
+        elif existing_files:
+            # Fallback: check local files if device doesn't have synced info
+            try:
+                last_num = int(existing_files[-1].stem)
+                next_num = last_num + 1
+                start_file = f"{next_num:04d}.opus"
+            except ValueError:
+                pass
 
         # Check if already synced (all files exist locally)
         # Skip this check in continuous mode - always check for new files
-        if not continuous and total_files > 0 and len(existing_files) >= total_files:
+        if not continuous and total_files > 0 and synced_files >= total_files:
             merged_path = output_dir / f"{session_id}.opus"
             result = {
                 "session_id": session_id,
@@ -447,21 +473,19 @@ class SessionSync(FileTransfer):
                 result["merged_file"] = str(merged_path)
             return result
 
-        # Start download (resume from last file if any)
-        start_file = None
-        if existing_files:
-            try:
-                last_num = int(existing_files[-1].stem)
-                start_file = f"{last_num + 1:04d}.opus"
-            except ValueError:
-                pass
+        # Log sync info
+        if start_file:
+            print(f"Resuming from: {start_file} (synced: {synced_files}/{total_files})")
+        else:
+            print(f"Starting from beginning ({total_files} files total)")
 
-        # Download with merge
+        # Download with merge (start_file is calculated above)
         result = await self.download_session(
             session_id,
             output_dir,
             progress_callback=progress_callback,
             continuous=continuous,
+            start_file=start_file,
         )
 
         # Delete from device if requested

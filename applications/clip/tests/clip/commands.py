@@ -66,6 +66,7 @@ class SessionInfo:
     id: str
     files: int
     size: int
+    synced_files: int = 0  # Number of files synced/transferred
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SessionInfo':
@@ -537,6 +538,26 @@ class ClipCommands:
         response = await self._send_and_check("AT+LIST")
         data = response.get('data', [])
         return [SessionInfo.from_dict(s) for s in data]
+
+    async def get_session_info(self, session_id: str) -> 'SessionInfo':
+        """
+        Get detailed session information including synced files count.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            SessionInfo with files, size, and synced_files fields
+        """
+        response = await self._send_and_check(f"AT+LIST={session_id}")
+        data = response.get('data', {})
+        # Create SessionInfo with synced_files
+        return SessionInfo(
+            id=session_id,
+            files=data.get('files', 0),
+            size=data.get('size', 0),
+            synced_files=data.get('synced', 0),
+        )
 
     async def list_session_files(self, session_id: str) -> List[str]:
         """
