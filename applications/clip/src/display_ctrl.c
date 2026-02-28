@@ -210,10 +210,10 @@ void ui_handle_recording_change(bool recording)
 		ui_set_state(UI_STATE_RECORDING_INFO);
 		LOG_INF("[UI] Recording started");
 	} else {
-		/* Recording stopped */
+		/* Recording stopped - show status page */
 		recording_active = false;
-		ui_set_state(UI_STATE_IDLE);
-		LOG_INF("[UI] Recording stopped");
+		ui_set_state(UI_STATE_STATUS_SHOW);
+		LOG_INF("[UI] Recording stopped, showing status");
 	}
 }
 
