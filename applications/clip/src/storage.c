@@ -139,6 +139,22 @@ int storage_create_session(const char *session_id)
 
 		/* Small delay to ensure filesystem metadata is written to SD card */
 		k_msleep(50);
+
+		/* Create empty marks.bin file for bookmarks */
+		char marks_path[128];
+		struct fs_file_t marks_file;
+		snprintf(marks_path, sizeof(marks_path), "%s/marks.bin", dir_path);
+		fs_file_t_init(&marks_file);
+		rc = fs_open(&marks_file, marks_path, FS_O_CREATE | FS_O_WRITE);
+		if (rc == 0) {
+			/* Write empty bookmark header */
+			char header[6] = "BMRK";
+			memset(&header[4], 0, 2);  /* count = 0 */
+			fs_write(&marks_file, header, 6);
+			fs_close(&marks_file);
+		} else {
+			LOG_DBG("Could not create marks.bin: %d", rc);
+		}
 	}
 
 	/* Store current session directory */
