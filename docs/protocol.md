@@ -454,14 +454,14 @@ AT+MARK
 
 ##### AT+LIST - List Sessions/Files
 
-List all sessions or files in a session.
+List all sessions or get session details.
 
 **Request (All Sessions):**
 ```
 AT+LIST
 ```
 
-**Request (Session Files):**
+**Request (Session Details):**
 ```
 AT+LIST=20240203_100000
 ```
@@ -470,16 +470,44 @@ AT+LIST=20240203_100000
 ```json
 {
   "ok": true,
-  "data": ["20240203_100000", "20240203_120000", "20240203_140000"]
+  "data": [
+    {"id": "20240203_100000", "files": 30, "size": 5242880},
+    {"id": "20240203_120000", "files": 15, "size": 2621440}
+  ]
 }
 ```
 
-**Response (Session Files):**
+**Response (Session Details):**
 ```json
 {
   "ok": true,
-  "data": ["001.opus", "002.opus", "003.opus"]
+  "data": {
+    "files": 30,
+    "size": 5242880,
+    "synced": 15
+  }
 }
+```
+
+**Fields:**
+- `id`: Session ID
+- `files`: Total number of audio files in session
+- `size`: Total bytes of all files
+- `synced`: Number of files successfully transferred (only in session details)
+
+**Usage Examples:**
+```
+# List all sessions
+AT+LIST
+# → Returns list with id, files, size for each session
+
+# Get session details (including synced count)
+AT+LIST=20240203_100000
+# → Returns files, size, synced for specific session
+
+# Resume transfer from next file after synced count
+# If synced=15, resume from file 0016.opus
+AT+DOWNLOAD=20240203_100000:0016.opus
 ```
 
 **Error Cases:**
@@ -593,9 +621,17 @@ AT+DOWNLOAD=20250225_143000
 # Download single file
 AT+DOWNLOAD=20250225_143000/015.opus
 
-# Resume from specific file (skip files before this)
-AT+DOWNLOAD=20250225_143000:020.opus
+# Resume from specific file (skips files before start_file)
+# Use format: 4-digit number with leading zeros + .opus extension
+AT+DOWNLOAD=20250225_143000:0016.opus
 ```
+
+**Resume Logic:**
+1. Client queries session details: `AT+LIST=<session_id>`
+2. Response includes `synced` count (e.g., 15 files already transferred)
+3. Client calculates next file: `synced + 1` → file 0016.opus
+4. Client sends: `AT+DOWNLOAD=<session_id>:0016.opus`
+5. Device transfers from 0016.opus onwards
 
 **Response (Start):**
 ```json
@@ -1525,38 +1561,37 @@ App                          Device
 
 ### 6.1 Session Metadata (session.json)
 
-Stored in each session directory, contains complete session information.
+Stored in each session directory, contains session information and sync progress.
+
+**Created**: When file transfer starts (created if doesn't exist)
+**Updated**: When transfer ends (synced_files count is saved)
 
 ```json
 {
-  "session_id": "20240203_100000",
-  "start_time": "2024-02-03T10:00:00Z",
-  "end_time": "2024-02-03T10:10:00Z",
+  "id": "20240203_100000",
   "duration": 600,
-  "mode": "normal",
-  "bitrate": 48000,
-  "channels": "stereo",
-  "sample_rate": 16000,
-  "file_count": 1,
-  "files": ["001.opus"],
-  "total_size": 3600000,
-  "mark_count": 3
+  "files": 30,
+  "synced": 15
 }
 ```
 
 **Fields:**
-- `session_id`: Unique identifier (timestamp)
-- `start_time`: ISO 8601 start timestamp
-- `end_time`: ISO 8601 end timestamp
+- `id`: Session ID (timestamp format: YYYYMMDD_HHMMSS)
 - `duration`: Recording length in seconds
-- `mode`: "normal" or "enhanced"
-- `bitrate`: Opus bitrate in bps
-- `channels`: "mono" or "stereo"
-- `sample_rate`: Audio sample rate (Hz)
-- `file_count`: Number of Opus files
-- `files`: List of file names
-- `total_size`: Total bytes of all files
-- `mark_count`: Number of bookmarks
+- `files`: Total number of audio files in session
+- `synced`: Number of files that have been successfully transferred
+
+**Purpose:**
+- Track transfer progress for resume functionality
+- Enable cleanup of already-transferred files
+- Support disconnect/reconnect scenarios
+
+**Example Usage:**
+```
+# Session has 30 files, 15 have been transferred
+# Next transfer should start from file 0016.opus
+AT+DOWNLOAD=20240203_100000:0016.opus
+```
 
 ### 6.2 File List (files.lst)
 

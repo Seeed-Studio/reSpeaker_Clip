@@ -138,6 +138,19 @@ sessions = await cmds.list_sessions()
 
 for session in sessions:
     print(f"{session.id}: {session.files} files, {session.size} bytes")
+    # Session info includes synced_files count
+    synced = getattr(session, 'synced_files', 0)
+    print(f"  Synced: {synced}/{session.files}")
+```
+
+### Get Session Details
+
+```python
+# Get detailed session info including synced_files count
+session_info = await cmds.get_session_info("20250227_120000")
+print(f"Files: {session_info.files}")
+print(f"Synced: {session_info.synced_files}")
+print(f"Size: {session_info.size} bytes")
 ```
 
 ### Sync Latest Session
@@ -145,44 +158,34 @@ for session in sessions:
 ```python
 from clip import SessionSync
 
-sync = SessionSync(device, output_dir=Path("downloads"))
+sync = SessionSync(device)
 
-# Sync latest session
-result = await sync.sync_latest()
-print(f"Synced {result['files']} files")
+# Sync latest session (auto-detects and resumes from last synced file)
+result = await sync.sync("20250227_120000", Path("downloads"))
+
+if result.get('status') == 'already_synced':
+    print("Session already synced")
+else:
+    print(f"Synced {result['file_count']} files")
 ```
 
-### Sync Specific Session
+### Sync with Resume Support
 
 ```python
-# Sync specific session
-result = await sync.sync_session("20250227_120000")
+# sync() automatically detects synced_files and resumes
+# No need to manually calculate start file
 
-if result['status'] == 'success':
-    print(f"Sync successful: {result['files']} files")
-```
-
-### Sync All Sessions
-
-```python
-# Sync all sessions and delete from device
-results = await sync.sync_all(delete_after=True)
-
-for result in results:
-    if result['status'] == 'success':
-        print(f"✓ {result['session']}")
-    else:
-        print(f"✗ {result['session']}: {result.get('error')}")
-```
-
-### Resume Transfer
-
-```python
-# Resume syncing from specific file
-result = await sync.resume_from(
+# If 15 files were synced, it will automatically start from 0016.opus
+result = await sync.sync(
     session_id="20250227_120000",
-    start_file="010.opus"
+    output_dir=Path("downloads"),
+    delete_after=True  # Delete from device after successful sync
 )
+
+# Result includes:
+# - file_count: Number of files synced this session
+# - total_size: Total bytes transferred
+# - merged_file: Path to merged opus file (if created)
 ```
 
 ## Configuration Management
@@ -218,6 +221,60 @@ await cmds.set_config("noise_suppress", -30)  # dB
 ```
 
 ## Command Line Tools
+
+### record.py - Record and Sync in Real-Time
+
+```bash
+# Record and sync (stop with Ctrl+C)
+python tools/record.py
+
+# Record in enhanced mode (mono + DSP)
+python tools/record.py --mode enhanced
+
+# Record for 30 seconds then stop
+python tools/record.py --duration 30
+
+# Record to custom directory
+python tools/record.py --output ./my_recordings
+
+# Specify device by MAC address
+python tools/record.py --device AA:BB:CC:DD:EE:FF
+```
+
+**Features:**
+- Real-time sync while recording
+- Progress display with file count and speed
+- Auto-merge files after transfer
+- Deletes files from device after sync
+
+### sync.py - Sync Sessions with Resume Support
+
+```bash
+# Sync latest session (auto-detect)
+python tools/sync.py
+
+# Sync specific session
+python tools/sync.py --session 20250227_120000
+
+# Sync all sessions
+python tools/sync.py --all-sessions
+
+# Keep sessions on device after sync
+python tools/sync.py --keep
+
+# Show status only (don't sync)
+python tools/sync.py --status
+
+# Specify output directory
+python tools/sync.py --output ./downloads
+```
+
+**Features:**
+- Auto-resume from last synced file
+- Progress display with transfer speed
+- Handles recording state (continuous mode)
+- Ctrl+C support with graceful cancellation
+- Auto-merge files into single opus file
 
 ### clip-cli - Command Line Interface
 
@@ -322,11 +379,13 @@ async def record_and_sync():
         print("Recording complete")
 
         # 8. Sync files
-        sync = SessionSync(device, output_dir=Path("recordings"))
-        result = await sync.sync_session(session_id)
+        sync = SessionSync(device)
+        result = await sync.sync(session_id, Path("recordings"))
 
-        if result['status'] == 'success':
-            print(f"Synced {result['files']} files")
+        if result.get('status') == 'already_synced':
+            print("Already synced")
+        elif result['file_count'] > 0:
+            print(f"Synced {result['file_count']} files")
 
         # 9. Convert to WAV
         from tools.decode_opus import decode_raw_opus
@@ -385,11 +444,13 @@ async def auto_record():
 
         # Auto sync
         print("Syncing files...")
-        sync = SessionSync(device, output_dir=OUTPUT_DIR)
-        sync_result = await sync.sync_session(session_id)
+        sync = SessionSync(device)
+        sync_result = await sync.sync(session_id, OUTPUT_DIR)
 
-        if sync_result['status'] == 'success':
-            print(f"Sync successful: {sync_result['files']} files")
+        if sync_result.get('status') == 'already_synced':
+            print("Already synced")
+        elif sync_result['file_count'] > 0:
+            print(f"Sync successful: {sync_result['file_count']} files")
 
         return 0
 
@@ -509,6 +570,86 @@ async def batch_process_operations():
 ```
 
 ## More Examples
+
+### Using the record.py Tool
+
+The `record.py` tool combines recording and real-time sync in one command:
+
+```bash
+# Simple record and sync (Ctrl+C to stop)
+python tools/record.py
+
+# Record with specific mode and duration
+python tools/record.py --mode enhanced --duration 60
+```
+
+**Output:**
+```
+============================================================
+ReSpeaker Clip - Record & Sync
+============================================================
+
+Connecting to device...
+Battery: 85%
+Storage: 1.8 GB free
+
+Starting recording in enhanced mode...
+Session ID: 20250228_143000
+
+Starting real-time sync to: recordings/20250228_143000
+Recording... (Press Ctrl+C to stop)
+
+[Recording] 00:00:10   | Files: 2 | Total: 143.2 KB | Speed: 14.2 KB/s
+[Recording] 00:00:20   | Files: 4 | Total: 286.4 KB | Speed: 14.3 KB/s
+
+Stopping recording...
+Syncing files...
+
+============================================================
+Recording Summary
+============================================================
+  Session: 20250228_143000
+  Duration: 00:00:30
+  Merged file: 20250228_143000.opus (429.6 KB)
+  Total synced: 429.6 KB
+  Avg speed: 14.3 KB/s
+  Location: recordings/20250228_143000
+============================================================
+```
+
+### Using the sync.py Tool
+
+The `sync.py` tool handles session synchronization with resume support:
+
+```bash
+# Sync latest session (auto-detects)
+python tools/sync.py
+
+# Sync with progress display
+python tools/sync.py --session 20250228_143000
+```
+
+**Output (with resume):**
+```
+============================================================
+Sync Session: 20250228_143000
+============================================================
+Resuming from: 0016.opus (synced: 15/30)
+  Progress: 0016.opus (1 files, 71.3 KB, 5s, 14.1 KB/s)
+  Progress: 0018.opus (3 files, 175.8 KB, 11s, 15.8 KB/s)
+  ...
+  Progress: 0030.opus (15 files, 1070.6 KB, 75s, 14.2 KB/s)
+
+Sync Complete!
+============================================================
+  Session: 20250228_143000
+  Files: 15
+  Total: 1.04 MB
+  Avg speed: 14.2 KB/s
+  Merged: downloads/20250228_143000/20250228_143000.opus
+  Location: downloads/20250228_143000
+============================================================
+```
 
 See `examples/` directory for more complete examples:
 
