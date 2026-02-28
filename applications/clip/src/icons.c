@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "clip/icons.h"
+#include "icons.h"
 #include <zephyr/kernel.h>
 
 /* OLED display dimensions (must match display.c) */

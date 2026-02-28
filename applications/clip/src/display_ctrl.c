@@ -17,6 +17,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "ble_svc.h"
+#include "transfer.h"
 
 LOG_MODULE_REGISTER(display_ctrl, LOG_LEVEL_INF);
 
@@ -108,13 +109,18 @@ static void ui_show_mark_cross(void)
 static void ui_show_status_bar(void)
 {
 	uint8_t batt_percent;
+	bool charging;
 	bool ble_connected;
+	bool transferring;
 
+	/* Get system status */
 	batt_percent = battery_get_level();
+	charging = battery_is_charging();
 	ble_connected = (ble_svc_get_connection() != NULL);
+	transferring = transfer_is_active();
 
-	LOG_INF("[UI] BAT:%u%% BLE:%s",
-		batt_percent, ble_connected ? "OK" : "--");
+	/* Display on OLED */
+	display_show_info(batt_percent, charging, ble_connected, transferring);
 }
 
 static void ui_screen_off(void)

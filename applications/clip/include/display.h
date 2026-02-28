@@ -35,4 +35,17 @@ void display_fill(void);
  */
 void display_show_recording(bool enhanced_mode);
 
+/**
+ * @brief Show info page with battery and status
+ * @param battery_percent Battery percentage (0-100)
+ * @param charging Charging status
+ * @param ble_connected BLE connection status
+ * @param transferring File transfer status
+ *
+ * Displays:
+ * - Battery icon + percentage (e.g., "85%")
+ * - BLE icon (if connected) or Transfer icon (if transferring)
+ */
+void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring);
+
 #endif /* DISPLAY_H */

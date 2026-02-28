@@ -9,8 +9,12 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
+
+#include "icons.h"
 
 LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 
@@ -419,4 +423,213 @@ void display_fill(void)
 
 	memset(display_buffer, 0xFF, sizeof(display_buffer));
 	display_write(display_dev, 0, 0, &desc, display_buffer);
+}
+
+/* ========================================
+ * Info Page Display - Battery & Status
+ * ======================================== */
+
+/* Display layout constants */
+#define BATTERY_TO_DIGITS_OFFSET 2    /* Pixels between battery icon and first digit */
+#define PERCENT_OFFSET_FROM_DIGITS 1  /* Pixels between last digit and % sign */
+#define DIGIT_WIDTH 6                 /* Width of each digit in pixels */
+#define DIGIT_GAP 1                   /* Gap between digits in pixels */
+
+/**
+ * @brief 6x12 Digits in Row-Major Format (for icon_draw_bitmap)
+ * Converted from Spleen 6x12 BDF
+ * Format: row-major, 1 byte per row (6 pixels in high bits)
+ */
+static const uint8_t digit_6x12_row_major[10][12] = {
+	/* '0' */
+	{0x00, 0x70, 0x88, 0x98, 0xA8, 0xC8, 0x88, 0x88, 0x70, 0x00, 0x00, 0x00},
+	/* '1' */
+	{0x00, 0x20, 0x60, 0x20, 0x20, 0x20, 0x20, 0x20, 0x70, 0x00, 0x00, 0x00},
+	/* '2' */
+	{0x00, 0x70, 0x88, 0x08, 0x08, 0x70, 0x80, 0x80, 0xF8, 0x00, 0x00, 0x00},
+	/* '3' */
+	{0x00, 0x70, 0x88, 0x08, 0x30, 0x08, 0x08, 0x88, 0x70, 0x00, 0x00, 0x00},
+	/* '4' */
+	{0x00, 0x80, 0x80, 0x90, 0x90, 0x90, 0xF8, 0x10, 0x10, 0x00, 0x00, 0x00},
+	/* '5' */
+	{0x00, 0xF8, 0x80, 0x80, 0xF0, 0x08, 0x08, 0x08, 0xF0, 0x00, 0x00, 0x00},
+	/* '6' */
+	{0x00, 0x70, 0x80, 0x80, 0xF0, 0x88, 0x88, 0x88, 0x70, 0x00, 0x00, 0x00},
+	/* '7' */
+	{0x00, 0xF8, 0x88, 0x08, 0x10, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00},
+	/* '8' */
+	{0x00, 0x70, 0x88, 0x88, 0x70, 0x88, 0x88, 0x88, 0x70, 0x00, 0x00, 0x00},
+	/* '9' */
+	{0x00, 0x70, 0x88, 0x88, 0x88, 0x78, 0x08, 0x08, 0x70, 0x00, 0x00, 0x00},
+};
+
+/**
+ * @brief 8x8 Percent Sign (Public Domain)
+ * Source: https://github.com/dhepper/font8x8
+ */
+static const uint8_t percent_8x8[8] = {0x00, 0x63, 0x33, 0x18, 0x0C, 0x66, 0x63, 0x00};
+
+/**
+ * @brief Draw digit using row-major format (6x12 pixels)
+ */
+static void draw_digit_large(uint8_t *buf, char c, int x, int y)
+{
+	if (c >= '0' && c <= '9') {
+		int digit = c - '0';
+		const uint8_t *bitmap = digit_6x12_row_major[digit];
+		icon_draw_bitmap(buf, x, y, bitmap, 6, 12);
+	}
+}
+
+/**
+ * @brief Draw percent sign (8x8 pixels)
+ */
+static void draw_large_percent(uint8_t *buf, int x, int y)
+{
+	for (int row = 0; row < 8; row++) {
+		uint8_t row_data = percent_8x8[row];
+		for (int col = 0; col < 8; col++) {
+			if (row_data & (1 << (7 - col))) {
+				set_pixel_direct(buf, x + col, y + row);
+			}
+		}
+	}
+}
+
+/**
+ * @brief Draw battery icon based on charging status and level
+ */
+static void draw_battery_by_level(uint8_t *buf, int x, int y, uint8_t percent, bool charging)
+{
+	icon_id_t icon_id;
+
+	if (charging) {
+		icon_id = ICON_BATTERY_CHARGING;
+	} else if (percent >= 50) {
+		icon_id = ICON_BATTERY_FULL;
+	} else {
+		icon_id = ICON_BATTERY_LOW;
+	}
+
+	const uint8_t *bitmap = icon_get_bitmap(icon_id, NULL, NULL);
+	if (bitmap) {
+		icon_draw_bitmap(buf, x, y, bitmap, ICON_WIDTH, ICON_HEIGHT);
+	}
+}
+
+/**
+ * @brief Draw BLE connection icon
+ */
+static void draw_ble_icon(uint8_t *buf, int x, int y, bool connected)
+{
+	if (connected) {
+		const uint8_t *bitmap = icon_get_bitmap(ICON_BLE_CONNECTED, NULL, NULL);
+		if (bitmap) {
+			icon_draw_bitmap(buf, x, y, bitmap, ICON_WIDTH, ICON_HEIGHT);
+		}
+	}
+}
+
+/**
+ * @brief Draw transfer icon
+ */
+static void draw_transfer_icon(uint8_t *buf, int x, int y)
+{
+	const uint8_t *bitmap = icon_get_bitmap(ICON_WIFI_TRANSFER, NULL, NULL);
+	if (bitmap) {
+		icon_draw_bitmap(buf, x, y, bitmap, ICON_WIDTH, ICON_HEIGHT);
+	}
+}
+
+/* ========================================
+ * Info Page Rendering
+ * ======================================== */
+
+/**
+ * @brief Display info data structure
+ */
+typedef struct {
+	uint8_t battery_percent;
+	bool charging;
+	bool ble_connected;
+	bool transferring;
+} display_info_t;
+
+/**
+ * @brief Render info page with battery and status
+ * @param buf Frame buffer
+ * @param info Display info data (NULL for defaults)
+ */
+static void render_info_page(uint8_t *buf, const display_info_t *info)
+{
+	clear_screen(buf);
+
+	/* Default values if info is NULL */
+	uint8_t battery = info ? info->battery_percent : 100;
+	bool charging = info ? info->charging : false;
+	bool ble_connected = info ? info->ble_connected : false;
+	bool transferring = info ? info->transferring : false;
+
+	/*
+	 * UI Layout (88px x 48px):
+	 *
+	 * Position breakdown:
+	 * - Battery icon:     (4, 16) - 16x16, vertically centered
+	 * - "100" text:       (19, 16) - aligned with battery top
+	 * - "%" symbol:        (45, 15) - large percent
+	 * - BLE icon:         (52, 17) - 16x16
+	 * - Transfer icon:     (68, 17) - 16x16
+	 */
+
+	/* 1. Battery icon at (4, 16) */
+	draw_battery_by_level(buf, 4, 16, battery, charging);
+
+	/* 2. Battery percentage "100" text - scaled font (6x12 pixels) */
+	char pct_str[8];
+	snprintk(pct_str, sizeof(pct_str), "%u", battery);
+	int digit_x = 16 + BATTERY_TO_DIGITS_OFFSET;
+	int digit_y = 20;  /* Vertically centered with battery icon */
+	const char *p = pct_str;
+	while (*p && digit_x < OLED_WIDTH - 6) {
+		draw_digit_large(buf, *p, digit_x, digit_y);
+		digit_x += DIGIT_WIDTH + DIGIT_GAP;
+		p++;
+	}
+
+	/* 3. Percent symbol "%" (8x8 pixels) */
+	int percent_x = digit_x + PERCENT_OFFSET_FROM_DIGITS;
+	int percent_y = 20;
+	draw_large_percent(buf, percent_x, percent_y);
+
+	/* 4. Connection/Transfer icons at (52, 17) and (68, 17) */
+	/* Priority: Transferring > BLE > Nothing */
+	if (transferring) {
+		draw_transfer_icon(buf, 68, 17);
+	} else if (ble_connected) {
+		draw_ble_icon(buf, 68, 17, true);
+	}
+}
+
+/* ========================================
+ * Public API - Info Display
+ * ======================================== */
+
+/**
+ * @brief Show info page with battery and status
+ * @param battery_percent Battery percentage (0-100)
+ * @param charging Charging status
+ * @param ble_connected BLE connection status
+ * @param transferring File transfer status
+ */
+void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring)
+{
+	display_info_t info = {
+		.battery_percent = battery_percent,
+		.charging = charging,
+		.ble_connected = ble_connected,
+		.transferring = transferring,
+	};
+
+	render_info_page(display_buffer, &info);
+	flush_display();
 }
