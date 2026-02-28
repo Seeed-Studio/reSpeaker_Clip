@@ -707,11 +707,11 @@ static void draw_circle_mark(uint8_t *buf, int radius, float scale)
 }
 
 /**
- * @brief Render mark page with circle animation
+ * @brief Render dot circle animation frame
  * @param buf Frame buffer
  * @param frame Animation frame (0-7 for 8-frame loop)
  */
-static void render_mark_page(uint8_t *buf, int frame)
+static void render_dot_circle_page(uint8_t *buf, int frame)
 {
 	clear_screen(buf);
 
@@ -732,15 +732,15 @@ static void render_mark_page(uint8_t *buf, int frame)
 }
 
 /**
- * @brief Show a single frame of the circle mark animation
+ * @brief Show a single frame of the dot circle animation
  * @param frame Animation frame number (0-7 for 8-frame loop)
  *
  * Renders an animated circle (●) that pulses in size.
  * Call repeatedly with incrementing frame numbers for smooth animation.
  */
-void display_show_mark_cross_frame(int frame)
+void display_show_dot_circle_frame(int frame)
 {
-	render_mark_page(display_buffer, frame);
+	render_dot_circle_page(display_buffer, frame);
 	flush_display();
 }
 

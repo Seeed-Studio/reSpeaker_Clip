@@ -138,14 +138,14 @@ static void ui_show_recording_dot(void)
 
 		/* Play the circle animation once */
 		for (int frame = 0; frame < MARK_CIRCLE_FRAMES; frame++) {
-			display_show_mark_cross_frame(frame);
+			display_show_dot_circle_frame(frame);
 			k_sleep(K_MSEC(MARK_CIRCLE_FRAME_MS));
 		}
 
 		dot_animation_played = true;
 	} else {
 		/* Just show stable frame */
-		display_show_mark_cross_frame(MARK_STABLE_FRAME);
+		display_show_dot_circle_frame(MARK_STABLE_FRAME);
 	}
 }
 
