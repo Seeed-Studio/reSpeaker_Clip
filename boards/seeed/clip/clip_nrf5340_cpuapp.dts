@@ -206,9 +206,9 @@
 		width = <88>;
 		height = <48>;  /* Actual display resolution */
 		segment-offset = <0>;
-		page-offset = <0>;
-		display-offset = <8>;  /* Center 48 rows in 64 COM lines: (64-48)/2 */
-		multiplex-ratio = <63>;  /* Activate all 64 COM lines to prevent bottom garbage */
+		page-offset = <1>;  /* +1 page (8 pixels) to center content visually */
+		display-offset = <0>;  /* Hardware COM start from 0 */
+		multiplex-ratio = <63>;  /* Activate all 64 COM lines */
 		prechargep = <0x22>;
 		segment-remap = <0>;
 		com-invdir = <0>;

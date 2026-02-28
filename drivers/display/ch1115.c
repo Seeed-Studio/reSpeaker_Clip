@@ -336,13 +336,44 @@ static int ch1115_init(const struct device *dev)
         return ret;
     }
 
-    data->clear_buf = k_malloc((size_t)(config->width * config->height / 8U));
+    /*
+     * Allocate clear buffer for application use.
+     * Size based on logical resolution (88x48 = 528 bytes).
+     */
+    data->clear_buf = k_malloc(config->width * config->height / 8U);
     if (data->clear_buf == NULL) {
         return -ENOMEM;
     }
 
-    /* Clear the display to prevent showing random RAM content on startup */
-    ch1115_clear(dev);
+    /*
+     * Clear ALL activated COM lines to prevent random RAM display on startup.
+     *
+     * Hardware context:
+     * - multiplex_ratio=63 activates all 64 COM lines (COM0-COM63)
+     * - OLED panel has only 48 physical rows
+     * - Unclear rows show random RAM content (garbage)
+     *
+     * Solution: Clear all 64 rows at init, then use 48 rows for display.
+     */
+    const int total_com_lines = config->multiplex_ratio + 1;  /* 64 rows */
+    const size_t full_clear_size = config->width * total_com_lines / 8U;
+    uint8_t *full_clear_buf = k_malloc(full_clear_size);
+
+    if (full_clear_buf) {
+        /* Clear and write all 64 rows */
+        memset(full_clear_buf, 0x00, full_clear_size);
+        struct display_buffer_descriptor full_desc = {
+            .buf_size = full_clear_size,
+            .width = config->width,
+            .height = total_com_lines,
+            .pitch = config->width,
+        };
+        ch1115_write(dev, 0, 0, &full_desc, full_clear_buf);
+        k_free(full_clear_buf);
+    } else {
+        /* Fallback: clear at least the logical height */
+        ch1115_clear(dev);
+    }
 
     return 0;
 }
