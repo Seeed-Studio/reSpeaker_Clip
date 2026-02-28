@@ -73,7 +73,8 @@ async def record_and_sync(
         # Get current state info
         state = await commands.get_state()
         print(f"Battery: {state.battery}%")
-        print(f"Storage: {format_bytes(state.free_space * 1024)} free")
+        # free_space is in MB from firmware
+        print(f"Storage: {format_bytes(state.free_space * 1024 * 1024)} free")
 
         # Start recording
         print(f"\nStarting recording in {mode} mode...")

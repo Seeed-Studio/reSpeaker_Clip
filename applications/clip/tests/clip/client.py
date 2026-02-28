@@ -68,6 +68,15 @@ class ClipDevice:
         # Event loop reference for thread-safe queue puts
         self._loop = None
 
+        # File transfer state
+        self._downloading = False
+        self._session_files = {}  # {filename: bytes}
+        self._current_file_data = bytearray()
+        self._current_filename = None
+        self._transfer_complete = False
+        self._canceled = False
+        self._file_lock = threading.Lock()
+
     async def connect(self, timeout: float = CONNECT_TIMEOUT) -> None:
         """Connect to the device."""
         if self._connected:
@@ -227,7 +236,54 @@ class ClipDevice:
             # Try to parse and queue complete JSON objects
             try:
                 parsed = json.loads(response_str)
-                # Successfully parsed complete JSON
+
+                # Check if this is a file_complete event
+                event_type = parsed.get("event", "")
+                if event_type == "file_complete":
+                    filename = parsed.get("filename", "")
+                    if self._debug:
+                        print(f"[Notification] file_complete: {filename}, size={len(self._current_file_data)}")
+
+                    # Save completed file to session_files
+                    with self._file_lock:
+                        if len(self._current_file_data) > 0:
+                            save_filename = self._current_filename or filename
+                            if save_filename:
+                                self._session_files[save_filename] = bytes(self._current_file_data)
+                                if self._debug:
+                                    print(f"[Notification] Saved: {save_filename} ({len(self._current_file_data)} bytes)")
+                            self._current_file_data = bytearray()
+                            self._current_filename = None
+
+                    # Continue - don't queue file_complete events as responses
+                    self._response_buffer.clear()
+                    return
+
+                # Check if this is a transfer_complete event
+                if event_type == "transfer_complete":
+                    session_id = parsed.get("session_id", "")
+                    files_count = parsed.get("files", 0)
+                    if self._debug:
+                        print(f"[Notification] transfer_complete: {session_id}, files={files_count}")
+                    self._transfer_complete = True
+                    # Continue - don't queue transfer_complete events as responses
+                    self._response_buffer.clear()
+                    return
+
+                # Check if this is a file_ready event
+                if event_type == "file_ready":
+                    filename = parsed.get("filename", "")
+                    size = parsed.get("size", 0)
+                    if self._debug:
+                        print(f"[Notification] file_ready: {filename} ({size} bytes)")
+                    with self._file_lock:
+                        if self._current_filename is None or self._current_filename == filename:
+                            self._current_filename = filename
+                    # Continue - don't queue file_ready events as responses
+                    self._response_buffer.clear()
+                    return
+
+                # Successfully parsed complete JSON (non-event response)
                 if self._debug:
                     print(f"[Notification] Complete response, queuing to event loop")
                 self._response_buffer.clear()
@@ -354,14 +410,25 @@ class ClipDevice:
 
     def _file_data_handler(self, sender, data: bytearray):
         """Handle file data during transfer."""
-        # TODO: Implement file data streaming
-        pass
+        with self._file_lock:
+            self._current_file_data.extend(data)
+
+    # State management methods
+    def _clear_file_state(self):
+        """Clear file transfer state."""
+        with self._file_lock:
+            self._session_files.clear()
+            self._current_file_data.clear()
+            self._current_filename = None
+            self._transfer_complete = False
+            self._canceled = False
+
+    async def cancel(self):
+        """Cancel the current transfer."""
+        self._canceled = True
 
     # Placeholder methods
     async def start_notifications(self, callback):
-        pass
-
-    def _clear_file_state(self):
         pass
 
     async def get_file_data(self) -> bytes:
