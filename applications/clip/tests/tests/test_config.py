@@ -22,13 +22,13 @@ class TestBitrate:
     async def test_set_bitrate(self, commands: ClipCommands, saved_state):
         """Should set bitrate."""
         async with saved_state:
-            # Set to 32000
-            result = await commands.set_bitrate(32000)
+            # Set to 24000
+            result = await commands.set_bitrate(24000)
             assert result is True
 
             # Verify
             bitrate = await commands.get_bitrate()
-            assert bitrate == 32000
+            assert bitrate == 24000
 
     async def test_set_multiple_bitrates(self, commands: ClipCommands, saved_state):
         """Should set multiple different bitrates."""
@@ -104,11 +104,11 @@ class TestComplexity:
     async def test_set_complexity(self, commands: ClipCommands, saved_state):
         """Should set complexity."""
         async with saved_state:
-            result = await commands.set_complexity(7)
+            result = await commands.set_complexity(1)
             assert result is True
 
             complexity = await commands.get_complexity()
-            assert complexity == 7
+            assert complexity == 1
 
     async def test_set_complexity_range(self, commands: ClipCommands, saved_state):
         """Should set all valid complexity values."""
@@ -242,7 +242,7 @@ class TestConfigBulk:
             new_config = {
                 'bitrate': 24000,  # Valid for mono mode (16000-32000)
                 'mode': 'enhanced',
-                'complexity': 8,
+                'complexity': 1,
             }
 
             await commands.set_config_dict(new_config)
@@ -250,7 +250,7 @@ class TestConfigBulk:
             # Verify
             assert await commands.get_bitrate() == 24000
             assert await commands.get_mode() == 'enhanced'
-            assert await commands.get_complexity() == 8
+            assert await commands.get_complexity() == 1
 
     async def test_config_roundtrip(self, commands: ClipCommands, saved_state):
         """Should preserve config through get/set roundtrip."""

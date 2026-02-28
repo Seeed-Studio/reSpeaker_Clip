@@ -126,6 +126,9 @@ class ClipDevice:
 
         Uses asyncio.Queue to receive responses from the background
         notification handler, properly decoupling send and receive.
+
+        Note: Automatically filters out state_change event notifications
+        and waits for the actual command response.
         """
         if not self.is_connected:
             raise ConnectionError("Not connected")
@@ -133,27 +136,58 @@ class ClipDevice:
         if self._response_queue is None:
             raise ConnectionError("Queue not initialized - not connected?")
 
-        # Clear buffer before sending new command
+        # Clear any stale responses from the queue and buffer before sending new command
+        while True:
+            try:
+                stale = self._response_queue.get_nowait()
+                print(f"[send_command] Discarding stale response: {stale[:50] if len(stale) > 50 else stale}")
+            except asyncio.QueueEmpty:
+                break
+
         with self._buffer_lock:
             self._response_buffer.clear()
 
         # Send command
+        print(f"[send_command] Sending: {command}")
         await self.client.write_gatt_char(CMD_RECV_UUID, command.encode('utf-8'))
 
         # Wait for response from queue (with timeout)
-        try:
-            response_data = await asyncio.wait_for(
-                self._response_queue.get(),
-                timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"No response to: {command}")
+        # Filter out state_change events - wait for actual command response
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            try:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed >= timeout:
+                    raise TimeoutError(f"No response to: {command}")
 
-        # Parse JSON
-        try:
-            return json.loads(response_data)
-        except json.JSONDecodeError as e:
-            raise ResponseError(f"Invalid JSON: {response_data}")
+                response_data = await asyncio.wait_for(
+                    self._response_queue.get(),
+                    timeout=timeout - elapsed
+                )
+                print(f"[send_command] Received response: {response_data[:100]}")
+
+                # Parse JSON to check if it's a state_change event
+                try:
+                    response = json.loads(response_data)
+
+                    # Check if this is a state_change event notification
+                    # These are auto-generated notifications, not command responses
+                    if isinstance(response, dict):
+                        # Check for nested event in data
+                        if 'data' in response and isinstance(response['data'], dict):
+                            if response['data'].get('event') == 'state_change':
+                                print(f"[send_command] Filtering out state_change event, waiting for actual response")
+                                continue  # Skip this and wait for next response
+
+                    # Not a state_change event, this is the actual response
+                    return response
+
+                except json.JSONDecodeError as e:
+                    # Invalid JSON, return as-is
+                    raise ResponseError(f"Invalid JSON: {response_data}")
+
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"No response to: {command}")
 
     def _notification_handler(self, sender, data: bytearray):
         """
@@ -170,24 +204,140 @@ class ClipDevice:
         with self._buffer_lock:
             self._response_buffer.extend(data)
 
+            # Try to decode and process the buffer
+            # Handle potential incomplete UTF-8 sequences at buffer boundaries
             try:
-                response_str = self._response_buffer.decode('utf-8').strip()
-                print(f"[Notification] Data: {response_str}")
+                # Try decoding - may fail if multi-byte char is split across packets
+                response_str = self._response_buffer.decode('utf-8')
+            except UnicodeDecodeError:
+                # Incomplete UTF-8 sequence, wait for more data
+                print(f"[Notification] Incomplete UTF-8 sequence, waiting for more data")
+                return
 
-                # Check if we have a complete JSON response
-                if response_str.endswith('}') or response_str.endswith(']'):
-                    self._response_buffer.clear()
-                    print(f"[Notification] Complete response, queuing to event loop")
+            print(f"[Notification] Data: {response_str}")
 
-                    # Put response in queue (thread-safe via call_soon_threadsafe)
+            # Try to parse and queue complete JSON objects
+            try:
+                parsed = json.loads(response_str)
+                # Successfully parsed complete JSON
+                print(f"[Notification] Complete response, queuing to event loop")
+                self._response_buffer.clear()
+
+                if self._loop and not self._loop.is_closed() and self._response_queue:
+                    self._loop.call_soon_threadsafe(
+                        self._response_queue.put_nowait,
+                        response_str
+                    )
+                return
+
+            except json.JSONDecodeError:
+                # Not complete JSON yet, or multiple JSON objects
+                pass
+
+            # Try to extract complete JSON object(s) from the buffer
+            # This handles cases where multiple responses are concatenated
+            remaining = response_str
+            processed_count = 0
+
+            while remaining:
+                try:
+                    # Try to parse from current position
+                    parsed = json.loads(remaining)
+
+                    # Success - queue this response
+                    processed_count += 1
+                    print(f"[Notification] Complete response #{processed_count}, queuing")
+
                     if self._loop and not self._loop.is_closed() and self._response_queue:
                         self._loop.call_soon_threadsafe(
                             self._response_queue.put_nowait,
-                            response_str
+                            remaining
                         )
-            except UnicodeDecodeError:
-                print(f"[Notification] Unicode error, clearing buffer")
-                self._response_buffer.clear()
+
+                    # We've consumed the entire remaining string
+                    remaining = ""
+                    self._response_buffer.clear()
+
+                except json.JSONDecodeError:
+                    # Try to find a complete JSON object by brace matching
+                    if not remaining.startswith('{') and not remaining.startswith('['):
+                        # Skip leading non-JSON characters
+                        print(f"[Notification] Skipping non-JSON prefix: {remaining[:20]}")
+                        # Find start of JSON
+                        start_idx = -1
+                        for i, c in enumerate(remaining):
+                            if c in '{[':
+                                start_idx = i
+                                break
+                        if start_idx >= 0:
+                            remaining = remaining[start_idx:]
+                            continue
+                        else:
+                            # No JSON found, clear buffer
+                            print(f"[Notification] No JSON found, clearing buffer")
+                            self._response_buffer.clear()
+                            break
+
+                    # Find matching closing brace
+                    if remaining.startswith('{'):
+                        depth = 0
+                        end_idx = -1
+                        in_string = False
+                        escape_next = False
+
+                        for i, c in enumerate(remaining):
+                            if escape_next:
+                                escape_next = False
+                                continue
+                            if c == '\\':
+                                escape_next = True
+                                continue
+                            if c == '"':
+                                in_string = not in_string
+                                continue
+                            if in_string:
+                                continue
+                            if c == '{':
+                                depth += 1
+                            elif c == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    end_idx = i + 1
+                                    break
+
+                        if end_idx > 0:
+                            # Extract complete JSON
+                            complete_json = remaining[:end_idx]
+
+                            # Verify it's valid
+                            json.loads(complete_json)
+
+                            # Queue it
+                            processed_count += 1
+                            print(f"[Notification] Complete response #{processed_count}, queuing")
+
+                            if self._loop and not self._loop.is_closed() and self._response_queue:
+                                self._loop.call_soon_threadsafe(
+                                    self._response_queue.put_nowait,
+                                    complete_json
+                                )
+
+                            # Continue with remaining data
+                            remaining = remaining[end_idx:].lstrip()
+                            if remaining:
+                                # Update buffer for next iteration
+                                self._response_buffer = bytearray(remaining.encode('utf-8'))
+                            else:
+                                self._response_buffer.clear()
+                            continue
+                        else:
+                            # Incomplete JSON, wait for more data
+                            print(f"[Notification] Incomplete JSON, waiting for more data")
+                            break
+
+            # Update buffer if there's remaining data
+            if remaining:
+                self._response_buffer = bytearray(remaining.encode('utf-8'))
 
     def _file_data_handler(self, sender, data: bytearray):
         """Handle file data during transfer."""

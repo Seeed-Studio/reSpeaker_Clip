@@ -895,13 +895,24 @@ static int cmd_mark(const struct at_command *cmd, char **response)
     char escaped_note[128];
     json_escape_string(escaped_note, note, sizeof(escaped_note));
 
+    /* Get current filename */
+    const char *filename = audio_get_current_filename();
+    char escaped_filename[64];
+    if (filename) {
+        json_escape_string(escaped_filename, filename, sizeof(escaped_filename));
+    } else {
+        escaped_filename[0] = '\0';
+    }
+
     snprintf(data, sizeof(data),
              "{\"timestamp\":%u,"
              "\"offset\":%u,"
-             "\"note\":\"%s\"}",
+             "\"note\":\"%s\","
+             "\"file\":\"%s\"}",
              (uint32_t)(k_uptime_get() / 1000),
              g_recording_time,
-             escaped_note);
+             escaped_note,
+             escaped_filename);
 
     return json_create_success(data, response);
 }

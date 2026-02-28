@@ -701,6 +701,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 
 		/* Update statistics */
 		stats.frames_encoded++;
+		stats.recording_time_ms = stats.frames_encoded * AUDIO_FRAME_MS;
 		stats.total_bytes += encoded_bytes;
 		recording_frame_count++;
 
@@ -1025,6 +1026,25 @@ const char *audio_get_session_id(void)
 	}
 
 	return current_session_id;
+}
+
+const char *audio_get_current_filename(void)
+{
+	/* Return current recording filename if recording is active */
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+	bool has_session = (recording_active || start_requested);
+	k_mutex_unlock(&audio_state_mutex);
+
+	if (!has_session) {
+		return NULL;
+	}
+
+	/* Check if file is open */
+	if (!current_storage_file.is_open) {
+		return NULL;
+	}
+
+	return current_storage_file.filename;
 }
 
 bool audio_is_recording(void)

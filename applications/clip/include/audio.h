@@ -149,4 +149,11 @@ int audio_add_bookmark(const char *note);
  */
 const char *audio_get_session_id(void);
 
+/**
+ * @brief Get current recording filename
+ *
+ * @return Filename string, or NULL if not recording
+ */
+const char *audio_get_current_filename(void);
+
 #endif /* AUDIO_H */
