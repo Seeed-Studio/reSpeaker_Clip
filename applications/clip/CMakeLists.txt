@@ -23,4 +23,5 @@ target_sources(app PRIVATE
     src/bookmarks.c
     src/battery.c
     src/display_ctrl.c
+    src/display.c
 )
