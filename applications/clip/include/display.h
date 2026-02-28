@@ -82,36 +82,36 @@ void display_show_mark_animation_frame(int frame, bool fast_mode);
 extern uint8_t display_buffer[];
 
 /* ========================================
- * 8x16 Font Functions
+ * 6x12 Font Functions
  * ======================================== */
 
 /**
- * @brief Draw a single 8x16 character to display buffer
+ * @brief Draw a single 6x12 character to display buffer
  * @param buf Frame buffer
  * @param c Character to draw (ASCII 32-126: space to ~)
  * @param x X position
  * @param y Y position
  *
- * Draws a single character using the 8x16 ASCII font.
+ * Draws a single character using the 6x12 ASCII font.
  * Supports uppercase (A-Z), lowercase (a-z), digits (0-9), and common symbols.
  */
-void display_draw_char_8x16(uint8_t *buf, char c, int x, int y);
+void display_draw_char_6x12(uint8_t *buf, char c, int x, int y);
 
 /**
- * @brief Draw a string using 8x16 font
+ * @brief Draw a string using 6x12 font
  * @param buf Frame buffer
  * @param str String to draw (null-terminated)
  * @param x Starting X position
  * @param y Starting Y position
  * @return X position after drawing (for chaining)
  *
- * Draws a string using the 8x16 ASCII font.
- * Each character is 8 pixels wide with 1 pixel gap (9 pixels total per character).
+ * Draws a string using the 6x12 ASCII font.
+ * Each character is 6 pixels wide.
  * Supports uppercase (A-Z), lowercase (a-z), digits (0-9), and common symbols.
  *
  * Example:
- *   display_draw_string_8x16(display_buffer, "Hello", 0, 0);
+ *   display_draw_string_6x12(display_buffer, "Hello", 0, 0);
  */
-int display_draw_string_8x16(uint8_t *buf, const char *str, int x, int y);
+int display_draw_string_6x12(uint8_t *buf, const char *str, int x, int y);
 
 #endif /* DISPLAY_H */
