@@ -14,18 +14,47 @@
 #define DISPLAY_WIDTH  88
 #define DISPLAY_HEIGHT 48
 
-/* UI state enumeration */
+/**
+ * @brief UI state enumeration (exposed for debugging)
+ */
 enum ui_state {
-	UI_STATE_IDLE,           /* IDLE: Screen off */
-	UI_STATE_STATUS_SHOW,    /* IDLE: Show status bar (on click) */
-	UI_STATE_RECORDING_INFO, /* Recording: Show time + waveform (first 3s) */
-	UI_STATE_RECORDING_DOT,  /* Recording: Show dot (after 3s) */
-	UI_STATE_MARKING,        /* Recording: Show cross mark */
-	UI_STATE_MESSAGE,        /* Show temporary message */
+	UI_STATE_OFF,            /**< Screen off (pixels cleared) */
+	UI_STATE_PAIRING_GUIDE,  /**< Show pairing guide (not bonded) */
+	UI_STATE_STATUS_BAR,     /**< Show status info (3s timeout) */
+	UI_STATE_REC_WAVE,       /**< Recording: waveform animation (first 5s) */
+	UI_STATE_REC_DOT,        /**< Recording: stable dot (stays on) */
+	UI_STATE_MARKING,        /**< Recording: mark animation (~150ms) */
 };
 
 /**
- * @brief Initialize display controller
+ * @brief UI event enumeration
+ *
+ * Post events via ui_post_event() from any thread or ISR.
+ */
+enum ui_event {
+	UI_EVT_REC_START,    /**< Recording started */
+	UI_EVT_REC_STOP,     /**< Recording stopped */
+	UI_EVT_MARK,         /**< Bookmark added during recording */
+	UI_EVT_STATUS_SHOW,  /**< Single click in idle -> show status bar */
+	UI_EVT_BONDED,       /**< BLE pairing completed -> hide pairing guide */
+};
+
+/**
+ * @brief Post an event to the UI state machine (thread-safe, ISR-safe)
+ *
+ * @param evt Event to post
+ */
+void ui_post_event(enum ui_event evt);
+
+/**
+ * @brief Get current UI state (for debugging)
+ *
+ * @return Current UI state
+ */
+enum ui_state ui_get_state(void);
+
+/**
+ * @brief Initialize display controller and start UI thread
  *
  * @return 0 on success, negative error code on failure
  */
@@ -39,89 +68,48 @@ int display_init(void);
 bool display_is_ready(void);
 
 /**
- * @brief Clear display
+ * @brief Clear display (calls oled_clear)
  */
 void display_clear(void);
 
 /**
- * @brief Update display with current recording status
- *
- * Shows recording state, time, frames, and mode.
+ * @brief Update display with current recording status (no-op, handled by UI thread)
  */
 void display_update_status(void);
 
 /**
- * @brief Show message on display
+ * @brief Show message on display (log only)
  *
- * @param msg Message to display (max 20 chars)
+ * @param msg Message to display
  */
 void display_show_message(const char *msg);
 
 /**
- * @brief Show error on display
+ * @brief Show error on display (log only)
  *
- * @param error Error message (max 20 chars)
+ * @param error Error message
  */
 void display_show_error(const char *error);
 
 /**
- * @brief Show recording indicator
+ * @brief Notify recording state change
  *
- * @param recording true if recording, false otherwise
+ * Posts UI_EVT_REC_START or UI_EVT_REC_STOP.
+ * @param recording true if recording started, false if stopped
  */
 void display_set_recording(bool recording);
 
 /**
- * @brief Update battery level display
+ * @brief Update battery level (log only)
  *
  * @param percent Battery percentage (0-100)
  */
 void display_update_battery(uint8_t percent);
 
-/* ========== UI State Machine Functions ========== */
-
-/**
- * @brief Get current UI state (thread-safe)
- *
- * @return Current UI state
- */
-enum ui_state ui_get_state(void);
-
-/**
- * @brief Set UI state (thread-safe)
- *
- * @param new_state New UI state
- */
-void ui_set_state(enum ui_state new_state);
-
-/**
- * @brief Trigger mark display (bookmark added)
- *
- * Called from button handler when bookmark is added during recording.
- * Transitions to UI_STATE_MARKING for 0.5 seconds, then back to dot.
- */
-void ui_trigger_mark(void);
-
-/**
- * @brief Trigger status bar show (button click in IDLE)
- *
- * Called from button handler when button is clicked in IDLE state.
- * Transitions to UI_STATE_STATUS_SHOW for 3 seconds, then back to IDLE.
- */
-void ui_trigger_status_show(void);
-
-/**
- * @brief Handle recording state change (start/stop)
- *
- * Called from state machine when recording starts or stops.
- * @param recording true if recording started, false if stopped
- */
-void ui_handle_recording_change(bool recording);
-
 /**
  * @brief UI thread main function
  *
- * Runs the UI state machine loop.
+ * Runs the UI event loop. Started by display_init().
  */
 void ui_thread_main(void *p1, void *p2, void *p3);
 

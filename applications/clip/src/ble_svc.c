@@ -20,6 +20,7 @@
 #include "clip.h"
 #include "transfer.h"
 #include "display.h"
+#include "display_ctrl.h"
 
 LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
 
@@ -482,6 +483,9 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("Pairing complete: addr=%s bonded=%d", addr, bonded);
+    if (bonded) {
+        ui_post_event(UI_EVT_BONDED);
+    }
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)

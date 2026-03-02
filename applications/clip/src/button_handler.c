@@ -134,7 +134,7 @@ static void button_bookmark_work_handler(struct k_work *work)
 	if (err == 0) {
 		LOG_INF("Button: Bookmark added at %u seconds", g_recording_time);
 		/* Trigger UI mark display */
-		ui_trigger_mark();
+		ui_post_event(UI_EVT_MARK);
 	} else {
 		LOG_ERR("Button: Failed to add bookmark: %d", err);
 	}
@@ -162,7 +162,7 @@ static void button_event_callback(const struct device *dev,
 		} else if (current_state == CLIP_STATE_IDLE) {
 			/* Show status bar in IDLE state */
 			LOG_INF("Button: Single click - show status bar");
-			ui_trigger_status_show();
+			ui_post_event(UI_EVT_STATUS_SHOW);
 		} else {
 			LOG_INF("Button: Short press ignored (state=%d)", current_state);
 		}

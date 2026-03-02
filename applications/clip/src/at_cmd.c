@@ -24,6 +24,7 @@
 #include "battery.h"
 #include "config.h"
 #include "ble_svc.h"
+#include "display_ctrl.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -246,12 +247,14 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
 
     snprintf(buffer, sizeof(buffer),
              "{\"state\":\"%s\","
+             "\"recording\":%s,"
              "\"battery\":%u,"
              "\"charging\":%s,"
              "\"mode\":\"%s\","
              "\"bitrate\":%u,"
              "\"free_space\":%u}",
              state_to_string(state_get_current()),
+             audio_is_recording() ? "true" : "false",
              battery_get_level(),
              battery_is_charging() ? "true" : "false",
              g_config.mode == MODE_NORMAL ? "normal" : "enhanced",
@@ -920,6 +923,9 @@ static int cmd_mark(const struct at_command *cmd, char **response)
     if (err != 0) {
         return json_create_error("Failed to add bookmark", response);
     }
+
+    /* Trigger mark animation on UI */
+    ui_post_event(UI_EVT_MARK);
 
     LOG_INF("Bookmark added at %u seconds: %s", g_recording_time, note);
 
