@@ -1,0 +1,80 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * MCUboot device tree overlay
+ *
+ * This disables unnecessary devices for MCUboot to reduce size and avoid link errors.
+ * Keep SPI3 (external flash) enabled for DFU operations.
+ */
+
+/ {
+	chosen {
+		/* Keep external flash reference - needed for DFU */
+		/* nordic,pm-ext-flash = &spi_flash; */
+	};
+};
+
+/* Disable I2C1 and related devices (PMIC, sensors) */
+&i2c1 {
+	status = "disabled";
+};
+
+/* Disable PMIC device explicitly */
+&npm1300 {
+	status = "disabled";
+};
+
+/* Disable PMIC GPIO explicitly */
+&npm1300_gpio {
+	status = "disabled";
+};
+
+/* Disable PMIC regulators */
+&npm1300_regulators {
+	status = "disabled";
+};
+
+/* Disable I2C2 and related devices (OLED display) */
+&i2c2 {
+	status = "disabled";
+};
+
+/* Disable OLED device explicitly */
+&ch1115 {
+	status = "disabled";
+};
+
+/* Keep SPI3 enabled - external flash for DFU */
+/* &spi3 must stay enabled */
+
+/* Disable SD card on SPI4 */
+&spi4 {
+	status = "disabled";
+};
+
+/* Disable QSPI WiFi */
+&qspi {
+	status = "disabled";
+};
+
+/* Disable PDM microphone */
+&pdm0 {
+	status = "disabled";
+};
+
+/* Disable USB */
+&usbd {
+	status = "disabled";
+};
+
+/* Disable regulators */
+&mic_reg {
+	status = "disabled";
+};
+
+&oled_reg {
+	status = "disabled";
+};
+
+&rfsw_reg {
+	status = "disabled";
+};

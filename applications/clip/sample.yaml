@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+sample:
+  description: ReSpeaker Clip - Voice recording device with BLE AT command control, dual-core OTA DFU support
+  name: ReSpeaker Clip Application with Dual-Core DFU
+
+common:
+  sysbuild: true
+  build_only: true
+  integration_platforms:
+    - clip/nrf5340/cpuapp
+  platform_allow:
+    - clip/nrf5340/cpuapp
+
+tests:
+  clip.app: {}
