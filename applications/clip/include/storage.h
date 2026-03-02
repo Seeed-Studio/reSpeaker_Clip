@@ -70,12 +70,15 @@ int storage_get_stats(struct storage_stats *stats);
 /**
  * @brief Create a new recording session directory
  *
- * Creates /SD:/REC/<session_id>/ directory
+ * Creates /SD:/REC/<session_id>/ directory and initial session.json
  *
  * @param session_id Session ID (YYYYMMDDHHMMSS format)
+ * @param channels Audio channels (1=mono, 2=stereo)
+ * @param sample_rate Sample rate in Hz (e.g., 16000)
+ * @param mode Recording mode ("normal" or "enhanced")
  * @return 0 on success, negative error code on failure
  */
-int storage_create_session(const char *session_id);
+int storage_create_session(const char *session_id, uint8_t channels, uint32_t sample_rate, const char *mode);
 
 /**
  * @brief Create a new recording file within a session
@@ -88,16 +91,20 @@ int storage_create_session(const char *session_id);
 int storage_create_file(struct storage_file *file, const char *session_id, uint16_t file_index);
 
 /**
- * @brief Close a recording session and create metadata files
+ * @brief Close a recording session and update metadata files
  *
- * Creates session.json and files.lst in the session directory
+ * Updates session.json with final duration and file count.
  *
  * @param session_id Session ID
  * @param duration_sec Recording duration in seconds
  * @param file_count Number of audio files in session
+ * @param channels Audio channels (1=mono, 2=stereo)
+ * @param sample_rate Sample rate in Hz (e.g., 16000)
+ * @param mode Recording mode ("normal" or "enhanced")
  * @return 0 on success, negative error code on failure
  */
-int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_t file_count);
+int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_t file_count,
+                          uint8_t channels, uint32_t sample_rate, const char *mode);
 
 /**
  * @brief Write audio frame data to file
@@ -152,6 +159,9 @@ struct storage_session_info {
 	uint64_t total_bytes;     /* Total bytes in session */
 	uint32_t synced_files;    /* Number of files successfully synced */
 	uint32_t duration_sec;    /* Duration in seconds */
+	uint8_t channels;         /* Audio channels: 1=mono, 2=stereo */
+	uint8_t sample_rate_khz;  /* Sample rate in kHz (e.g., 16) */
+	char mode[16];            /* Recording mode: "normal" or "enhanced" */
 };
 
 /**

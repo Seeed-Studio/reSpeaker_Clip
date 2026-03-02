@@ -185,13 +185,13 @@ void clip_main_loop(void);
 
 /* Audio segmentation - configurable via prj.conf or Kconfig */
 #ifndef CONFIG_AUDIO_SEGMENT_DURATION_SYNC
-#define CLIP_AUDIO_SEGMENT_DURATION_SYNC      10  /* seconds during sync */
+#define CLIP_AUDIO_SEGMENT_DURATION_SYNC      60  /* seconds during sync */
 #else
 #define CLIP_AUDIO_SEGMENT_DURATION_SYNC      CONFIG_AUDIO_SEGMENT_DURATION_SYNC
 #endif
 
 #ifndef CONFIG_AUDIO_SEGMENT_DURATION_NO_SYNC
-#define CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC   20 /* seconds when not syncing */
+#define CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC   300 /* seconds when not syncing */
 #else
 #define CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC   CONFIG_AUDIO_SEGMENT_DURATION_NO_SYNC
 #endif

@@ -448,7 +448,7 @@ AT+MARK
 
 ##### AT+LIST - List Sessions/Files
 
-List all sessions or get session details.
+List all sessions or get session details including audio format.
 
 **Request (All Sessions):**
 ```
@@ -478,7 +478,10 @@ AT+LIST=20240203_100000
   "data": {
     "files": 30,
     "size": 5242880,
-    "synced": 15
+    "synced": 15,
+    "channels": 2,
+    "sample_rate": 16000,
+    "mode": "normal"
   }
 }
 ```
@@ -488,6 +491,9 @@ AT+LIST=20240203_100000
 - `files`: Total number of audio files in session
 - `size`: Total bytes of all files
 - `synced`: Number of files successfully transferred (only in session details)
+- `channels`: Audio channels - 1=mono, 2=stereo (only in session details)
+- `sample_rate`: Sample rate in Hz, e.g., 16000 (only in session details)
+- `mode`: Recording mode - "normal" (stereo) or "enhanced" (mono with DSP) (only in session details)
 
 **Usage Examples:**
 ```
@@ -495,9 +501,9 @@ AT+LIST=20240203_100000
 AT+LIST
 # → Returns list with id, files, size for each session
 
-# Get session details (including synced count)
+# Get session details (including synced count and audio format)
 AT+LIST=20240203_100000
-# → Returns files, size, synced for specific session
+# → Returns files, size, synced, channels, sample_rate for specific session
 
 # Resume transfer from next file after synced count
 # If synced=15, resume from file 0016.opus
@@ -1625,34 +1631,42 @@ App                          Device
 
 ### 6.1 Session Metadata (session.json)
 
-Stored in each session directory, contains session information and sync progress.
+Stored in each session directory, contains session information, sync progress, and audio format.
 
-**Created**: When file transfer starts (created if doesn't exist)
-**Updated**: When transfer ends (synced_files count is saved)
+**Created**: When recording starts (session is created)
+**Updated**: When recording stops (duration, files updated) and when transfer ends (synced count)
 
 ```json
 {
   "id": "20240203_100000",
   "duration": 600,
   "files": 30,
-  "synced": 15
+  "synced": 15,
+  "channels": 2,
+  "sample_rate": 16000,
+  "mode": "normal"
 }
 ```
 
 **Fields:**
 - `id`: Session ID (timestamp format: YYYYMMDD_HHMMSS)
-- `duration`: Recording length in seconds
-- `files`: Total number of audio files in session
+- `duration`: Recording length in seconds (0 while recording)
+- `files`: Total number of audio files in session (0 while recording)
 - `synced`: Number of files that have been successfully transferred
+- `channels`: Audio channels (1=mono, 2=stereo)
+- `sample_rate`: Sample rate in Hz (e.g., 16000)
+- `mode`: Recording mode ("normal" or "enhanced")
 
 **Purpose:**
 - Track transfer progress for resume functionality
+- Store audio format for proper decoding/playback
 - Enable cleanup of already-transferred files
 - Support disconnect/reconnect scenarios
 
 **Example Usage:**
 ```
 # Session has 30 files, 15 have been transferred
+# Audio is normal mode (stereo, 2 channels) at 16kHz
 # Next transfer should start from file 0016.opus
 AT+DOWNLOAD=20240203_100000:0016.opus
 ```

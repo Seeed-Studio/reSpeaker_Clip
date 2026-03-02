@@ -227,7 +227,9 @@ class FileTransfer:
         """Wait for all session files to be received."""
         start_time = time.time()
         last_file_time = time.time()
-        no_file_timeout = 30.0 if continuous else 10.0
+        # In continuous mode, use longer timeout to accommodate long segment durations
+        # (segment duration can be up to 300 seconds when not syncing)
+        no_file_timeout = 120.0 if continuous else 30.0
 
         files_received = []
 

@@ -67,6 +67,9 @@ class SessionInfo:
     files: int
     size: int
     synced_files: int = 0  # Number of files synced/transferred
+    channels: int = 1      # Audio channels (1=mono, 2=stereo)
+    sample_rate: int = 16000  # Sample rate in Hz
+    mode: str = "normal"   # Recording mode: "normal" or "enhanced"
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SessionInfo':
@@ -74,6 +77,9 @@ class SessionInfo:
             id=data.get('id', ''),
             files=data.get('files', 0),
             size=data.get('size', 0),
+            channels=data.get('channels', 1),
+            sample_rate=data.get('sample_rate', 16000),
+            mode=data.get('mode', 'normal'),
         )
 
 
@@ -637,22 +643,25 @@ class ClipCommands:
 
     async def get_session_info(self, session_id: str) -> 'SessionInfo':
         """
-        Get detailed session information including synced files count.
+        Get detailed session information including synced files count and audio format.
 
         Args:
             session_id: Session ID
 
         Returns:
-            SessionInfo with files, size, and synced_files fields
+            SessionInfo with files, size, synced_files, channels, sample_rate, and mode
         """
         response = await self._send_and_check(f"AT+LIST={session_id}")
         data = response.get('data', {})
-        # Create SessionInfo with synced_files
+        # Create SessionInfo with synced_files and audio format
         return SessionInfo(
             id=session_id,
             files=data.get('files', 0),
             size=data.get('size', 0),
             synced_files=data.get('synced', 0),
+            channels=data.get('channels', 1),
+            sample_rate=data.get('sample_rate', 16000),
+            mode=data.get('mode', 'normal'),
         )
 
     async def list_session_files(self, session_id: str) -> List[str]:

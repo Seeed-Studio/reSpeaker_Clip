@@ -170,16 +170,22 @@ def parse_raw_opus_frames(raw_data: bytes) -> List[bytes]:
     Parse raw Opus frames from device format.
 
     Device format: [2-byte LE length][Opus frame]...
+
+    Frame size guide (20ms at 16kHz):
+    - Mono 16kbps: ~40 bytes
+    - Mono 32kbps: ~80 bytes
+    - Stereo 32kbps: ~80 bytes (mono bitrate x2)
+    - Stereo 64kbps: ~160 bytes
     """
     frames = []
     offset = 0
 
-    # Find first valid frame
+    # Find first valid frame (allow larger range for stereo)
     while offset < min(200, len(raw_data)):
         if offset + 2 > len(raw_data):
             break
         frame_len = struct.unpack('<H', raw_data[offset:offset+2])[0]
-        if 10 <= frame_len <= 300:
+        if 10 <= frame_len <= 500:  # Wider range for stereo
             break
         offset += 2
 
@@ -191,6 +197,7 @@ def parse_raw_opus_frames(raw_data: bytes) -> List[bytes]:
         frame_len = struct.unpack('<H', raw_data[offset:offset+2])[0]
         offset += 2
 
+        # Allow larger frames for stereo (up to ~500 bytes for 64kbps stereo)
         if frame_len < 10 or frame_len > 1000:
             break
 
@@ -477,6 +484,7 @@ async def record_and_sync(
         result = await commands.stop_recording()
 
         print("Waiting for sync to complete...")
+        sync_result = None
         if sync_task and not sync_task.done():
             wait_start = time.time()
             last_count = 0
@@ -520,6 +528,25 @@ async def record_and_sync(
         print("=" * 60)
         print(f"  Session: {session_id}")
         print(f"  Duration: {format_duration(duration_sec)}")
+
+        # Get audio format from device for accurate display
+        try:
+            session_info = await commands.get_session_info(session_id)
+            if session_info:
+                channels = session_info.channels
+                sample_rate = session_info.sample_rate
+                audio_mode = session_info.mode
+            else:
+                channels = 2 if mode in ["normal", "stereo"] else 1
+                sample_rate = 16000
+                audio_mode = mode
+        except Exception:
+            channels = 2 if mode in ["normal", "stereo"] else 1
+            sample_rate = 16000
+            audio_mode = mode
+
+        ch_str = "stereo" if channels == 2 else "mono"
+        print(f"  Format: {audio_mode} ({ch_str}), {sample_rate//1000}kHz, Opus")
         if merged_path.exists():
             print(f"  Merged file: {merged_path.name} ({format_bytes(total_bytes)})")
         print(f"  Total synced: {format_bytes(total_bytes)}")
@@ -536,9 +563,11 @@ async def record_and_sync(
 
         # Convert to OGG Opus (no dependencies!)
         if merged_path.exists() and merged_path.stat().st_size > 0:
-            print(f"\nConverting to OGG Opus...")
+            # Use channels/sample_rate from session_info we already fetched
+            ch_str = "stereo" if channels == 2 else "mono"
+            print(f"\nConverting to OGG Opus ({ch_str}, {sample_rate//1000}kHz)...")
             ogg_path = output_path / f"{session_id}.ogg"
-            convert_to_ogg_opus(merged_path, ogg_path)
+            convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels)
 
         print(f"\n  Location: {output_path}")
         print("=" * 60)

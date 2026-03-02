@@ -448,8 +448,10 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
 	/* Create session directory and first file */
 	if (storage_enabled && storage_is_mounted()) {
-		/* Create session directory */
-		ret = storage_create_session(current_session_id);
+		/* Create session directory with audio format info */
+		const char *mode_str = (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced";
+		ret = storage_create_session(current_session_id, (uint8_t)opus_channels,
+		                             AUDIO_SAMPLE_RATE, mode_str);
 		if (ret != 0) {
 			LOG_WRN("Failed to create session directory: %d", ret);
 		} else {
@@ -542,9 +544,11 @@ static int audio_stop_recording_internal(void)
 		LOG_WRN("Failed to save bookmarks: %d", ret);
 	}
 
-	/* Close session and create metadata files */
+	/* Close session and update metadata files */
 	if (storage_is_mounted()) {
-		ret = storage_close_session(current_session_id, duration_sec, current_file_index);
+		const char *mode_str = (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced";
+		ret = storage_close_session(current_session_id, duration_sec, current_file_index,
+		                            (uint8_t)opus_channels, AUDIO_SAMPLE_RATE, mode_str);
 		if (ret != 0) {
 			LOG_WRN("Failed to close session: %d", ret);
 		}

@@ -103,10 +103,12 @@ int storage_get_stats(struct storage_stats *stats)
 	return 0;
 }
 
-int storage_create_session(const char *session_id)
+int storage_create_session(const char *session_id, uint8_t channels, uint32_t sample_rate, const char *mode)
 {
 	char dir_path[64];
+	char filepath[128];
 	struct fs_dirent entry;
+	struct fs_file_t file;
 	int rc;
 
 	if (!sd_mounted) {
@@ -155,6 +157,23 @@ int storage_create_session(const char *session_id)
 		} else {
 			LOG_DBG("Could not create marks.bin: %d", rc);
 		}
+	}
+
+	/* Create session.json with initial values */
+	snprintf(filepath, sizeof(filepath), "%s/session.json", dir_path);
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
+	if (rc == 0) {
+		char json_buf[300];
+		int len = snprintf(json_buf, sizeof(json_buf),
+			"{\"id\":\"%s\",\"duration\":0,\"files\":0,\"synced\":0,"
+			"\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}\n",
+			session_id, channels, sample_rate, mode ? mode : "normal");
+		fs_write(&file, json_buf, len);
+		fs_close(&file);
+		LOG_DBG("Created session.json for %s", session_id);
+	} else {
+		LOG_WRN("Could not create session.json: %d", rc);
 	}
 
 	/* Store current session directory */
@@ -355,11 +374,13 @@ int storage_close_file(struct storage_file *file)
 	return 0;
 }
 
-int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_t file_count)
+int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_t file_count,
+                          uint8_t channels, uint32_t sample_rate, const char *mode)
 {
 	char filepath[128];
 	struct fs_file_t file;
 	int rc;
+	uint32_t synced = 0;
 
 	if (!sd_mounted) {
 		return -ENODEV;
@@ -369,15 +390,20 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 		return -EINVAL;
 	}
 
-	/* Create session.json */
+	/* Read current synced value before overwriting */
+	synced = (uint32_t)storage_get_synced_files(session_id);
+
+	/* Update session.json with final values */
 	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
 	fs_file_t_init(&file);
 	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
 	if (rc == 0) {
-		char json_buf[256];
+		char json_buf[300];
 		int len = snprintf(json_buf, sizeof(json_buf),
-			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u,\"synced\":0}\n",
-			session_id, duration_sec, file_count);
+			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u,\"synced\":%u,"
+			"\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}\n",
+			session_id, duration_sec, file_count, synced, channels, sample_rate,
+			mode ? mode : "normal");
 		fs_write(&file, json_buf, len);
 		fs_close(&file);
 	}
@@ -831,8 +857,10 @@ int storage_list_session_files(const char *session_id, char (*files)[32], int ma
 int storage_get_session_info(const char *session_id, struct storage_session_info *info)
 {
 	char session_path[64];
+	char filepath[128];
 	struct fs_dir_t dirp;
 	struct fs_dirent entry;
+	struct fs_file_t file;
 	int rc;
 
 	if (!sd_mounted) {
@@ -843,9 +871,12 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
 		return -EINVAL;
 	}
 
-	/* Initialize output */
+	/* Initialize output with defaults */
 	memset(info, 0, sizeof(*info));
 	strncpy(info->session_id, session_id, sizeof(info->session_id) - 1);
+	info->channels = 1;        /* Default: mono */
+	info->sample_rate_khz = 16; /* Default: 16kHz */
+	strcpy(info->mode, "normal"); /* Default: normal */
 
 	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
 
@@ -872,6 +903,56 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
 	}
 
 	fs_closedir(&dirp);
+
+	/* Read session.json for metadata (duration, channels, sample_rate) */
+	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/session.json", session_id);
+	fs_file_t_init(&file);
+	rc = fs_open(&file, filepath, FS_O_READ);
+	if (rc == 0) {
+		char json_buf[256];
+		ssize_t bytes_read = fs_read(&file, json_buf, sizeof(json_buf) - 1);
+		fs_close(&file);
+
+		if (bytes_read > 0) {
+			json_buf[bytes_read] = '\0';
+
+			/* Parse channels (simple string search) */
+			char *ch = strstr(json_buf, "\"channels\":");
+			if (ch) {
+				info->channels = (uint8_t)atoi(ch + 11);
+				if (info->channels < 1 || info->channels > 2) {
+					info->channels = 1;
+				}
+			}
+
+			/* Parse sample_rate */
+			char *sr = strstr(json_buf, "\"sample_rate\":");
+			if (sr) {
+				uint32_t rate = (uint32_t)atoi(sr + 14);
+				info->sample_rate_khz = (uint8_t)(rate / 1000);
+				if (info->sample_rate_khz == 0) {
+					info->sample_rate_khz = 16;
+				}
+			}
+
+			/* Parse duration */
+			char *dur = strstr(json_buf, "\"duration\":");
+			if (dur) {
+				info->duration_sec = (uint32_t)atoi(dur + 11);
+			}
+
+			/* Parse mode */
+			char *mode_start = strstr(json_buf, "\"mode\":\"");
+			if (mode_start) {
+				mode_start += 8;  /* Skip "mode":" */
+				char *mode_end = strchr(mode_start, '"');
+				if (mode_end && (mode_end - mode_start) < sizeof(info->mode)) {
+					memcpy(info->mode, mode_start, mode_end - mode_start);
+					info->mode[mode_end - mode_start] = '\0';
+				}
+			}
+		}
+	}
 
 	/* Get synced files count */
 	info->synced_files = (uint32_t)storage_get_synced_files(session_id);

@@ -997,7 +997,7 @@ static int cmd_mark(const struct at_command *cmd, char **response)
 
 static int cmd_list(const struct at_command *cmd, char **response)
 {
-    /* If value provided, return session summary (files count, total size)
+    /* If value provided, return session summary (files count, total size, audio format)
      * File names are sequential (001.opus, 002.opus...), so no need to list them all
      */
     if (cmd->value) {
@@ -1010,10 +1010,13 @@ static int cmd_list(const struct at_command *cmd, char **response)
             return json_create_error("Session not found", response);
         }
 
-        /* Return summary: {"ok":true,"data":{"files":N,"size":S,"synced":M}} */
+        /* Return summary with audio format info:
+         * {"ok":true,"data":{"files":N,"size":S,"synced":M,"channels":C,"sample_rate":R,"mode":"X"}} */
         snprintf(json_buffer, sizeof(json_buffer),
-                "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u}}",
-                session.file_count, (uint32_t)session.total_bytes, session.synced_files);
+                "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u,"
+                "\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
+                session.file_count, (uint32_t)session.total_bytes, session.synced_files,
+                session.channels, session.sample_rate_khz * 1000, session.mode);
 
         /* Allocate and copy response */
         *response = k_malloc(strlen(json_buffer) + 1);
