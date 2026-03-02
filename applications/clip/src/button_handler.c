@@ -15,7 +15,9 @@
 #include "audio.h"
 #include "clip.h"
 #include "display_ctrl.h"
+#include "display.h"
 #include "battery.h"
+#include <zephyr/drivers/mfd/npm13xx.h>
 
 LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
 
@@ -29,6 +31,8 @@ static struct k_work button_start_work;
 static struct k_work button_stop_work;
 static struct k_work button_bookmark_work;
 static struct k_work button_status_work;
+static struct k_work button_poweroff_show_work;
+static struct k_work button_poweroff_exec_work;
 
 /* Forward declarations */
 static void button_event_callback(const struct device *dev,
@@ -37,6 +41,8 @@ static void button_start_work_handler(struct k_work *work);
 static void button_stop_work_handler(struct k_work *work);
 static void button_bookmark_work_handler(struct k_work *work);
 static void button_status_work_handler(struct k_work *work);
+static void button_poweroff_show_handler(struct k_work *work);
+static void button_poweroff_exec_handler(struct k_work *work);
 
 int button_handler_init(void)
 {
@@ -58,6 +64,8 @@ int button_handler_init(void)
 	k_work_init(&button_stop_work, button_stop_work_handler);
 	k_work_init(&button_bookmark_work, button_bookmark_work_handler);
 	k_work_init(&button_status_work, button_status_work_handler);
+	k_work_init(&button_poweroff_show_work, button_poweroff_show_handler);
+	k_work_init(&button_poweroff_exec_work, button_poweroff_exec_handler);
 
 	/* Register callback for all button events */
 	ret = button_callback_register(button_dev, button_event_callback);
@@ -154,6 +162,50 @@ static void button_status_work_handler(struct k_work *work)
 	ui_post_event(UI_EVT_STATUS_SHOW);
 }
 
+/* Set when 3s long press fires; cleared on BUTTON_RELEASE */
+static atomic_t poweroff_pending = ATOMIC_INIT(0);
+
+static void button_poweroff_show_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	LOG_INF("Button: 3s long press - showing power-off screen");
+	display_show_poweroff();
+	/* Mark that the next BUTTON_RELEASE should execute the power-off */
+	atomic_set(&poweroff_pending, 1);
+}
+
+static void button_poweroff_exec_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	LOG_INF("Button released - entering ship mode (power off)");
+
+	/* Clear OLED before shutting down */
+	oled_clear();
+
+	/* Enter npm1300 ship mode.
+	 *
+	 * mfd_npm13xx_hibernate(pmic, 0) first arms the timer to 0 ticks,
+	 * which causes the PMIC to wake back up immediately in hibernate mode.
+	 * For true ship mode (only button press can wake), we must write
+	 * TASKENTERSHIPHOLD directly — without touching the timer.
+	 *
+	 * Register: NPM13XX_SHIP_BASE (0x0B), offset 0x00 = TASKENTERSHIPHOLD
+	 */
+	const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300));
+	if (!device_is_ready(pmic)) {
+		LOG_ERR("npm1300 not ready, cannot power off");
+		return;
+	}
+
+	int ret = mfd_npm13xx_reg_write(pmic, 0x0BU, 0x00U, 1U);
+	if (ret != 0) {
+		LOG_ERR("Failed to enter ship mode: %d", ret);
+	}
+	/* If the write succeeded the system powers off immediately */
+}
+
 /* Button callback - runs in button driver thread with small stack */
 /* Only submit work items here, do not call audio functions directly */
 static void button_event_callback(const struct device *dev,
@@ -183,20 +235,30 @@ static void button_event_callback(const struct device *dev,
 		}
 		break;
 
-	case BUTTON_LONG_PRESS:
-	case BUTTON_LONG_PRESS_LEVEL_1:
-	case BUTTON_LONG_PRESS_LEVEL_2:
-	case BUTTON_LONG_PRESS_LEVEL_3:
-		/* Long press: Toggle recording based on actual audio state */
-		/* Use audio_is_recording() for more reliable state detection */
+	case BUTTON_LONG_PRESS:       /* released after holding 1s–3s → toggle recording */
+		/* 1-second long press: toggle recording */
 		if (audio_is_recording()) {
-			/* Stop recording - defer to work queue */
-			LOG_INF("Button: Long press - submitting stop work");
+			LOG_INF("Button: 1s long press - submitting stop work");
 			k_work_submit_to_queue(&button_work_q, &button_stop_work);
 		} else {
-			/* Start recording - defer to work queue */
-			LOG_INF("Button: Long press - submitting start work");
+			LOG_INF("Button: 1s long press - submitting start work");
 			k_work_submit_to_queue(&button_work_q, &button_start_work);
+		}
+		break;
+
+	case BUTTON_LONG_PRESS_LEVEL_1: /* held 3s, auto-fires while button still down */
+	case BUTTON_LONG_PRESS_LEVEL_2:
+	case BUTTON_LONG_PRESS_LEVEL_3:
+		/* 3-second long press: show power-off prompt */
+		LOG_INF("Button: 3s long press - showing power-off screen");
+		k_work_submit_to_queue(&button_work_q, &button_poweroff_show_work);
+		break;
+
+	case BUTTON_RELEASE:
+		/* Button released after auto-triggered long press */
+		if (atomic_cas(&poweroff_pending, 1, 0)) {
+			LOG_INF("Button: released - executing power off");
+			k_work_submit_to_queue(&button_work_q, &button_poweroff_exec_work);
 		}
 		break;
 

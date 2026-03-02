@@ -121,6 +121,14 @@ static void gpio_button_thread_cb(const struct device *dev)
 			k_sleep(K_MSEC(30));
 		} else {
 			if (data->press_count == 0) {
+				/* If an auto-triggered long press was fired, emit BUTTON_RELEASE
+				 * so the application knows the button is now up. */
+				if (data->long_press_triggered) {
+					data->long_press_triggered = false;
+					if (data->event_cb[BUTTON_RELEASE]) {
+						data->event_cb[BUTTON_RELEASE](dev, BUTTON_RELEASE);
+					}
+				}
 				break; // skip must pair with a press event
 			}
 			// only generate a release event if we've received a press event

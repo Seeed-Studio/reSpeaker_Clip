@@ -10,6 +10,7 @@ enum button_action {
 	BUTTON_LONG_PRESS_LEVEL_3,
 	BUTTON_SINGLE_CLICK,
 	BUTTON_DOUBLE_CLICK,
+	BUTTON_RELEASE,   /* fired when button is released after an auto-triggered long press */
 	BUTTON_EVENT_NUM
 };
 

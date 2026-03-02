@@ -80,6 +80,15 @@ void display_show_mark_animation_frame(int frame, bool fast_mode);
 void display_show_pairing_guide(void);
 
 /**
+ * @brief Show power-off confirmation screen
+ *
+ * Displays "Release to / Power Off" prompt. Call when the 3-second
+ * long-press threshold is reached; the device powers off when the
+ * button is released.
+ */
+void display_show_poweroff(void);
+
+/**
  * @brief Set OLED contrast/brightness
  *
  * @param contrast 0 = minimum brightness, 255 = maximum brightness

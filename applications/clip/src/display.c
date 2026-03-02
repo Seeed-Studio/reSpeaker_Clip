@@ -1271,3 +1271,38 @@ void display_show_pairing_guide(void)
 	flush_display();
 }
 
+/**
+ * @brief Show power-off confirmation screen
+ *
+ * Displays "Release to" / "Power Off" message so the user knows
+ * they can release the button to shut down.
+ */
+void display_show_poweroff(void)
+{
+	clear_screen(display_buffer);
+
+	/* Center two lines of text:
+	 *   "Release to"  (10 chars × 6px = 60px) → start x = (88-60)/2 = 14
+	 *   "Power Off"   (9 chars × 6px  = 54px) → start x = (88-54)/2 = 17
+	 * Vertical: two 12px lines with 4px gap, total 28px → start y = (48-28)/2 = 10
+	 */
+	const char *line1 = "Release to";
+	const char *line2 = "Power Off";
+	int x1 = (OLED_WIDTH - 60) / 2;
+	int x2 = (OLED_WIDTH - 54) / 2;
+	int y1 = (OLED_HEIGHT - 28) / 2;
+	int y2 = y1 + 12 + 4;
+
+	int x = x1;
+	for (const char *p = line1; *p; p++) {
+		display_draw_char_6x12(display_buffer, *p, x, y1);
+		x += 6;
+	}
+	x = x2;
+	for (const char *p = line2; *p; p++) {
+		display_draw_char_6x12(display_buffer, *p, x, y2);
+		x += 6;
+	}
+
+	flush_display();
+}
