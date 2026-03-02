@@ -35,11 +35,23 @@ class BLETerminal:
         try:
             await self.device.connect()
             self.commands = ClipCommands(self.device)
+            self.device.event_callback = self._on_event
             print("Connected!\n")
             return True
         except Exception as e:
             print(f"Connection failed: {e}")
             return False
+
+    def _on_event(self, event: dict):
+        """Print unsolicited device events (e.g. state_change)."""
+        import json
+        data = event.get('data', event)
+        if isinstance(data, dict) and data.get('event') == 'state_change':
+            old = data.get('old', '?')
+            new = data.get('new', '?')
+            print(f"\n[EVENT] state_change: {old} -> {new}")
+        else:
+            print(f"\n[EVENT] {json.dumps(event)}")
 
     async def disconnect(self):
         """Disconnect from device."""

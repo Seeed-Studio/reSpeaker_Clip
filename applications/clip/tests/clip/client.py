@@ -69,6 +69,10 @@ class ClipDevice:
         # Event loop reference for thread-safe queue puts
         self._loop = None
 
+        # Optional callback for unsolicited events (e.g. state_change)
+        # Signature: callback(event: dict) -> None
+        self.event_callback = None
+
         # File transfer state
         self._downloading = False
         self._session_files = {}  # {filename: bytes}
@@ -190,7 +194,9 @@ class ClipDevice:
                         # Check for nested event in data
                         if 'data' in response and isinstance(response['data'], dict):
                             if response['data'].get('event') == 'state_change':
-                                if self._debug:
+                                if self.event_callback:
+                                    self.event_callback(response)
+                                elif self._debug:
                                     print(f"[send_command] Filtering out state_change event, waiting for actual response")
                                 continue  # Skip this and wait for next response
 
