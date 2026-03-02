@@ -236,7 +236,7 @@
 		hold-gpios = <&gpio0 21 GPIO_ACTIVE_LOW>;
 		jedec-id = [ 85 20 17  ];
 		sfdp-bfp = [ e5 20 f1 ff ff ff ff 00 44 eb 08 6b 08 3b 80 bb ee ff ff ff ff ff 00 ff ff ff 00 ff 0c 20 0f 52 10 d8 08 81  ];
-		size = <DT_SIZE_M(64)>;
+		size = <DT_SIZE_M(8)>;
 
 		partitions {
 			compatible = "fixed-partitions";
@@ -244,7 +244,7 @@
 			#size-cells = <1>;
 
 			/*
-			 * External Flash Partition Layout:
+			 * External Flash Partition Layout (8MB total):
 			 *
 			 * The MCUboot OTA partitions are managed by partition manager (pm_config.h):
 			 *   - 0x000000 - 0x00F0000 (960 KB):  mcuboot_secondary (app core OTA)
@@ -254,22 +254,22 @@
 			 *   - 0x0130000 - 0x0160000 (192 KB): Reserved for nrf7002_fw
 			 *
 			 * NVS storage - positioned to avoid conflicts with OTA partitions:
-			 *   - 0x0200000 - 0x0210000 (64 KB): NVS storage
+			 *   - 0x0200000 - 0x0220000 (128 KB): NVS storage
 			 *
 			 * User storage (for recordings):
-			 *   - 0x0210000 - 0x0400000 (~48 MB): User storage
+			 *   - 0x0220000 - 0x800000 (~5.9 MB): User storage
 			 */
 
 			/* NVS storage for key-value data (WiFi/Settings/State) */
 			ext_nvs_partition: partition@200000 {
 				label = "ext-nvs";
-				reg = <0x0200000 DT_SIZE_K(64)>;
+				reg = <0x0200000 DT_SIZE_K(128)>;
 			};
 
 			/* General storage for user data (recordings, etc.) */
-			ext_storage_partition: partition@210000 {
+			ext_storage_partition: partition@220000 {
 				label = "ext-storage";
-				reg = <0x0210000 DT_SIZE_M(47)>;
+				reg = <0x0220000 (DT_SIZE_M(8) - 0x220000)>;
 			};
 		};
 	};
