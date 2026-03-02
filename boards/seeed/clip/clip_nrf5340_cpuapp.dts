@@ -127,6 +127,7 @@
 		compatible = "nordic,npm1300";
 		reg = <0x6b>;
 		status = "okay";
+		/* Long press 3s to wake from hibernate mode */
 		ship-to-active-time-ms = <3008>;
 
 		npm1300_gpio: gpio-controller {

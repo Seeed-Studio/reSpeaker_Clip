@@ -18,6 +18,7 @@
 #include "display.h"
 #include "battery.h"
 #include <zephyr/drivers/mfd/npm13xx.h>
+#include <zephyr/drivers/regulator.h>
 
 LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
 
@@ -184,22 +185,19 @@ static void button_poweroff_exec_handler(struct k_work *work)
 	/* Clear OLED before shutting down */
 	oled_clear();
 
-	/* Enter npm1300 ship mode.
-	 *
-	 * mfd_npm13xx_hibernate(pmic, 0) first arms the timer to 0 ticks,
-	 * which causes the PMIC to wake back up immediately in hibernate mode.
-	 * For true ship mode (only button press can wake), we must write
-	 * TASKENTERSHIPHOLD directly — without touching the timer.
-	 *
-	 * Register: NPM13XX_SHIP_BASE (0x0B), offset 0x00 = TASKENTERSHIPHOLD
+	/* Enter npm1300 ship mode via regulator_parent_ship_mode().
+	 * This writes TASKENTERSHIPHOLD (0x0B, offset 0x02) — the only way
+	 * to wake up is by holding the button for ship-to-active-time-ms (3s).
+	 * Do NOT use mfd_npm13xx_hibernate() — that uses TASKENTERHIB (0x0B/0x00)
+	 * which has a timer and auto-wakes after a few seconds.
 	 */
-	const struct device *pmic = DEVICE_DT_GET(DT_NODELABEL(npm1300));
-	if (!device_is_ready(pmic)) {
-		LOG_ERR("npm1300 not ready, cannot power off");
+	const struct device *regulators = DEVICE_DT_GET(DT_NODELABEL(npm1300_regulators));
+	if (!device_is_ready(regulators)) {
+		LOG_ERR("npm1300 regulators not ready, cannot power off");
 		return;
 	}
 
-	int ret = mfd_npm13xx_reg_write(pmic, 0x0BU, 0x00U, 1U);
+	int ret = regulator_parent_ship_mode(regulators);
 	if (ret != 0) {
 		LOG_ERR("Failed to enter ship mode: %d", ret);
 	}
