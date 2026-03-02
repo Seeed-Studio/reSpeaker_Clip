@@ -426,9 +426,6 @@ int display_init_hw(void)
 		display_dev = NULL;
 	} else {
 		LOG_INF("[DISPLAY] Initialized (OLED: %dx%d)", OLED_WIDTH, OLED_HEIGHT);
-
-		/* Initialize with pairing guide page */
-		display_show_pairing_guide();
 	}
 
 	return 0;
@@ -468,6 +465,14 @@ void display_fill(void)
 
 	memset(display_buffer, 0xFF, sizeof(display_buffer));
 	display_write(display_dev, 0, 0, &desc, display_buffer);
+}
+
+void oled_set_contrast(uint8_t contrast)
+{
+	if (!display_dev) {
+		return;
+	}
+	display_set_contrast(display_dev, contrast);
 }
 
 /* ========================================

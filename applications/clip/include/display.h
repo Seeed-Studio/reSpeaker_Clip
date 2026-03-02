@@ -79,6 +79,13 @@ void display_show_mark_animation_frame(int frame, bool fast_mode);
  */
 void display_show_pairing_guide(void);
 
+/**
+ * @brief Set OLED contrast/brightness
+ *
+ * @param contrast 0 = minimum brightness, 255 = maximum brightness
+ */
+void oled_set_contrast(uint8_t contrast);
+
 /* ========================================
  * Display Buffer
  * ======================================== */

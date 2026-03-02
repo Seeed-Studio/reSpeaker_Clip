@@ -22,6 +22,7 @@
 #define NVS_KEY_AGC_ENABLE  0x07
 #define NVS_KEY_AGC_TARGET  0x08
 #define NVS_KEY_DEREVERB    0x09
+#define NVS_KEY_CONTRAST    0x0A
 
 /**
  * @brief Initialize configuration manager

@@ -1138,7 +1138,40 @@ AT+AGC?
 
 ---
 
-#### 3.3.8 System Commands
+##### AT+BRIGHTNESS - OLED Brightness
+
+Get or set the OLED display brightness (contrast). The value is saved to NVS and applied automatically on every boot.
+
+**Request (Set):**
+```
+AT+BRIGHTNESS=<value>
+```
+
+**Request (Query):**
+```
+AT+BRIGHTNESS?
+```
+
+**Response (Set):**
+```json
+{
+  "ok": true,
+  "data": {"value": 200}
+}
+```
+
+**Response (Query):**
+```json
+{
+  "ok": true,
+  "data": {"value": 128}
+}
+```
+
+**Parameters:**
+- `value`: Integer 0–255 (0 = dimmest, 255 = maximum brightness, default = 128)
+
+---
 
 ##### AT+PAIR - Bluetooth Pairing
 
@@ -2131,6 +2164,7 @@ To prevent BLE congestion:
 | AT+NOISE | GET/SET | Noise suppression | 3.3.7 |
 | AT+DEREVERB | GET/SET | Dereverberation | 3.3.7 |
 | AT+AGC | GET/SET | Automatic gain | 3.3.7 |
+| AT+BRIGHTNESS | GET/SET | OLED brightness | 3.3.7 |
 | AT+PAIR | GET/SET | BLE pairing | 3.3.8 |
 | AT+FACTORY | SET | Factory reset | 3.3.8 |
 | AT+RESET | EXEC | Reboot | 3.3.8 |

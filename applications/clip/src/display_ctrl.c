@@ -132,18 +132,23 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 
 	LOG_INF("[UI] Thread started");
 
-	/* Initial state: PAIRING_GUIDE if not bonded, OFF if bonded */
+	/* Initial state:
+	 *   bonded     -> show status bar 3s then OFF
+	 *   not bonded -> show pairing guide immediately
+	 */
+	int64_t status_bar_start_ms = 0;
+
 	if (ble_svc_is_bonded()) {
-		set_state(UI_STATE_OFF);
-		oled_clear();
-		LOG_INF("[UI] Initial state: OFF (bonded)");
+		battery_request_update();
+		set_state(UI_STATE_STATUS_BAR);
+		status_bar_start_ms = k_uptime_get();
+		do_show_status_bar();
+		LOG_INF("[UI] Initial state: STATUS_BAR (bonded, 3s then OFF)");
 	} else {
 		set_state(UI_STATE_PAIRING_GUIDE);
 		display_show_pairing_guide();
 		LOG_INF("[UI] Initial state: PAIRING_GUIDE (not bonded)");
 	}
-
-	int64_t status_bar_start_ms = 0;
 
 	while (1) {
 		enum ui_event evt;
@@ -282,7 +287,9 @@ int display_init(void)
 		LOG_INF("Display controller: Serial logging mode (no OLED device)");
 	} else {
 		display_ready = true;
-		LOG_INF("Display controller: OLED mode active");
+		/* Apply saved contrast from NVS */
+		oled_set_contrast(g_config.oled_contrast);
+		LOG_INF("Display controller: OLED mode active (contrast=%u)", g_config.oled_contrast);
 	}
 
 	/* Show welcome message */

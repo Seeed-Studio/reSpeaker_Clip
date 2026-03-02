@@ -25,6 +25,7 @@
 #include "config.h"
 #include "ble_svc.h"
 #include "display_ctrl.h"
+#include "display.h"
 
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
@@ -592,6 +593,35 @@ static int cmd_dereverb_set(const struct at_command *cmd, char **response)
             enable ? "true" : "false",
             level,
             decay);
+    return json_create_success(data, response);
+}
+
+/* AT+BRIGHTNESS - OLED brightness (contrast) control */
+static int cmd_brightness(const struct at_command *cmd, char **response)
+{
+    char data[64];
+
+    if (!cmd->value) {
+        /* GET: return current contrast value */
+        snprintf(data, sizeof(data), "{\"value\":%u}", g_config.oled_contrast);
+        return json_create_success(data, response);
+    }
+
+    /* SET */
+    int val;
+    if (extract_int(cmd->value, &val) != 0) {
+        return json_create_error("Invalid brightness value", response);
+    }
+    if (val < 0 || val > 255) {
+        return json_create_error("Brightness must be 0-255", response);
+    }
+
+    g_config.oled_contrast = (uint8_t)val;
+    oled_set_contrast(g_config.oled_contrast);
+    save_setting_now("config/oled_contrast", &g_config.oled_contrast,
+                     sizeof(g_config.oled_contrast));
+
+    snprintf(data, sizeof(data), "{\"value\":%u}", g_config.oled_contrast);
     return json_create_success(data, response);
 }
 
@@ -1477,6 +1507,7 @@ static const struct cmd_entry commands[] = {
     {"NOISE",    cmd_noise_set,     AT_CMD_SET | AT_CMD_GET},
     {"AGC",      cmd_agc_set,       AT_CMD_SET | AT_CMD_GET},
     {"DEREVERB", cmd_dereverb_set,  AT_CMD_SET | AT_CMD_GET},
+    {"BRIGHTNESS", cmd_brightness,  AT_CMD_SET | AT_CMD_GET},
 
     /* Storage management commands */
     {"AUTODEL",  cmd_autodel_set,   AT_CMD_SET | AT_CMD_GET},

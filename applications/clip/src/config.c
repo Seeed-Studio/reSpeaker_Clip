@@ -59,6 +59,7 @@ static time_t utc_to_timestamp(int year, int month, int day, int hour, int min, 
 #define SETTING_AGC_ENABLED     "config/agc_enabled"
 #define SETTING_AGC_TARGET      "config/agc_target"
 #define SETTING_DEREVERB        "config/dereverb_enabled"
+#define SETTING_CONTRAST        "config/oled_contrast"
 #define SETTING_TIME_UNIX       "time/unix_timestamp"
 
 /* Factory default configuration */
@@ -72,6 +73,7 @@ static const struct clip_config factory_config = {
     .agc_target = 0,
     .agc_enabled = false,
     .dereverb_enabled = false,
+    .oled_contrast = OLED_CONTRAST_DEFAULT,
 };
 
 #ifdef CONFIG_SETTINGS
@@ -95,6 +97,7 @@ static const struct config_entry config_table[] = {
     { SETTING_AGC_ENABLED,    offsetof(struct clip_config, agc_enabled),    sizeof(bool) },
     { SETTING_AGC_TARGET,     offsetof(struct clip_config, agc_target),     sizeof(uint8_t) },
     { SETTING_DEREVERB,       offsetof(struct clip_config, dereverb_enabled), sizeof(bool) },
+    { SETTING_CONTRAST,       offsetof(struct clip_config, oled_contrast),  sizeof(uint8_t) },
 };
 
 #define CONFIG_TABLE_SIZE (sizeof(config_table) / sizeof(config_table[0]))
@@ -280,6 +283,7 @@ static const char *nvs_key_to_setting(uint16_t key)
     case NVS_KEY_AGC_ENABLE:  return SETTING_AGC_ENABLED;
     case NVS_KEY_AGC_TARGET:  return SETTING_AGC_TARGET;
     case NVS_KEY_DEREVERB:    return SETTING_DEREVERB;
+    case NVS_KEY_CONTRAST:    return SETTING_CONTRAST;
     default:                  return NULL;
     }
 }
@@ -349,6 +353,13 @@ int config_set(uint16_t key, const void *value, size_t len)
     case NVS_KEY_DEREVERB:
         if (len == sizeof(bool)) {
             g_config.dereverb_enabled = *(const bool *)value;
+        } else {
+            ret = -EINVAL;
+        }
+        break;
+    case NVS_KEY_CONTRAST:
+        if (len == sizeof(uint8_t)) {
+            g_config.oled_contrast = *(const uint8_t *)value;
         } else {
             ret = -EINVAL;
         }
@@ -425,6 +436,12 @@ int config_get(uint16_t key, void *value, size_t len)
     case NVS_KEY_DEREVERB:
         if (len == sizeof(bool)) {
             *(bool *)value = g_config.dereverb_enabled;
+            return 0;
+        }
+        break;
+    case NVS_KEY_CONTRAST:
+        if (len == sizeof(uint8_t)) {
+            *(uint8_t *)value = g_config.oled_contrast;
             return 0;
         }
         break;

@@ -79,6 +79,7 @@ struct clip_config {
     uint8_t agc_target;        /* AGC target level (dB) */
     bool agc_enabled;         /* AGC enabled */
     bool dereverb_enabled;    /* Dereverberation enabled */
+    uint8_t oled_contrast;    /* OLED contrast/brightness 0-255, default 128 */
 };
 
 /* Global configuration */
@@ -208,5 +209,8 @@ void clip_main_loop(void);
 #else
 #define BATTERY_POLL_INTERVAL_S           CONFIG_BATTERY_POLL_INTERVAL_S
 #endif
+
+/* Default OLED contrast (0-255) */
+#define OLED_CONTRAST_DEFAULT  128
 
 #endif /* CLIP_H */
