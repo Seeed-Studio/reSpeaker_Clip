@@ -88,6 +88,22 @@ int ble_svc_send_transfer_complete(const char *session_id, int files_count);
 bool ble_svc_is_ready(void);
 
 /**
+ * @brief Check if at least one bonded peer exists in flash
+ *
+ * @return true if a bond record exists, false otherwise
+ */
+bool ble_svc_is_bonded(void);
+
+/**
+ * @brief Schedule a device reboot after a delay
+ *
+ * Used by AT+PAIR=reset to reboot after sending the response.
+ *
+ * @param delay_ms Delay in milliseconds before reboot
+ */
+void ble_svc_schedule_reboot(uint32_t delay_ms);
+
+/**
  * @brief Get current BLE connection
  *
  * @return Connection pointer or NULL if not connected

@@ -582,31 +582,54 @@ static int cmd_dereverb_set(const struct at_command *cmd, char **response)
     return json_create_success(data, response);
 }
 
+/* Bond info collection callback for AT+PAIR? */
+struct at_pair_status {
+    int count;
+    char addr[BT_ADDR_LE_STR_LEN];
+};
+
+static void collect_bond_cb(const struct bt_bond_info *info, void *user_data)
+{
+    struct at_pair_status *st = (struct at_pair_status *)user_data;
+
+    st->count++;
+    /* Capture address of first (and only expected) bond */
+    if (st->count == 1) {
+        bt_addr_le_to_str(&info->addr, st->addr, sizeof(st->addr));
+    }
+}
+
 static int cmd_pair(const struct at_command *cmd, char **response)
 {
     char data[256];
-    int err;
 
     if (!cmd->value) {
-        /* Get pairing status */
-        bool is_paired = ble_svc_is_ready();
-        snprintf(data, sizeof(data),
-                "{\"paired\":%s}",
-                is_paired ? "true" : "false");
+        /* Report actual bond status from flash */
+        struct at_pair_status st = {0};
+
+        bt_foreach_bond(BT_ID_DEFAULT, collect_bond_cb, &st);
+        if (st.count > 0) {
+            snprintf(data, sizeof(data),
+                    "{\"paired\":true,\"addr\":\"%s\"}", st.addr);
+        } else {
+            snprintf(data, sizeof(data), "{\"paired\":false}");
+        }
         return json_create_success(data, response);
     }
 
-    /* Parse command */
     if (strcasecmp(cmd->value, "reset") == 0 || strcasecmp(cmd->value, "clear") == 0) {
-        /* Delete pairing information */
-        /* TODO: Implement actual BLE pairing deletion */
-        err = 0;  /* Placeholder */
+        /* Erase all bond records from flash */
+        int err = bt_unpair(BT_ID_DEFAULT, NULL);
 
-        if (err != 0) {
+        if (err) {
+            LOG_ERR("bt_unpair failed: %d", err);
             return json_create_error("Failed to clear pairing", response);
         }
 
-        return json_create_success("{\"action\":\"cleared\"}", response);
+        LOG_INF("Pairing info cleared, rebooting in 500ms");
+        /* Schedule reboot so the response is sent first */
+        ble_svc_schedule_reboot(500);
+        return json_create_success("{\"action\":\"cleared\",\"rebooting\":true}", response);
     }
 
     return json_create_error("Invalid value (use reset/clear)", response);

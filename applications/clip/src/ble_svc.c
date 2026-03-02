@@ -14,10 +14,12 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <hal/nrf_ficr.h>
 #include <string.h>
+#include <zephyr/settings/settings.h>
 #include "ble_svc.h"
 #include "at_cmd.h"
 #include "clip.h"
 #include "transfer.h"
+#include "display.h"
 
 LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
 
@@ -100,27 +102,27 @@ static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t 
 BT_GATT_SERVICE_DEFINE(clip_svc,
     BT_GATT_PRIMARY_SERVICE(&svc_uuid),
 
-    /* Command Receive Characteristic (Write) */
+    /* Command Receive Characteristic (Write) - requires encryption */
     BT_GATT_CHARACTERISTIC(&cmd_recv_uuid.uuid,
                            BT_GATT_CHRC_WRITE_WITHOUT_RESP,
-                           BT_GATT_PERM_WRITE,
+                           BT_GATT_PERM_WRITE_ENCRYPT,
                            NULL, cmd_recv_write, NULL),
 
-    /* Response Send Characteristic (Notify) */
+    /* Response Send Characteristic (Notify) - requires encryption */
     BT_GATT_CHARACTERISTIC(&resp_send_uuid.uuid,
                            BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_READ,
                            NULL, NULL, NULL),
     BT_GATT_CCC(resp_ccc_cfg_changed,
-               BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+               BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
 
-    /* File Data Characteristic (Notify) */
+    /* File Data Characteristic (Notify) - requires encryption */
     BT_GATT_CHARACTERISTIC(&file_data_uuid.uuid,
                            BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_READ,
                            NULL, NULL, NULL),
     BT_GATT_CCC(file_data_ccc_cfg_changed,
-               BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+               BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
 );
 
 /* CCC callbacks */
@@ -238,11 +240,65 @@ static struct bt_data sd[1];
 static struct k_work adv_work;
 static struct k_work_delayable mtu_work;
 
-/* Advertising restart handler */
+/* Bond helper: count stored bonds */
+static void count_bond_cb(const struct bt_bond_info *info, void *user_data)
+{
+    int *count = (int *)user_data;
+    (*count)++;
+}
+
+/* Bond helper: add each bonded peer address to the Filter Accept List */
+static void add_bond_to_fal_cb(const struct bt_bond_info *info, void *user_data)
+{
+    int err = bt_le_filter_accept_list_add(&info->addr);
+
+    if (err) {
+        LOG_WRN("FAL add failed: %d", err);
+    }
+}
+
+/* Advertising restart handler - dual mode:
+ *   No bond  -> open advertising + show pairing guide on display
+ *   Bond exists -> FAL-filtered advertising, only bonded device can connect
+ */
 static void adv_work_handler(struct k_work *work)
 {
-    bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
-                   sd, ARRAY_SIZE(sd));
+    int bond_count = 0;
+    int err;
+
+    bt_foreach_bond(BT_ID_DEFAULT, count_bond_cb, &bond_count);
+
+    if (bond_count > 0) {
+        /* Bonded mode: populate FAL and restrict connections */
+        bt_le_filter_accept_list_clear();
+        bt_foreach_bond(BT_ID_DEFAULT, add_bond_to_fal_cb, NULL);
+
+        static const struct bt_le_adv_param adv_param_bonded =
+            BT_LE_ADV_PARAM_INIT(
+                BT_LE_ADV_OPT_CONN | BT_LE_ADV_OPT_FILTER_CONN,
+                BT_GAP_ADV_FAST_INT_MIN_2,
+                BT_GAP_ADV_FAST_INT_MAX_2,
+                NULL);
+
+        err = bt_le_adv_start(&adv_param_bonded, ad, ARRAY_SIZE(ad),
+                              sd, ARRAY_SIZE(sd));
+        if (err && err != -EALREADY) {
+            LOG_ERR("adv_start (bonded): %d", err);
+        } else {
+            LOG_INF("Advertising: bonded-only mode");
+        }
+    } else {
+        /* Pairing mode: open advertising, show pairing guide */
+        display_show_pairing_guide();
+
+        err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
+                              sd, ARRAY_SIZE(sd));
+        if (err && err != -EALREADY) {
+            LOG_ERR("adv_start (pairing): %d", err);
+        } else {
+            LOG_INF("Advertising: pairing mode (no bond)");
+        }
+    }
 }
 
 /* MTU exchange callback */
@@ -273,28 +329,55 @@ static void mtu_work_handler(struct k_work *work)
 /* Connection callbacks */
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+    char addr[BT_ADDR_LE_STR_LEN];
+
     if (err) {
+        LOG_WRN("Connection failed: err=%u", err);
         return;
     }
 
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     current_conn = bt_conn_ref(conn);
     mtu_exchanged = false;
 
-    LOG_INF("BLE connected");
+    /* Check whether this is a known bonded device or a new one */
+    int bond_count = 0;
 
-    /* Delay MTU exchange */
-    k_work_schedule(&mtu_work, K_MSEC(500));
+    bt_foreach_bond(BT_ID_DEFAULT, count_bond_cb, &bond_count);
+    if (bond_count > 0) {
+        LOG_INF("BLE connected: addr=%s (bonded device, re-encrypting)", addr);
+    } else {
+        LOG_INF("BLE connected: addr=%s (no bond - waiting for pairing)", addr);
+    }
+
+    /* Immediately require encryption. If no bond exists, this triggers
+     * SMP pairing. If a bond exists, it triggers re-encryption with
+     * the stored LTK. Devices that refuse will be disconnected in
+     * security_changed().
+     */
+    int sec_err = bt_conn_set_security(conn, BT_SECURITY_L2);
+
+    if (sec_err) {
+        LOG_WRN("Security request failed: addr=%s err=%d", addr, sec_err);
+    }
+
+    /* Delay MTU exchange until after security is established */
+    k_work_schedule(&mtu_work, K_MSEC(1000));
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     if (current_conn == conn) {
+        char addr[BT_ADDR_LE_STR_LEN];
+
+        bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
         bt_conn_unref(current_conn);
         current_conn = NULL;
         resp_notify_enabled = false;
         file_data_notify_enabled = false;
 
-        LOG_INF("BLE disconnect: %u", reason);
+        /* reason=0x05: auth fail  reason=0x08: timeout  reason=0x13: remote user  reason=0x16: local host */
+        LOG_INF("BLE disconnected: addr=%s reason=0x%02x", addr, reason);
 
         /* Clean up any ongoing transfer */
         if (transfer_is_active() || transfer_is_paused()) {
@@ -344,11 +427,83 @@ static bool le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
     return true;
 }
 
+/* Disconnect any connection that did not reach encryption level 2 */
+static void security_changed(struct bt_conn *conn, bt_security_t level,
+                             enum bt_security_err err)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+
+    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
+        /* Phone has a stale bond that we no longer have. Clear all local
+         * bonds so next connection starts fresh pairing.
+         */
+        LOG_WRN("Stale bond from remote (addr=%s), clearing bonds and disconnecting", addr);
+        bt_unpair(BT_ID_DEFAULT, NULL);
+        bt_conn_disconnect(conn, BT_HCI_ERR_PIN_OR_KEY_MISSING);
+        return;
+    }
+
+    if (err) {
+        LOG_WRN("Security failed: addr=%s level=%d err=%d - disconnecting",
+                addr, level, err);
+        bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+        return;
+    }
+
+    if (level < BT_SECURITY_L2) {
+        LOG_WRN("Security level too low: addr=%s level=%d - disconnecting",
+                addr, level);
+        bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+        return;
+    }
+
+    LOG_INF("Security established: addr=%s level=%d", addr, level);
+}
+
+/* Auto-confirm Just Works pairing (no passkey required) */
+static void pairing_confirm(struct bt_conn *conn)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_INF("Pairing confirm: %s", addr);
+    bt_conn_auth_pairing_confirm(conn);
+}
+
+static struct bt_conn_auth_cb auth_callbacks = {
+    .pairing_confirm = pairing_confirm,
+};
+
+static void pairing_complete(struct bt_conn *conn, bool bonded)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_INF("Pairing complete: addr=%s bonded=%d", addr, bonded);
+}
+
+static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
+{
+    char addr[BT_ADDR_LE_STR_LEN];
+
+    bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
+    LOG_WRN("Pairing failed: addr=%s reason=%d - disconnecting", addr, reason);
+    bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+}
+
+static struct bt_conn_auth_info_cb auth_info_callbacks = {
+    .pairing_complete = pairing_complete,
+    .pairing_failed   = pairing_failed,
+};
+
 static struct bt_conn_cb conn_callbacks = {
-    .connected = connected,
-    .disconnected = disconnected,
+    .connected        = connected,
+    .disconnected     = disconnected,
     .le_param_updated = le_param_updated,
-    .le_param_req = le_param_req,
+    .le_param_req     = le_param_req,
+    .security_changed = security_changed,
 };
 
 /* Public API implementation */
@@ -390,13 +545,18 @@ int ble_svc_init(void)
     /* Register connection callbacks */
     bt_conn_cb_register(&conn_callbacks);
 
-    /* Start advertising */
-    err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),
-                          sd, ARRAY_SIZE(sd));
-    if (err) {
-        LOG_ERR("adv_start: %d", err);
-        return err;
-    }
+    /* Register pairing/authentication callbacks */
+    bt_conn_auth_cb_register(&auth_callbacks);
+    bt_conn_auth_info_cb_register(&auth_info_callbacks);
+
+    /* Load BT settings (bond keys) that were persisted before the last reboot.
+     * Must be called after bt_enable() so the BT settings handlers are
+     * registered before settings_load_subtree() is called.
+     */
+    settings_load_subtree("bt");
+
+    /* Start advertising via work item so bond state is evaluated */
+    k_work_submit(&adv_work);
 
     LOG_INF("BLE ready");
 
@@ -641,6 +801,19 @@ bool ble_svc_is_ready(void)
      * MTU exchange is optional for optimization.
      */
     return (current_conn != NULL && resp_notify_enabled);
+}
+
+bool ble_svc_is_bonded(void)
+{
+    int count = 0;
+
+    bt_foreach_bond(BT_ID_DEFAULT, count_bond_cb, &count);
+    return count > 0;
+}
+
+void ble_svc_schedule_reboot(uint32_t delay_ms)
+{
+    k_work_schedule(&reboot_work, K_MSEC(delay_ms));
 }
 
 struct bt_conn *ble_svc_get_connection(void)

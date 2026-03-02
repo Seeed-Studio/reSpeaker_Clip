@@ -71,6 +71,14 @@ void display_show_dot_circle_frame(int frame);
  */
 void display_show_mark_animation_frame(int frame, bool fast_mode);
 
+/**
+ * @brief Show BLE pairing guide screen
+ *
+ * Displays "Open APP / to Pair" with a phone icon.
+ * Called when the device has no bonded peer and is in open advertising mode.
+ */
+void display_show_pairing_guide(void);
+
 /* ========================================
  * Display Buffer
  * ======================================== */
