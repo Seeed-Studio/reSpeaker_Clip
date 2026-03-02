@@ -26,3 +26,7 @@ target_sources(app PRIVATE
     src/display.c
     src/icons.c
 )
+
+# Include IPC Radio sub-image for network core Bluetooth HCI
+# This is required for OTA support with dual-core nRF5340
+add_subdirectory_ifdef(CONFIG_BT ipc_radio)
