@@ -786,22 +786,47 @@ static void draw_large_percent(uint8_t *buf, int x, int y)
 
 /**
  * @brief Draw battery icon based on charging status and level
+ *
+ * Always draws the empty-shell outline from ICON_BATTERY_LOW, then fills
+ * rows 4–12 (9 rows, columns 6–9) from the bottom up proportional to
+ * `percent`.  While charging the ICON_BATTERY_CHARGING bitmap is used instead.
  */
 static void draw_battery_by_level(uint8_t *buf, int x, int y, uint8_t percent, bool charging)
 {
-	icon_id_t icon_id;
-
 	if (charging) {
-		icon_id = ICON_BATTERY_CHARGING;
-	} else if (percent >= 50) {
-		icon_id = ICON_BATTERY_FULL;
-	} else {
-		icon_id = ICON_BATTERY_LOW;
+		const uint8_t *bmp = icon_get_bitmap(ICON_BATTERY_CHARGING, NULL, NULL);
+		if (bmp) {
+			icon_draw_bitmap(buf, x, y, bmp, ICON_WIDTH, ICON_HEIGHT);
+		}
+		return;
 	}
 
-	const uint8_t *bitmap = icon_get_bitmap(icon_id, NULL, NULL);
-	if (bitmap) {
-		icon_draw_bitmap(buf, x, y, bitmap, ICON_WIDTH, ICON_HEIGHT);
+	/* Draw empty battery outline */
+	const uint8_t *outline = icon_get_bitmap(ICON_BATTERY_LOW, NULL, NULL);
+	if (outline) {
+		icon_draw_bitmap(buf, x, y, outline, ICON_WIDTH, ICON_HEIGHT);
+	}
+
+	/*
+	 * Fill bar: icon fill area is rows 4–12 (9 rows) × cols 6–9 (4 px).
+	 * Rows are filled from the bottom (row 12) upward so the bar grows
+	 * as the battery charges — the same visual convention as every phone.
+	 *
+	 *   fill_rows = round(percent * 9 / 100), clamped to [0..9]
+	 *   For any non-zero percent show at least 1 row.
+	 */
+	int fill_rows = ((int)percent * 9 + 50) / 100;
+	if (fill_rows > 9) {
+		fill_rows = 9;
+	}
+	if (percent > 0 && fill_rows == 0) {
+		fill_rows = 1;
+	}
+
+	for (int row = 12; row >= (13 - fill_rows); row--) {
+		for (int col = 6; col <= 9; col++) {
+			set_pixel_direct(buf, x + col, y + row);
+		}
 	}
 }
 

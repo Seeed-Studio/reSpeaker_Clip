@@ -178,6 +178,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 
 			case UI_EVT_REC_STOP:
 				LOG_INF("[UI] EVT: REC_STOP");
+				battery_request_update();
 				set_state(UI_STATE_STATUS_BAR);
 				status_bar_start_ms = k_uptime_get();
 				do_show_status_bar();
@@ -199,6 +200,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				LOG_INF("[UI] EVT: STATUS_SHOW");
 				if (ui_current_state == UI_STATE_OFF ||
 				    ui_current_state == UI_STATE_PAIRING_GUIDE) {
+					/* Battery already refreshed by button_status_work */
 					set_state(UI_STATE_STATUS_BAR);
 					status_bar_start_ms = k_uptime_get();
 					do_show_status_bar();

@@ -15,6 +15,7 @@
 #include "audio.h"
 #include "clip.h"
 #include "display_ctrl.h"
+#include "battery.h"
 
 LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
 
@@ -27,6 +28,7 @@ static struct k_work_q button_work_q;
 static struct k_work button_start_work;
 static struct k_work button_stop_work;
 static struct k_work button_bookmark_work;
+static struct k_work button_status_work;
 
 /* Forward declarations */
 static void button_event_callback(const struct device *dev,
@@ -34,6 +36,7 @@ static void button_event_callback(const struct device *dev,
 static void button_start_work_handler(struct k_work *work);
 static void button_stop_work_handler(struct k_work *work);
 static void button_bookmark_work_handler(struct k_work *work);
+static void button_status_work_handler(struct k_work *work);
 
 int button_handler_init(void)
 {
@@ -54,6 +57,7 @@ int button_handler_init(void)
 	k_work_init(&button_start_work, button_start_work_handler);
 	k_work_init(&button_stop_work, button_stop_work_handler);
 	k_work_init(&button_bookmark_work, button_bookmark_work_handler);
+	k_work_init(&button_status_work, button_status_work_handler);
 
 	/* Register callback for all button events */
 	ret = button_callback_register(button_dev, button_event_callback);
@@ -140,6 +144,16 @@ static void button_bookmark_work_handler(struct k_work *work)
 	}
 }
 
+static void button_status_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	/* Read fresh battery data via I2C *before* posting the UI event.
+	 * This ensures do_show_status_bar() always sees up-to-date values. */
+	battery_request_update();
+	ui_post_event(UI_EVT_STATUS_SHOW);
+}
+
 /* Button callback - runs in button driver thread with small stack */
 /* Only submit work items here, do not call audio functions directly */
 static void button_event_callback(const struct device *dev,
@@ -160,9 +174,10 @@ static void button_event_callback(const struct device *dev,
 			LOG_INF("Button: Single click - submitting bookmark work");
 			k_work_submit_to_queue(&button_work_q, &button_bookmark_work);
 		} else if (current_state == CLIP_STATE_IDLE) {
-			/* Show status bar in IDLE state */
+			/* Show status bar in IDLE state.
+			 * Use work queue so battery I2C read completes before UI renders. */
 			LOG_INF("Button: Single click - show status bar");
-			ui_post_event(UI_EVT_STATUS_SHOW);
+			k_work_submit_to_queue(&button_work_q, &button_status_work);
 		} else {
 			LOG_INF("Button: Short press ignored (state=%d)", current_state);
 		}

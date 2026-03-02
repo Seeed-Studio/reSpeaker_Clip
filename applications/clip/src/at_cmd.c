@@ -240,6 +240,9 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
     struct storage_stats stats;
     uint32_t free_space = 0;
 
+    /* Refresh battery reading before reporting */
+    battery_request_update();
+
     /* Get storage statistics */
     if (storage_get_stats(&stats) == 0) {
         free_space = stats.free_space_mb;
@@ -338,7 +341,14 @@ static int cmd_battery_set(const struct at_command *cmd, char **response)
     char data[128];
 
     if (!cmd->value) {
-        return json_create_error("Missing battery level", response);
+        /* GET: trigger a fresh hardware read, then return current values */
+        battery_request_update();
+        snprintf(data, sizeof(data),
+                 "{\"level\":%u,\"charging\":%s,\"voltage\":%u}",
+                 battery_get_level(),
+                 battery_is_charging() ? "true" : "false",
+                 battery_get_voltage());
+        return json_create_success(data, response);
     }
 
     level = atoi(cmd->value);

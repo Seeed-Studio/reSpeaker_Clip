@@ -202,4 +202,11 @@ void clip_main_loop(void);
 #define CLIP_TRANSFER_MAX_FILES            CONFIG_TRANSFER_MAX_FILES
 #endif
 
+/* Battery polling interval (seconds) */
+#ifndef CONFIG_BATTERY_POLL_INTERVAL_S
+#define BATTERY_POLL_INTERVAL_S           300
+#else
+#define BATTERY_POLL_INTERVAL_S           CONFIG_BATTERY_POLL_INTERVAL_S
+#endif
+
 #endif /* CLIP_H */

@@ -61,4 +61,13 @@ uint32_t battery_get_voltage(void);
  */
 int battery_notify(void);
 
+/**
+ * @brief Trigger an immediate battery hardware reading.
+ *
+ * Reads voltage and charger status from npm1300 right now (synchronous I2C).
+ * Resets the 30-second periodic timer so the next auto-update is delayed
+ * relative to this manual read.
+ */
+void battery_request_update(void);
+
 #endif /* BATTERY_H */
