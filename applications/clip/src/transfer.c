@@ -904,6 +904,7 @@ static void transfer_cleanup(void)
 	/* Always reset state to IDLE after cleanup */
 	current_transfer.state = TRANSFER_STATE_IDLE;
 	memset(&current_transfer.current_file, 0, sizeof(current_transfer.current_file));
+	memset(current_transfer.session_id, 0, sizeof(current_transfer.session_id));
 	current_transfer.file_index = 0;
 	current_transfer.total_files = 0;
 	current_transfer.synced_files = 0;
