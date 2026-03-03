@@ -82,8 +82,13 @@ class ClipDevice:
         self._canceled = False
         self._file_lock = threading.Lock()
 
-    async def connect(self, timeout: float = CONNECT_TIMEOUT) -> None:
-        """Connect to the device."""
+    async def connect(self, timeout: float = CONNECT_TIMEOUT, sync_time: bool = True) -> None:
+        """Connect to the device.
+
+        Args:
+            timeout: Connection timeout in seconds
+            sync_time: If True, automatically sync device time after connection (default: True)
+        """
         if self._connected:
             return
 
@@ -107,6 +112,20 @@ class ClipDevice:
             await self.client.start_notify(FILE_DATA_UUID, self._file_data_handler)
             await asyncio.sleep(0.5)
             self._connected = True
+
+            # Automatically sync time after connection
+            if sync_time:
+                try:
+                    import time
+                    current_time = int(time.time())
+                    await self.send_command(f"AT+TIME={current_time}", timeout=5.0)
+                    if self._debug:
+                        print(f"[connect] Time synchronized: {current_time}")
+                except Exception as e:
+                    if self._debug:
+                        print(f"[connect] Time sync failed (non-fatal): {e}")
+                    # Time sync failure is not fatal - device can still work with old time
+
         except BleakError as e:
             raise ConnectionError(f"Connection failed: {e}")
 
