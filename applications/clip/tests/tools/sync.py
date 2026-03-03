@@ -11,6 +11,7 @@ Usage:
 import asyncio
 import sys
 import time
+import struct
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -18,6 +19,180 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from clip import ClipDevice, SessionSync, ClipCommands
 from clip.utils import format_bytes, format_duration
+
+
+# ============================================================================
+# OGG CRC32 Implementation (OGG-specific polynomial)
+# ============================================================================
+
+def _ogg_crc32_init():
+    """Generate CRC32 lookup table for OGG (polynomial 0x04C11DB7)."""
+    table = []
+    for i in range(256):
+        crc = i << 24
+        for _ in range(8):
+            if crc & 0x80000000:
+                crc = (crc << 1) ^ 0x04C11DB7
+            else:
+                crc = crc << 1
+            crc &= 0xFFFFFFFF
+        table.append(crc)
+    return table
+
+_OGG_CRC_TABLE = _ogg_crc32_init()
+
+def ogg_crc32(data: bytes) -> int:
+    """Calculate OGG CRC32 (uses different polynomial than standard CRC32)."""
+    crc = 0
+    for byte in data:
+        crc = ((crc << 8) ^ _OGG_CRC_TABLE[((crc >> 24) ^ byte) & 0xFF]) & 0xFFFFFFFF
+    return crc
+
+
+# ============================================================================
+# Simple OGG Opus Writer (no external dependencies)
+# ============================================================================
+
+class OggOpusWriter:
+    """Simple OGG Opus file writer."""
+
+    OPUS_INTERNAL_RATE = 48000
+
+    def __init__(self, filename: str, sample_rate: int = 16000, channels: int = 1):
+        self.file = open(filename, 'wb')
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.serial = 0x12345678
+        self.page_seq = 0
+        self.granule = 0
+        self.frame_size = self.OPUS_INTERNAL_RATE // 50  # 20ms = 960 samples at 48kHz
+
+    def _write_page(self, granule: int, header_type: int, data: bytes):
+        """Write an OGG page."""
+        segment_table = []
+        remaining = len(data)
+        while remaining > 0:
+            seg_size = min(255, remaining)
+            segment_table.append(seg_size)
+            remaining -= seg_size
+
+        if not segment_table:
+            segment_table = [0]
+
+        header = bytearray()
+        header.extend(b'OggS')
+        header.append(0)
+        header.append(header_type)
+        header.extend(struct.pack('<Q', granule))
+        header.extend(struct.pack('<I', self.serial))
+        header.extend(struct.pack('<I', self.page_seq))
+        header.extend(struct.pack('<I', 0))  # CRC placeholder
+        header.append(len(segment_table))
+        header.extend(bytes(segment_table))
+
+        page_data = bytes(header) + data
+        crc = ogg_crc32(page_data)
+        struct.pack_into('<I', header, 22, crc)
+
+        self.file.write(bytes(header) + data)
+        self.page_seq += 1
+
+    def write_header(self):
+        """Write OpusHead and OpusTags pages."""
+        opus_head = bytearray()
+        opus_head.extend(b'OpusHead')
+        opus_head.append(1)
+        opus_head.append(self.channels)
+        opus_head.extend(struct.pack('<H', 312))  # Pre-skip
+        opus_head.extend(struct.pack('<I', self.sample_rate))
+        opus_head.extend(struct.pack('<H', 0))  # Output gain
+        opus_head.append(0)  # Channel mapping family
+
+        self._write_page(0, 0x02, bytes(opus_head))
+
+        opus_tags = bytearray()
+        opus_tags.extend(b'OpusTags')
+        vendor = b'ReSpeaker Clip'
+        opus_tags.extend(struct.pack('<I', len(vendor)))
+        opus_tags.extend(vendor)
+        opus_tags.extend(struct.pack('<I', 0))
+
+        self._write_page(0, 0x00, bytes(opus_tags))
+
+    def write_packet(self, opus_data: bytes):
+        """Write an Opus audio packet."""
+        self.granule += self.frame_size
+        self._write_page(self.granule, 0x00, opus_data)
+
+    def close(self):
+        """Close file."""
+        self.file.close()
+
+
+def parse_raw_opus_frames(raw_data: bytes):
+    """Parse raw Opus frames from device format."""
+    frames = []
+    offset = 0
+
+    while offset < min(200, len(raw_data)):
+        if offset + 2 > len(raw_data):
+            break
+        frame_len = struct.unpack('<H', raw_data[offset:offset+2])[0]
+        if 10 <= frame_len <= 500:
+            break
+        offset += 2
+
+    while offset < len(raw_data):
+        if offset + 2 > len(raw_data):
+            break
+
+        frame_len = struct.unpack('<H', raw_data[offset:offset+2])[0]
+        offset += 2
+
+        if frame_len < 10 or frame_len > 1000:
+            break
+
+        if offset + frame_len > len(raw_data):
+            break
+
+        frame_data = raw_data[offset:offset+frame_len]
+        offset += frame_len
+        frames.append(frame_data)
+
+    return frames
+
+
+def convert_to_ogg_opus(input_file: Path, output_file: Path,
+                        sample_rate: int = 16000, channels: int = 1) -> bool:
+    """Convert raw Opus frames to OGG Opus format."""
+    with open(input_file, 'rb') as f:
+        raw_data = f.read()
+
+    if len(raw_data) == 0:
+        return False
+
+    frames = parse_raw_opus_frames(raw_data)
+    if not frames:
+        return False
+
+    try:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        writer = OggOpusWriter(str(output_file), sample_rate, channels)
+        writer.write_header()
+
+        for frame in frames:
+            writer.write_packet(frame)
+
+        writer.close()
+
+        duration = len(frames) * 20 / 1000
+        print(f"  Created: {output_file.name} ({format_bytes(output_file.stat().st_size)}, {duration:.1f}s)")
+        return True
+
+    except Exception as e:
+        print(f"  Error: {e}")
+        return False
 
 
 async def main():
@@ -276,8 +451,40 @@ Examples:
                 print(f"    ... and {len(bookmarks) - 3} more")
             print(f"  Saved: {result.get('bookmarks_path', 'bookmarks.json')}")
 
+        merged_path = None
+
+        # Check if merged file exists in result
         if result.get('merged_file'):
-            print(f"  Merged: {result['merged_file']}")
+            merged_path = Path(result['merged_file'])
+            print(f"  Merged: {merged_path}")
+        else:
+            # Fallback: check if merged file exists locally
+            potential_merged = args.output / session_id / f"{session_id}.opus"
+            if potential_merged.exists():
+                merged_path = potential_merged
+                print(f"  Merged: {merged_path}")
+
+        # Convert to OGG Opus format
+        if merged_path and merged_path.exists() and merged_path.stat().st_size > 0:
+            # Get audio format from session info
+            try:
+                cmds = ClipCommands(device)
+                session_info = await cmds.get_session_info(session_id)
+                if session_info:
+                    channels = session_info.channels
+                    sample_rate = session_info.sample_rate
+                else:
+                    channels = 1
+                    sample_rate = 16000
+            except Exception:
+                channels = 1
+                sample_rate = 16000
+
+            ch_str = "stereo" if channels == 2 else "mono"
+            print(f"\nConverting to OGG Opus ({ch_str}, {sample_rate//1000}kHz)...")
+            ogg_path = merged_path.parent / f"{session_id}.ogg"
+            convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels)
+
         print(f"  Location: {args.output / session_id}")
         print("=" * 60)
 
