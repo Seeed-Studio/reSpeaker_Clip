@@ -315,12 +315,11 @@ class FileTransfer:
 
             # Exit conditions
             if not continuous:
+                # Non-continuous mode: exit after timeout with no new files
                 if time.time() - last_file_time > no_file_timeout:
                     break
-            else:
-                # Continuous mode: wait longer for new files
-                if time.time() - last_file_time > no_file_timeout:
-                    break
+            # Continuous mode: only exit on transfer_complete from device
+            # (device sets _transfer_complete when recording stops)
 
         # Final check for any remaining files before returning
         for filename, data in list(self.device._session_files.items()):
