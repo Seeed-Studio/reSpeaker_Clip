@@ -240,6 +240,7 @@ static struct bt_data sd[1];
 /* Work queue for operations */
 static struct k_work adv_work;
 static struct k_work_delayable mtu_work;
+static struct k_work transfer_cancel_work;
 
 /* Bond helper: count stored bonds */
 static void count_bond_cb(const struct bt_bond_info *info, void *user_data)
@@ -327,6 +328,15 @@ static void mtu_work_handler(struct k_work *work)
     }
 }
 
+/* Transfer cancel work handler - runs in system workqueue context with larger stack */
+static void transfer_cancel_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    if (transfer_is_active() || transfer_is_paused()) {
+        transfer_cancel();
+    }
+}
+
 /* Connection callbacks */
 static void connected(struct bt_conn *conn, uint8_t err)
 {
@@ -380,9 +390,12 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         /* reason=0x05: auth fail  reason=0x08: timeout  reason=0x13: remote user  reason=0x16: local host */
         LOG_INF("BLE disconnected: addr=%s reason=0x%02x", addr, reason);
 
-        /* Clean up any ongoing transfer */
+        /* Clean up any ongoing transfer via work queue to avoid stack overflow
+         * in BLE RX thread context (transfer_cancel -> storage_set_synced_files
+         * requires significant stack space)
+         */
         if (transfer_is_active() || transfer_is_paused()) {
-            transfer_cancel();
+            k_work_submit(&transfer_cancel_work);
         }
 
         /* Restart advertising */
@@ -538,6 +551,7 @@ int ble_svc_init(void)
     k_work_init(&adv_work, adv_work_handler);
     k_work_init_delayable(&mtu_work, mtu_work_handler);
     k_work_init_delayable(&reboot_work, reboot_work_handler);
+    k_work_init(&transfer_cancel_work, transfer_cancel_work_handler);
 
     /* Enable Bluetooth */
     err = bt_enable(NULL);
