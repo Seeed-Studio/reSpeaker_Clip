@@ -548,7 +548,8 @@ process_next_file:
 							consecutive_empty_refreshes = 0;
 
 							current_transfer.total_files = ret;
-							LOG_DBG("Refresh: %d files", ret);
+							LOG_INF("Waiting for new files... (have %u, sent %u)",
+							        ret, current_transfer.file_index);
 
 							/* Find first file that hasn't been transferred yet */
 							bool found_next = false;
@@ -682,7 +683,7 @@ process_next_file:
 			if (ret != 0) {
 				if (ret == -EOF) {
 					/* File complete */
-					LOG_DBG("File done: %s (%u KB)",
+					LOG_INF("Sent: %s (%u KB)",
 					        current_transfer.current_file,
 					        (uint32_t)(current_transfer.bytes_transferred/1024));
 
@@ -815,7 +816,7 @@ static int transfer_next_file(void)
 	struct fs_dirent entry;
 	ret = fs_stat(filepath, &entry);
 	if (ret == 0) {
-		LOG_DBG("File: %s (%u bytes)", current_transfer.current_file, (uint32_t)entry.size);
+		LOG_INF("Sending: %s (%u KB)", current_transfer.current_file, (uint32_t)entry.size/1024);
 
 		/* Check if file is empty - skip it if so */
 		if (entry.size == 0) {
