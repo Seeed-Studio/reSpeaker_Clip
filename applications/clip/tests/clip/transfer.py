@@ -173,13 +173,28 @@ class FileTransfer:
         self.device._transfer_complete = False
         self._canceled = False
 
-        # Get session info
-        sessions = await self.commands.list_sessions()
-        session_info = None
-        for s in sessions:
-            if s.id == session_id:
-                session_info = s
-                break
+        # Get session info with audio format details
+        try:
+            session_info = await self.commands.get_session_info(session_id)
+        except Exception:
+            # Fallback to list_sessions if get_session_info fails
+            sessions = await self.commands.list_sessions()
+            session_info = None
+            for s in sessions:
+                if s.id == session_id:
+                    session_info = s
+                    break
+
+        # Save session.json immediately (so format info is available even if sync is interrupted)
+        if session_info:
+            session_json = {
+                "session_id": session_id,
+                "mode": session_info.mode,
+                "channels": session_info.channels,
+                "sample_rate": session_info.sample_rate,
+            }
+            session_json_path = output_dir / "session.json"
+            session_json_path.write_text(json.dumps(session_json, indent=2))
 
         # Start download
         if start_file:
@@ -213,6 +228,10 @@ class FileTransfer:
             merged_path = output_dir / f"{session_id}.opus"
             await self._merge_opus_files(result["files"], merged_path)
             result["merged_file"] = str(merged_path)
+
+        # Add session.json path to result (already saved at start)
+        if session_info:
+            result["session_json"] = str(output_dir / "session.json")
 
         return result
 
@@ -270,6 +289,7 @@ class FileTransfer:
                         "size": len(data),
                     })
                     last_file_time = time.time()
+                    start_time = time.time()  # Reset timeout when receiving files
 
                     if progress_callback:
                         total_size = sum(f["size"] for f in files_received)
@@ -492,6 +512,11 @@ class SessionSync(FileTransfer):
             }
             if merged_path.exists():
                 result["merged_file"] = str(merged_path)
+            else:
+                # Need to merge files even if already synced
+                await self._merge_opus_files(result["files"], merged_path)
+                if merged_path.exists():
+                    result["merged_file"] = str(merged_path)
             return result
 
         # Log sync info
@@ -501,16 +526,19 @@ class SessionSync(FileTransfer):
             print(f"Starting from beginning ({total_files} files total)")
 
         # Download with merge (start_file is calculated above)
+        # In continuous mode, use a very long timeout since recording may be long
         result = await self.download_session(
             session_id,
             output_dir,
             progress_callback=progress_callback,
             continuous=continuous,
             start_file=start_file,
+            timeout=86400.0 if continuous else 300.0,  # 24 hours for continuous, 5 min otherwise
         )
 
         # Delete from device if requested
-        if delete_after and result["file_count"] > 0:
+        # Note: In continuous mode, recording is still active so we should not delete
+        if delete_after and not continuous and result["file_count"] > 0:
             try:
                 await self.commands.delete_session(session_id)
             except Exception:
