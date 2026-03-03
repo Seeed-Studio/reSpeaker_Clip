@@ -67,12 +67,12 @@ static const struct clip_config factory_config = {
     .bitrate = 48000,
     .complexity = 1,
     .mode = MODE_ENHANCED,
-    .noise_suppress = 0,
+    .noise_suppress = 30,     /* Enable noise suppression by default (30dB) */
     .chunk_size = 500,
     .auto_delete_days = -1,
     .agc_target = 0,
     .agc_enabled = false,
-    .dereverb_enabled = false,
+    .dereverb_enabled = true, /* Enable dereverberation by default */
     .oled_contrast = OLED_CONTRAST_DEFAULT,
 };
 

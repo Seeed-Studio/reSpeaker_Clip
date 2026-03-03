@@ -446,6 +446,18 @@ static int audio_start_recording_internal(enum audio_mode mode)
 	LOG_INF("Audio config: %d Hz, %d ch, frame=%u samples, %u ms, block=%u bytes",
 		AUDIO_SAMPLE_RATE, opus_channels, AUDIO_OPUS_FRAME_SIZE, AUDIO_FRAME_MS, AUDIO_BLOCK_SIZE);
 
+#ifdef CONFIG_SPEEXDSP
+	/* Log DSP configuration */
+	if (speex_enabled) {
+		LOG_INF("SpeexDSP: NS=%ddB, dereverb=%s, AGC=%s",
+			g_config.noise_suppress,
+			g_config.dereverb_enabled ? "on" : "off",
+			g_config.agc_enabled ? "on" : "off");
+	} else {
+		LOG_INF("SpeexDSP disabled (mode=stereo or NS=0)");
+	}
+#endif
+
 	/* Create session directory and first file */
 	if (storage_enabled && storage_is_mounted()) {
 		/* Create session directory with audio format info */
@@ -908,23 +920,36 @@ static int init_speex_preprocessor(void)
 		return -ENOMEM;
 	}
 
-	/* Set noise suppression (30dB) */
-	int denoise = 30;
+	/* Set noise suppression from NVS config (0-60 dB) */
+	int denoise = g_config.noise_suppress;
 	speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &denoise);
 
-	/* Enable dereverberation */
-	int dereverb = 1;
+	/* Enable/disable dereverberation from NVS config */
+	int dereverb = g_config.dereverb_enabled ? 1 : 0;
 	speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_DEREVERB, &dereverb);
 
-	/* Set dereverb level */
+	/* Set dereverb level (fixed at 40 for now) */
 	int dereverb_level = 40;
 	speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_DEREVERB_LEVEL, &dereverb_level);
 
-	/* Set dereverb decay */
+	/* Set dereverb decay (fixed at 20 for now) */
 	int dereverb_decay = 20;
 	speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_DEREVERB_DECAY, &dereverb_decay);
 
-	LOG_INF("SpeexDSP initialized: NS=30dB, dereverb=enabled");
+	/* Enable AGC from NVS config */
+	if (g_config.agc_enabled) {
+		int agc = 1;
+		speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_AGC, &agc);
+		/* AGC target level (default 0 = 30dB) */
+		int agc_level = g_config.agc_target > 0 ? g_config.agc_target : 30;
+		speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_AGC_TARGET, &agc_level);
+	}
+
+	LOG_INF("SpeexDSP: NS=%ddB, dereverb=%s, AGC=%s (target=%d)",
+		denoise,
+		dereverb ? "on" : "off",
+		g_config.agc_enabled ? "on" : "off",
+		g_config.agc_enabled ? (g_config.agc_target > 0 ? g_config.agc_target : 30) : 0);
 
 	return 0;
 }
