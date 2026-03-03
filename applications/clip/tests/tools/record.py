@@ -421,6 +421,19 @@ async def record_and_sync(
         output_path = output_dir / session_id
         output_path.mkdir(parents=True, exist_ok=True)
 
+        # Save session.json immediately with format info
+        import json
+        # Determine channels based on mode
+        channels = 2 if mode == "stereo" else 1
+        session_json = {
+            "session_id": session_id,
+            "mode": mode,
+            "channels": channels,
+            "sample_rate": 16000,
+        }
+        session_json_path = output_path / "session.json"
+        session_json_path.write_text(json.dumps(session_json, indent=2))
+
         print(f"Starting real-time sync to: {output_path}")
         print(f"\nControls:")
         print(f"  SPACE  - Add bookmark mark")
@@ -461,6 +474,22 @@ async def record_and_sync(
             except asyncio.TimeoutError:
                 pass
 
+            # Check if sync task died due to BLE disconnect
+            if sync_task.done():
+                try:
+                    sync_result = sync_task.result()
+                except Exception as e:
+                    print(f"\n\nSync stopped: {e}")
+                    print("BLE connection lost, saving what we have...")
+                    recording = False
+                    break
+
+            # Check BLE connection
+            if not device.is_connected:
+                print(f"\n\nBLE disconnected, saving what we have...")
+                recording = False
+                break
+
             elapsed = asyncio.get_event_loop().time() - start_time
             if duration and elapsed >= duration:
                 print(f"\nDuration ({duration}s) reached")
@@ -481,17 +510,34 @@ async def record_and_sync(
             keyboard.stop()
 
         print(f"\n\nStopping recording...")
-        result = await commands.stop_recording()
 
-        print("Waiting for sync to complete...")
+        # Try to stop recording on device (may fail if BLE disconnected)
+        result = None
+        if device.is_connected:
+            try:
+                result = await commands.stop_recording()
+            except Exception as e:
+                print(f"  Warning: Could not stop recording on device: {e}")
+                print(f"  (Recording will continue on device until timeout)")
+        else:
+            print(f"  Warning: BLE disconnected, could not stop recording on device")
+            print(f"  (Recording will continue on device until timeout)")
+
+        # Only wait for sync if BLE is still connected
         sync_result = None
-        if sync_task and not sync_task.done():
+        if device.is_connected and sync_task and not sync_task.done():
+            print("Waiting for sync to complete...")
             wait_start = time.time()
             last_count = 0
 
             while not sync_task.done():
                 await asyncio.sleep(0.3)
                 elapsed = time.time() - wait_start
+
+                # Stop waiting if BLE disconnected
+                if not device.is_connected:
+                    print("  BLE disconnected, stopping sync wait...")
+                    break
 
                 if elapsed > 1.0:
                     current_files = sync_stats['file_count']
@@ -507,11 +553,22 @@ async def record_and_sync(
                     break
 
             try:
-                sync_result = await sync_task
+                if sync_task.done():
+                    sync_result = sync_task.result()
+                else:
+                    sync_result = None
             except Exception:
                 sync_result = None
+        elif not device.is_connected:
+            print("BLE disconnected, skipping sync wait (files will remain on device)")
+            # Cancel the sync task
+            if sync_task and not sync_task.done():
+                try:
+                    await sync.cancel()
+                except Exception:
+                    pass
 
-        duration_sec = result.get('duration', 0)
+        duration_sec = result.get('duration', 0) if result else 0
         sync_elapsed = time.time() - sync_start_time
         avg_speed = sync_stats['total_bytes'] / sync_elapsed if sync_elapsed > 0 else 0
 
@@ -529,13 +586,18 @@ async def record_and_sync(
         print(f"  Session: {session_id}")
         print(f"  Duration: {format_duration(duration_sec)}")
 
-        # Get audio format from device for accurate display
+        # Get audio format from device for accurate display (may fail if BLE disconnected)
         try:
-            session_info = await commands.get_session_info(session_id)
-            if session_info:
-                channels = session_info.channels
-                sample_rate = session_info.sample_rate
-                audio_mode = session_info.mode
+            if device.is_connected:
+                session_info = await commands.get_session_info(session_id)
+                if session_info:
+                    channels = session_info.channels
+                    sample_rate = session_info.sample_rate
+                    audio_mode = session_info.mode
+                else:
+                    channels = 2 if mode in ["normal", "stereo"] else 1
+                    sample_rate = 16000
+                    audio_mode = mode
             else:
                 channels = 2 if mode in ["normal", "stereo"] else 1
                 sample_rate = 16000
@@ -568,6 +630,24 @@ async def record_and_sync(
             print(f"\nConverting to OGG Opus ({ch_str}, {sample_rate//1000}kHz)...")
             ogg_path = output_path / f"{session_id}.ogg"
             convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels)
+        else:
+            # No merged file - check if we have individual .opus files to merge
+            opus_files = list(output_path.glob("*.opus"))
+            if opus_files:
+                print(f"\nNo merged file found, merging {len(opus_files)} individual files...")
+                merged_path = output_path / f"{session_id}.opus"
+                with open(merged_path, "wb") as outfile:
+                    for opus_file in sorted(opus_files, key=lambda x: x.name):
+                        outfile.write(opus_file.read_bytes())
+                print(f"  Created: {merged_path.name} ({format_bytes(merged_path.stat().st_size)})")
+
+                # Now convert to OGG
+                ch_str = "stereo" if channels == 2 else "mono"
+                print(f"\nConverting to OGG Opus ({ch_str}, {sample_rate//1000}kHz)...")
+                ogg_path = output_path / f"{session_id}.ogg"
+                convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels)
+            else:
+                print(f"\nNo audio files found to convert")
 
         print(f"\n  Location: {output_path}")
         print("=" * 60)
