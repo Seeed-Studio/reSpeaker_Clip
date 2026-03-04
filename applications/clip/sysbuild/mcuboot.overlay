@@ -9,12 +9,17 @@
 / {
 	chosen {
 		/* Keep external flash reference - needed for DFU */
-		nordic,pm-ext-flash = &spi_flash; 
+		nordic,pm-ext-flash = &spi_flash;
+	};
+	/* MCUboot button aliases for serial recovery trigger */
+	aliases {
+		mcuboot-button0 = &usr_btn;
 	};
 };
 
+/* Disable console - not needed for USB serial recovery */
 &uart0 {
-	current-speed = <921600>;
+	status = "disabled";
 };
 
 /* Disable I2C1 and related devices (PMIC, sensors) */
@@ -65,9 +70,24 @@
 	status = "disabled";
 };
 
-/* Disable USB */
-&usbd {
-	status = "disabled";
+/* =============================================================================
+ * USB Serial Recovery - CDC ACM Configuration
+ * =============================================================================
+ * Step 2.1 - Configure CDC ACM for DFU over USB
+ * USB must be enabled for serial recovery mode
+ */
+
+/* Enable USB device for CDC ACM */
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+};
+
+/* Configure CDC ACM UART on USB */
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
 };
 
 /* Disable regulators */
