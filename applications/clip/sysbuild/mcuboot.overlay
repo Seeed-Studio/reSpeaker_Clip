@@ -9,8 +9,12 @@
 / {
 	chosen {
 		/* Keep external flash reference - needed for DFU */
-		/* nordic,pm-ext-flash = &spi_flash; */
+		nordic,pm-ext-flash = &spi_flash; 
 	};
+};
+
+&uart0 {
+	current-speed = <921600>;
 };
 
 /* Disable I2C1 and related devices (PMIC, sensors) */

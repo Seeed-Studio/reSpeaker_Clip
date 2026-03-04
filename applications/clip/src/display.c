@@ -190,18 +190,6 @@ static inline void clear_pixel_direct(uint8_t *buf, int x, int y)
 	buf[(y / 8) * OLED_WIDTH + x] &= ~(1 << (y % 8));
 }
 
-static void draw_rect_direct(uint8_t *buf, int x, int y, int w, int h, bool fill)
-{
-	/* Draw rectangle WITHOUT mirror transformation */
-	for (int i = x; i < x + w && i < OLED_WIDTH; i++) {
-		for (int j = y; j < y + h && j < OLED_HEIGHT; j++) {
-			if (fill || i == x || i == x + w - 1 || j == y || j == y + h - 1) {
-				set_pixel_direct(buf, i, j);
-			}
-		}
-	}
-}
-
 static void clear_screen(uint8_t *buf)
 {
 	memset(buf, 0, OLED_BUF_SIZE);
