@@ -491,12 +491,15 @@ class SessionSync(FileTransfer):
             start_file = f"{next_num:04d}.opus"
         elif existing_files:
             # Fallback: check local files if device doesn't have synced info
-            try:
-                last_num = int(existing_files[-1].stem)
-                next_num = last_num + 1
-                start_file = f"{next_num:04d}.opus"
-            except ValueError:
-                pass
+            # Only accept NNNN.opus format (4-digit sequential files)
+            import re
+            for f in reversed(existing_files):
+                match = re.match(r'^(\d{4})$', f.stem)
+                if match:
+                    last_num = int(match.group(1))
+                    next_num = last_num + 1
+                    start_file = f"{next_num:04d}.opus"
+                    break
 
         # Check if already synced (all files exist locally)
         # Skip this check in continuous mode - always check for new files
