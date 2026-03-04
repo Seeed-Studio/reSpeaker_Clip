@@ -163,13 +163,20 @@ static void at_thread_main(void *p1, void *p2, void *p3)
             continue;
         }
 
-        LOG_DBG("cmd: %s", item.data);
+        LOG_INF("cmd: %s", item.data);
 
         /* Parse AT command */
         memset(&cmd, 0, sizeof(cmd));
         err = at_cmd_parse(item.data, &cmd);
         if (err != 0) {
-            LOG_WRN("parse: %d", err);
+            LOG_WRN("parse failed: %d (cmd: %s)", err, item.data);
+            /* Send error response instead of silently failing */
+            json_create_error("Parse error", &response);
+            if (response) {
+                ble_svc_send_response(response);
+                k_free(response);
+                response = NULL;
+            }
             continue;
         }
 
