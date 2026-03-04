@@ -12,6 +12,10 @@
 
 /* Simple JSON builder - minimal implementation for our needs */
 
+/* Shared buffer for large JSON responses (e.g., bookmarks with many entries) */
+#define JSON_LARGE_BUFFER_SIZE 4096
+static char json_large_buffer[JSON_LARGE_BUFFER_SIZE];
+
 int json_build_response(bool ok, const char *key, const char *value,
                        const char *error, char **output)
 {
@@ -57,6 +61,26 @@ int json_build_response(bool ok, const char *key, const char *value,
 
 int json_create_success(const char *data, char **output)
 {
+    int len;
+    size_t data_len = strlen(data);
+
+    /* Use large buffer if data exceeds small buffer capacity */
+    /* Small buffer: 512 - overhead (~30) = ~480 bytes for data */
+    if (data_len > 480) {
+        len = snprintf(json_large_buffer, JSON_LARGE_BUFFER_SIZE,
+                      "{\"ok\":true,\"data\":%s}", data);
+        if (len < 0 || len >= JSON_LARGE_BUFFER_SIZE) {
+            return -ENOMEM;
+        }
+
+        *output = k_malloc(len + 1);
+        if (!*output) {
+            return -ENOMEM;
+        }
+        strcpy(*output, json_large_buffer);
+        return 0;
+    }
+
     return json_build_response(true, "data", data, NULL, output);
 }
 

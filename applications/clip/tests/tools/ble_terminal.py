@@ -21,16 +21,18 @@ from clip import ClipDevice, ClipCommands
 class BLETerminal:
     """Interactive BLE terminal."""
 
-    def __init__(self, address: str = None):
+    def __init__(self, address: str = None, verbose: bool = False):
         self.address = address
         self.device = None
         self.commands = None
         self.running = True
+        self.verbose = verbose
 
     async def connect(self) -> bool:
         """Connect to device."""
         print("Scanning for device...")
         self.device = ClipDevice(address=self.address)
+        self.device._debug = self.verbose
 
         try:
             await self.device.connect()
@@ -197,9 +199,10 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser(description="BLE AT Command Terminal")
     parser.add_argument("--device", "-d", help="Device MAC address")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose output")
     args = parser.parse_args()
 
-    terminal = BLETerminal(args.device)
+    terminal = BLETerminal(args.device, verbose=args.verbose)
 
     if not await terminal.connect():
         return 1
