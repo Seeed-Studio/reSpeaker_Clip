@@ -8,6 +8,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/logging/log.h>
+#include <app_version.h>
 #include <time.h>
 #include <string.h>
 #include <strings.h>
@@ -270,7 +271,10 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
 
 static int cmd_version(const struct at_command *cmd, char **response)
 {
-    return json_create_kv("firmware", "\"1.0.0\"", response);
+    char version_str[32];
+
+    snprintf(version_str, sizeof(version_str), "\"%s\"", APP_VERSION_STRING);
+    return json_create_kv("firmware", version_str, response);
 }
 
 /* Combined TIME command handler for GET and SET */

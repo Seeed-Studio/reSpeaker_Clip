@@ -6,6 +6,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <app_version.h>
 
 #include <nrfx_clock.h>
 
@@ -277,6 +278,10 @@ int main(void)
 #ifdef CLOCK_FEATURE_HFCLK_DIVIDE_PRESENT
     nrfx_clock_divider_set(NRF_CLOCK_DOMAIN_HFCLK, NRF_CLOCK_HFCLK_DIV_1);
 #endif
+
+    /* Print version and build info at startup */
+    LOG_INF("reSpeaker Clip Firmware v%s", APP_VERSION_STRING);
+    LOG_INF("Build: %s %s", __DATE__, __TIME__);
 
     int err;
 
