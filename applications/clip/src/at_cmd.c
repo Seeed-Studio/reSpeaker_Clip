@@ -1165,43 +1165,45 @@ static int cmd_marks(const struct at_command *cmd, char **response)
     int return_count;
     char *ptr = json_buffer;
     int remaining = sizeof(json_buffer);
+    char session_id[32];
 
     if (!cmd->value) {
         return json_create_error("Missing session ID", response);
     }
 
-    /* Check if session exists */
-    if (!storage_session_exists(cmd->value)) {
-        return json_create_error("Session not found", response);
-    }
-
-    /* Get total bookmark count */
-    total_count = bookmarks_count(cmd->value);
-    if (total_count < 0) {
-        total_count = 0;
-    }
-
-    /* Parse start index from value (format: "session_id?start" or "session_id") */
+    /* Parse session_id and optional start index (format: "session_id?start" or "session_id") */
     const char *query = strchr(cmd->value, '?');
-    char session_id[32];
 
     if (query) {
-        /* Extract session_id */
+        /* Extract session_id (part before ?) */
         size_t len = query - cmd->value;
         if (len >= sizeof(session_id)) {
             len = sizeof(session_id) - 1;
         }
         strncpy(session_id, cmd->value, len);
         session_id[len] = '\0';
+    } else {
+        strncpy(session_id, cmd->value, sizeof(session_id) - 1);
+        session_id[sizeof(session_id) - 1] = '\0';
+    }
 
-        /* Parse start index */
+    /* Check if session exists */
+    if (!storage_session_exists(session_id)) {
+        return json_create_error("Session not found", response);
+    }
+
+    /* Get total bookmark count */
+    total_count = bookmarks_count(session_id);
+    if (total_count < 0) {
+        total_count = 0;
+    }
+
+    /* Parse start index if present */
+    if (query) {
         start_index = atoi(query + 1);
         if (start_index < 0 || start_index >= total_count) {
             start_index = 0;
         }
-    } else {
-        strncpy(session_id, cmd->value, sizeof(session_id) - 1);
-        session_id[sizeof(session_id) - 1] = '\0';
     }
 
     /* Check if query requested (has ?) or total is small enough to return all */
