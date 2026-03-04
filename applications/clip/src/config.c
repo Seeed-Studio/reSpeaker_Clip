@@ -209,8 +209,14 @@ int config_init(void)
         LOG_WRN("Time settings register failed: %d", err);
     }
 
-    /* Load configuration from NVS */
-    err = settings_load();
+    /* Load ONLY config and time subtrees here. Do NOT call settings_load()
+     * for all subtrees: the BT stack registers a static GATT hash commit
+     * callback (bt/hash) that, when NVS is empty, calls sc_indicate() which
+     * schedules gatt_sc.work BEFORE bt_gatt_init() sets its handler - causing
+     * a NULL function pointer crash 10 ms later in the work queue.
+     * BT settings (bt/*) are loaded in ble_svc_init() after bt_enable().
+     */
+    err = settings_load_subtree("config");
     if (err) {
         LOG_WRN("Settings load failed: %d, using defaults", err);
         /* Save defaults to NVS */
@@ -220,6 +226,8 @@ int config_init(void)
                 (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced",
                 g_config.bitrate, g_config.complexity);
     }
+    /* Load time settings separately (ignore errors - time is optional) */
+    settings_load_subtree("time");
 #else
     LOG_INF("Config: factory defaults (NVS disabled)");
 #endif /* CONFIG_SETTINGS */

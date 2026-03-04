@@ -44,10 +44,10 @@
 			reg = <0x000c0000 DT_SIZE_K(192)>;
 		};
 
-		/* 0xf0000 to 0xf7fff reserved for TF-M partitions */
-		storage_partition: partition@f8000 {
+		/* 0xfc000 to 0xfdfff: NVS settings storage (must be outside mcuboot_primary 0xc000-0xfbfff) */
+		storage_partition: partition@fc000 {
 			label = "storage";
-			reg = <0x000f8000 DT_SIZE_K(32)>;
+			reg = <0x000fc000 DT_SIZE_K(8)>;
 		};
 	};
 };

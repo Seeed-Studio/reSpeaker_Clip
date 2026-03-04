@@ -450,11 +450,12 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
 
     if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
-        /* Phone has a stale bond that we no longer have. Clear all local
-         * bonds so next connection starts fresh pairing.
+        /* Remote has a stale bond key that we no longer have locally.
+         * Do NOT call bt_unpair() here - local bond is already absent,
+         * calling it would erase any *other* valid local bonds.
+         * Just disconnect; the phone will re-pair on the next connection.
          */
-        LOG_WRN("Stale bond from remote (addr=%s), clearing bonds and disconnecting", addr);
-        bt_unpair(BT_ID_DEFAULT, NULL);
+        LOG_WRN("Stale bond from remote (addr=%s), disconnecting to re-pair", addr);
         bt_conn_disconnect(conn, BT_HCI_ERR_PIN_OR_KEY_MISSING);
         return;
     }
@@ -497,6 +498,17 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
     LOG_INF("Pairing complete: addr=%s bonded=%d", addr, bonded);
     if (bonded) {
+        /* CONFIG_BT_SETTINGS_DELAYED_STORE=y defers NVS writes by 1000ms.
+         * If an OTA reboot happens within that window the bond is lost.
+         * Force an immediate synchronous settings save here so the bond
+         * key is on flash before any reboot can occur.
+         */
+        int err = settings_save();
+        if (err) {
+            LOG_WRN("settings_save after pairing failed: %d", err);
+        } else {
+            LOG_INF("Bond saved to NVS");
+        }
         ui_post_event(UI_EVT_BONDED);
     }
 }
