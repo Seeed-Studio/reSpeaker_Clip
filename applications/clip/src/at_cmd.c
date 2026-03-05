@@ -922,9 +922,10 @@ static int cmd_stop(const struct at_command *cmd, char **response)
 {
     int err;
     struct audio_stats audio_stats;
+    enum clip_state current_state = state_get_current();
 
-    /* Check current state */
-    if (state_get_current() != CLIP_STATE_RECORDING) {
+    /* Check current state - allow stop from RECORDING or PAUSED state */
+    if (current_state != CLIP_STATE_RECORDING && current_state != CLIP_STATE_PAUSED) {
         return json_create_error("Not recording", response);
     }
 

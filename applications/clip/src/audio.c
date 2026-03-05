@@ -271,6 +271,7 @@ int audio_start_recording(enum audio_mode mode)
 	file_start_frame_count = 0;
 	was_transferring = false;
 	recording_start_time = (uint32_t)(k_uptime_get() / 1000);
+	total_paused_time = 0;  /* Reset paused time for new session */
 
 	/* Set start request flag with mode */
 	start_requested = true;
@@ -550,8 +551,9 @@ static int audio_stop_recording_internal(void)
 	}
 
 	recording_active = false;
+	recording_paused = false;  /* Reset pause state when stopping */
 
-	/* Stop DMIC */
+	/* Stop DMIC (may already be stopped if paused) */
 	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
 	if (ret < 0) {
 		LOG_ERR("Failed to stop DMIC: %d", ret);
