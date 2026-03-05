@@ -341,6 +341,8 @@ int transfer_cancel(void)
 
 	LOG_INF("Transfer canceled");
 
+	/* Set state to IDLE to stop the transfer loop */
+	current_transfer.state = TRANSFER_STATE_IDLE;
 	transfer_cleanup();
 
 	return 0;
@@ -445,9 +447,24 @@ static void transfer_thread_main(void *p1, void *p2, void *p3)
 
 process_next_file:
 
+		/* Check if we should be processing transfers */
+		if (current_transfer.state != TRANSFER_STATE_TRANSMITTING) {
+			/* Not in transmitting state, wait for next transfer */
+			if (current_transfer.state == TRANSFER_STATE_IDLE) {
+				transfer_thread_waiting = true;
+				k_sem_take(&transfer_trigger_sem, K_FOREVER);
+				transfer_thread_waiting = false;
+				goto process_next_file;
+			}
+			/* COMPLETED or ERROR state - wait and recheck */
+			k_sleep(K_MSEC(100));
+			continue;
+		}
+
 		/* Check BLE connection first - if disconnected, stop waiting */
 		if (!ble_svc_is_ready()) {
 			LOG_INF("BLE disconnected, stopping transfer (process_next_file)");
+			current_transfer.state = TRANSFER_STATE_IDLE;
 			transfer_cleanup();
 			/* Wait for next transfer */
 			transfer_thread_waiting = true;
@@ -465,6 +482,7 @@ process_next_file:
 			if (ret != 0) {
 				if (ret == -ENOTCONN) {
 					/* BLE disconnected - stop transfer immediately */
+					current_transfer.state = TRANSFER_STATE_IDLE;
 					transfer_cleanup();
 					/* Wait for next transfer */
 					transfer_thread_waiting = true;
@@ -687,8 +705,8 @@ process_next_file:
 			/* Check if BLE is connected before sending */
 			if (!ble_svc_is_ready()) {
 				LOG_INF("BLE disconnected, canceling transfer");
-				transfer_cleanup();
-				break;
+				current_transfer.state = TRANSFER_STATE_IDLE;
+				break;  /* Let main loop handle cleanup */
 			}
 
 			ret = transfer_send_chunk();
@@ -722,13 +740,12 @@ process_next_file:
 				} else if (ret == -ENOTCONN || ret == -EIO) {
 					/* BLE connection error, cancel transfer */
 					LOG_INF("BLE connection lost, canceling transfer (error: %d)", ret);
-					transfer_cleanup();
-					break;
+					current_transfer.state = TRANSFER_STATE_IDLE;
+					break;  /* Let main loop handle cleanup */
 				} else {
 					current_transfer.state = TRANSFER_STATE_ERROR;
 					LOG_ERR("Transfer send error: %d", ret);
-					transfer_cleanup();
-					break;
+					break;  /* Let main loop handle cleanup */
 				}
 			}
 
