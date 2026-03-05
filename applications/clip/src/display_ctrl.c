@@ -38,6 +38,9 @@ static int64_t rec_wave_start_ms;
 /* REC_DOT: track if entry animation has played (module-level, no shadowing) */
 static bool dot_animation_played;
 
+/* Recording paused state - overlay pause icon without changing recording display */
+static bool recording_paused = false;
+
 /* ========== Public API ========== */
 
 void ui_post_event(enum ui_event evt)
@@ -193,8 +196,9 @@ void ui_thread_main(void *p1, void *p2, void *p3)
                 LOG_INF("[UI] EVT: REC_PAUSE");
                 if (ui_current_state == UI_STATE_REC_WAVE ||
                     ui_current_state == UI_STATE_REC_DOT) {
-                    /* Show pause icon - keep in current state but set paused flag */
-                    display_show_pause_icon();
+                    /* Overlay pause icon without clearing recording display */
+                    recording_paused = true;
+                    display_overlay_pause_icon();
                 }
                 break;
 
@@ -202,7 +206,13 @@ void ui_thread_main(void *p1, void *p2, void *p3)
                 LOG_INF("[UI] EVT: REC_RESUME");
                 if (ui_current_state == UI_STATE_REC_WAVE ||
                     ui_current_state == UI_STATE_REC_DOT) {
-                    /* Resume recording - restore recording display */
+                    /* Clear paused flag */
+                    recording_paused = false;
+                    /* Reset wave animation timer to show wave animation again */
+                    rec_wave_start_ms = k_uptime_get();
+                    dot_animation_played = false;
+                    set_state(UI_STATE_REC_WAVE);
+                    /* Show recording wave animation */
                     display_show_recording(g_config.mode == MODE_ENHANCED);
                 }
                 break;

@@ -97,6 +97,14 @@ void display_show_poweroff(void);
 void display_show_pause_icon(void);
 
 /**
+ * @brief Overlay pause icon on current recording display
+ *
+ * Overlays a pause icon (two vertical bars) on current display
+ * without clearing the screen. Called when recording is paused.
+ */
+void display_overlay_pause_icon(void);
+
+/**
  * @brief Set OLED contrast/brightness
  *
  * @param contrast 0 = minimum brightness, 255 = maximum brightness
