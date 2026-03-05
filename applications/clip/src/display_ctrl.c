@@ -196,16 +196,17 @@ void ui_thread_main(void *p1, void *p2, void *p3)
                 LOG_INF("[UI] EVT: REC_PAUSE");
                 if (ui_current_state == UI_STATE_REC_WAVE ||
                     ui_current_state == UI_STATE_REC_DOT) {
-                    /* Overlay pause icon without clearing recording display */
+                    /* Switch to paused state */
                     recording_paused = true;
-                    display_overlay_pause_icon();
+                    set_state(UI_STATE_PAUSED);
+                    /* Show pause icon */
+                    display_show_pause_icon();
                 }
                 break;
 
         case UI_EVT_REC_RESUME:
                 LOG_INF("[UI] EVT: REC_RESUME");
-                if (ui_current_state == UI_STATE_REC_WAVE ||
-                    ui_current_state == UI_STATE_REC_DOT) {
+                if (ui_current_state == UI_STATE_PAUSED) {
                     /* Clear paused flag */
                     recording_paused = false;
                     /* Reset wave animation timer to show wave animation again */
@@ -252,6 +253,10 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 			/* ---- Timeout: periodic state work ---- */
 			switch (ui_current_state) {
 			case UI_STATE_REC_WAVE:
+				/* If paused, skip waveform update - keep current frame */
+				if (recording_paused) {
+					break;
+				}
 				/* Redraw waveform frame */
 				display_show_recording(g_config.mode == MODE_ENHANCED);
 				/* After 5s, transition to DOT */

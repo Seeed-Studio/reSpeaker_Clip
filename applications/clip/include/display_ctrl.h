@@ -24,6 +24,7 @@ enum ui_state {
 	UI_STATE_REC_WAVE,       /**< Recording: waveform animation (first 5s) */
 	UI_STATE_REC_DOT,        /**< Recording: stable dot (stays on) */
 	UI_STATE_MARKING,        /**< Recording: mark animation (~150ms) */
+	UI_STATE_PAUSED,         /**< Recording paused: show pause icon */
 };
 
 /**
