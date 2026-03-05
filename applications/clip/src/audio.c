@@ -188,11 +188,11 @@ int audio_init(void)
 		LOG_WRN("mic_pwr: %d", ret);
 	}
 
-	/* Set microphone gain - level 6 (+20dB) */
+	/* Set microphone gain - maximum gain (+20dB, ~3x amplitude increase) */
 #ifdef NRF_PDM0_S
-	nrf_pdm_gain_set(NRF_PDM0_S, 0x3C, 0x3C);
+	nrf_pdm_gain_set(NRF_PDM0_S, 0x50, 0x50);
 #else
-	nrf_pdm_gain_set(NRF_PDM0_NS, 0x3C, 0x3C);
+	nrf_pdm_gain_set(NRF_PDM0_NS, 0x50, 0x50);
 #endif
 
 	{

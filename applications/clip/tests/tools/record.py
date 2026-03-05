@@ -568,6 +568,16 @@ async def record_and_sync(
                 except Exception:
                     pass
 
+        # Delete session from device after successful sync
+        if device.is_connected and session_id:
+            try:
+                print(f"Deleting session from device: {session_id}")
+                await commands.delete_session(session_id)
+                print(f"  Session deleted successfully")
+            except Exception as e:
+                print(f"  Warning: Could not delete session: {e}")
+                print(f"  (Session will remain on device)")
+
         duration_sec = result.get('duration', 0) if result else 0
         sync_elapsed = time.time() - sync_start_time
         avg_speed = sync_stats['total_bytes'] / sync_elapsed if sync_elapsed > 0 else 0
