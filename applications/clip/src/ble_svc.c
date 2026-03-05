@@ -335,11 +335,11 @@ static void mtu_work_handler(struct k_work *work)
     }
 }
 
-/* Transfer cancel work handler - runs in system workqueue context with larger stack */
+/* Transfer cancel work handler - cancel transfer if active */
 static void transfer_cancel_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
-    if (transfer_is_active() || transfer_is_paused()) {
+    if (transfer_is_active()) {
         transfer_cancel();
     }
 }
@@ -401,7 +401,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
          * in BLE RX thread context (transfer_cancel -> storage_set_synced_files
          * requires significant stack space)
          */
-        if (transfer_is_active() || transfer_is_paused()) {
+        if (transfer_is_active()) {
             k_work_submit(&transfer_cancel_work);
         }
 
