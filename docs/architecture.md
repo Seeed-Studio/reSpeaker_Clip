@@ -468,7 +468,7 @@ int fs_delete_session(const char *session_id);
 **Directory Structure:**
 ```
 /SD:/REC/
-├── YYYYMMDD_HHMMSS/
+├── YYYYMMDDHHMMSS/
 │   ├── session.json
 │   ├── files.lst
 │   ├── marks.bin

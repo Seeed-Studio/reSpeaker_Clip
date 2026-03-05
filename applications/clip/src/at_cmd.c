@@ -243,6 +243,7 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
     struct audio_stats audio_stats;
     uint32_t free_space = 0;
     uint32_t recording_duration = 0;
+    const char *session_id = NULL;
 
     /* Refresh battery reading before reporting */
     battery_request_update();
@@ -252,14 +253,16 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
         free_space = stats.free_space_mb;
     }
 
-    /* Get recording duration if recording */
+    /* Get recording duration and session ID if recording */
     if (audio_is_recording() && audio_get_stats(&audio_stats) == 0) {
         recording_duration = (uint32_t)(audio_stats.recording_time_ms / 1000);
+        session_id = audio_get_session_id();
     }
 
     snprintf(buffer, sizeof(buffer),
              "{\"state\":\"%s\","
              "\"recording\":%s,"
+             "\"session_id\":%s%s%s,"
              "\"duration\":%u,"
              "\"battery\":%u,"
              "\"charging\":%s,"
@@ -268,6 +271,7 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
              "\"free_space\":%u}",
              state_to_string(state_get_current()),
              audio_is_recording() ? "true" : "false",
+             session_id ? "\"" : "", session_id ? session_id : "", session_id ? "\"" : "\"\"",
              recording_duration,
              battery_get_level(),
              battery_is_charging() ? "true" : "false",

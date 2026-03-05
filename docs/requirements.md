@@ -129,7 +129,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 #### 3.2.2 Session Organization
 
-**FR-2.2.1**: The system shall create session directories named `YYYYMMDD_HHMMSS`
+**FR-2.2.1**: The system shall create session directories named `YYYYMMDDHHMMSS`
 
 **FR-2.2.2**: The system shall create `session.json` with session metadata
 
@@ -505,7 +505,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 ### 6.2 File Naming Convention
 
-**DR-2.1**: Session directory: `YYYYMMDD_HHMMSS` (e.g., `20240203_100000`)
+**DR-2.1**: Session directory: `YYYYMMDDHHMMSS` (e.g., `20240203100000`)
 
 **DR-2.2**: Audio files: `{NNN}.opus` (e.g., `001.opus`, `002.opus`)
 
@@ -521,7 +521,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 ```json
 {
-  "session_id": "20240203_100000",
+  "session_id": "20240203100000",
   "start_time": "2024-02-03T10:00:00Z",
   "end_time": "2024-02-03T10:10:00Z",
   "duration": 600,

@@ -341,7 +341,7 @@ AT+START=normal
 {
   "ok": true,
   "data": {
-    "session": "20240203_100000",
+    "session": "20240203100000",
     "mode": "normal",
     "bitrate": 48000
   }
@@ -378,7 +378,7 @@ AT+STOP
 {
   "ok": true,
   "data": {
-    "session": "20240203_100000",
+    "session": "20240203100000",
     "duration": 600,
     "file_count": 5,
     "total_size": 3600000
@@ -457,7 +457,7 @@ AT+LIST
 
 **Request (Session Details):**
 ```
-AT+LIST=20240203_100000
+AT+LIST=20240203100000
 ```
 
 **Response (All Sessions):**
@@ -465,7 +465,7 @@ AT+LIST=20240203_100000
 {
   "ok": true,
   "data": [
-    {"id": "20240203_100000", "files": 30, "size": 5242880},
+    {"id": "20240203100000", "files": 30, "size": 5242880},
     {"id": "20240203_120000", "files": 15, "size": 2621440}
   ]
 }
@@ -502,12 +502,12 @@ AT+LIST
 # → Returns list with id, files, size for each session
 
 # Get session details (including synced count and audio format)
-AT+LIST=20240203_100000
+AT+LIST=20240203100000
 # → Returns files, size, synced, channels, sample_rate for specific session
 
 # Resume transfer from next file after synced count
 # If synced=15, resume from file 0016.opus
-AT+DOWNLOAD=20240203_100000:0016.opus
+AT+DOWNLOAD=20240203100000:0016.opus
 ```
 
 **Error Cases:**
@@ -521,7 +521,7 @@ Delete a recording session and all its files.
 
 **Request:**
 ```
-AT+DELETE=20240203_100000
+AT+DELETE=20240203100000
 ```
 
 **Response:**
@@ -553,7 +553,7 @@ Retrieve bookmarks for a session. Supports summary and paginated formats.
 
 **Request (Summary):**
 ```
-AT+MARKS=20240203_100000
+AT+MARKS=20240203100000
 ```
 
 **Response (Summary, >20 bookmarks):**
@@ -584,7 +584,7 @@ AT+MARKS=20240203_100000
 
 **Request (Paginated, from start):**
 ```
-AT+MARKS=20240203_100000?0
+AT+MARKS=20240203100000?0
 ```
 
 **Response (Paginated):**
@@ -604,7 +604,7 @@ AT+MARKS=20240203_100000?0
 
 **Request (Next page):**
 ```
-AT+MARKS=20240203_100000?10
+AT+MARKS=20240203100000?10
 ```
 
 **Fields:**
@@ -1447,12 +1447,12 @@ App                          Device
 App                          Device
  │                              │
  │─ AT+LIST ───────────────────>│
- │<─ ["20240203_100000"] ────────│
+ │<─ ["20240203100000"] ────────│
  │                              │
- │─ AT+LIST=20240203_100000 ───>│
+ │─ AT+LIST=20240203100000 ───>│
  │<─ ["001.opus","002.opus"] ────│
  │                              │
- │─ AT+MARKS=20240203_100000 ──>│
+ │─ AT+MARKS=20240203100000 ──>│
  │<─ [{offset:10,note:"..."}] ───│
  │                              │
  │─ AT+DOWNLOAD=20240203/001.opus>│
@@ -1467,7 +1467,7 @@ App                          Device
  ...                            │
  │<─ {"ok":true,"done":true} ────│
  │                              │
- │─ AT+DELETE=20240203_100000 ──>│
+ │─ AT+DELETE=20240203100000 ──>│
  │<─ {"ok":true,"freed":1440000} │
 ```
 
@@ -1638,7 +1638,7 @@ Stored in each session directory, contains session information, sync progress, a
 
 ```json
 {
-  "id": "20240203_100000",
+  "id": "20240203100000",
   "duration": 600,
   "files": 30,
   "synced": 15,
@@ -1649,7 +1649,7 @@ Stored in each session directory, contains session information, sync progress, a
 ```
 
 **Fields:**
-- `id`: Session ID (timestamp format: YYYYMMDD_HHMMSS)
+- `id`: Session ID (timestamp format: YYYYMMDDHHMMSS, 14 digits)
 - `duration`: Recording length in seconds (0 while recording)
 - `files`: Total number of audio files in session (0 while recording)
 - `synced`: Number of files that have been successfully transferred
@@ -1668,7 +1668,7 @@ Stored in each session directory, contains session information, sync progress, a
 # Session has 30 files, 15 have been transferred
 # Audio is normal mode (stereo, 2 channels) at 16kHz
 # Next transfer should start from file 0016.opus
-AT+DOWNLOAD=20240203_100000:0016.opus
+AT+DOWNLOAD=20240203100000:0016.opus
 ```
 
 ### 6.2 File List (files.lst)
@@ -1761,7 +1761,7 @@ Each Opus file is a sequence of frames:
 Empty file created upon successful transfer completion.
 
 ```
-touch /SD:/REC/20240203_100000/.transferred
+touch /SD:/REC/20240203100000/.transferred
 ```
 
 **Purpose:**
@@ -1781,7 +1781,7 @@ The device sends unsolicited notifications via the Response characteristic for i
 {
   "ok": true,
   "event": "recording_started",
-  "session": "20240203_100000"
+  "session": "20240203100000"
 }
 ```
 
@@ -1793,7 +1793,7 @@ The device sends unsolicited notifications via the Response characteristic for i
 {
   "ok": true,
   "event": "recording_stopped",
-  "session": "20240203_100000",
+  "session": "20240203100000",
   "duration": 600
 }
 ```
@@ -2205,8 +2205,8 @@ Device: {"ok":true}
 
 ```
 App: AT+START
-Device: {"ok":true,"data":{"session":"20240203_100000",...}}
-Device: {"ok":true,"event":"recording_started","session":"20240203_100000"}
+Device: {"ok":true,"data":{"session":"20240203100000",...}}
+Device: {"ok":true,"event":"recording_started","session":"20240203100000"}
 
 [Recording in progress...]
 
@@ -2219,9 +2219,9 @@ Device: {"ok":true,"data":{"duration":600,...}}
 Device: {"ok":true,"event":"recording_stopped",...}
 
 App: AT+LIST
-Device: {"ok":true,"data":["20240203_100000"]}
+Device: {"ok":true,"data":["20240203100000"]}
 
-App: AT+DOWNLOAD=20240203_100000
+App: AT+DOWNLOAD=20240203100000
 Device: {"ok":true}
 Device: <file data stream...>
 Device: {"ok":true,"done":true,"size":3600000}
