@@ -467,6 +467,21 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
         return;
     }
 
+    if (err == BT_SECURITY_ERR_AUTH_REQUIREMENT) {
+        /* Re-encryption failed. This typically happens when:
+         * - The phone deleted the bond but we still have it locally
+         * - We try to re-encrypt using the old key, but the phone rejects it
+         * Solution: Delete our stale bond and allow re-pairing
+         */
+        LOG_WRN("Re-encryption failed (addr=%s), clearing stale bond", addr);
+        int unpair_err = bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
+        if (unpair_err) {
+            LOG_WRN("bt_unpair failed: %d", unpair_err);
+        }
+        bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+        return;
+    }
+
     if (err) {
         LOG_WRN("Security failed: addr=%s level=%d err=%d - disconnecting",
                 addr, level, err);

@@ -98,8 +98,7 @@ static void do_show_status_bar(void)
 		last_xfer = xfer;
 	}
 
-	/* WiFi is always shown as "on" (placeholder) */
-	display_show_info(batt, charging, ble, xfer, true);
+	display_show_info(batt, charging, ble, xfer);
 }
 
 static void do_show_mark_animation(void)

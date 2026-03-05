@@ -474,9 +474,11 @@ process_next_file:
 				} else if (ret == -ENOENT) {
 					/* No more files - check if recording this session */
 					extern bool audio_is_recording(void);
+					extern bool audio_is_paused(void);
 					extern const char *audio_get_session_id(void);
 
 					bool is_recording = audio_is_recording();
+					bool is_paused = audio_is_paused();
 					bool is_current_session = false;
 
 					if (is_recording) {
@@ -484,9 +486,13 @@ process_next_file:
 						is_current_session = (strcmp(current_transfer.session_id, recording_session) == 0);
 					}
 
-					/* Only wait if actively recording this session */
+					/* Wait if actively recording this session (including paused state)
+					 * PAUSED: files may still be closing, check one more time
+					 * RESUME: continue to check for new files
+					 * STOP: only complete after all files are transferred
+					 */
 					if (is_recording && is_current_session) {
-						/* Still recording, refresh file list and try again */
+						/* Still recording or paused, refresh file list and try again */
 						ret = storage_list_session_files(current_transfer.session_id,
 						                                 current_transfer.file_list,
 						                                 TRANSFER_MAX_FILES);
@@ -512,24 +518,45 @@ process_next_file:
 							}
 
 							if (!found_next) {
-								/* All files in list transferred
-								 * Check if we should complete the transfer:
-								 * 1. Device not recording -> complete immediately
-								 * 2. Downloading old session (not current recording) -> complete immediately
-								 * 3. All files for current recording session transferred -> complete immediately
-								 */
-								extern bool audio_is_recording(void);
-								extern const char *audio_get_session_id(void);
-
-								bool is_recording = audio_is_recording();
-								bool is_current_session = false;
-
-								if (is_recording) {
-									const char *recording_session = audio_get_session_id();
-									is_current_session = (strcmp(current_transfer.session_id, recording_session) == 0);
-								}
-
-								if (!is_recording || !is_current_session) {
+								/* All files in list transferred */
+								if (is_paused) {
+									/* PAUSED: wait for resume, don't expect new files */
+									LOG_INF("Transfer paused (%u files transferred), waiting for resume",
+									        current_transfer.file_index);
+									/* Wait for resume or stop */
+									do {
+										if (!ble_svc_is_ready()) {
+											LOG_INF("BLE disconnected, stopping transfer");
+											transfer_cleanup();
+											transfer_thread_waiting = true;
+											k_sem_take(&transfer_trigger_sem, K_FOREVER);
+											transfer_thread_waiting = false;
+											goto process_next_file;
+										}
+										/* Check if stopped or resumed */
+										extern bool audio_is_recording(void);
+										extern bool audio_is_paused(void);
+										if (!audio_is_recording()) {
+											/* Stopped - complete transfer */
+											LOG_INF("Transfer completed (stopped): %u files", current_transfer.file_index);
+											current_transfer.state = TRANSFER_STATE_COMPLETED;
+											ble_svc_send_transfer_complete(current_transfer.session_id,
+											                               (int)current_transfer.file_index);
+											transfer_cleanup();
+											transfer_thread_waiting = true;
+											k_sem_take(&transfer_trigger_sem, K_FOREVER);
+											transfer_thread_waiting = false;
+											goto process_next_file;
+										}
+										if (!audio_is_paused()) {
+											/* Resumed - continue checking for new files */
+											LOG_INF("Transfer resumed, checking for new files");
+											goto process_next_file;
+										}
+										k_sleep(K_MSEC(500));
+									} while (true);
+								} else if (!is_recording) {
+									/* STOP: complete transfer */
 									LOG_INF("Transfer completed: %u files", current_transfer.file_index);
 									current_transfer.state = TRANSFER_STATE_COMPLETED;
 
@@ -541,19 +568,21 @@ process_next_file:
 									k_sem_take(&transfer_trigger_sem, K_FOREVER);
 									transfer_thread_waiting = false;
 									goto process_next_file;
+								} else {
+									/* Recording: wait for new files */
+									k_sleep(K_MSEC(500));
+									goto process_next_file;
 								}
-
-								k_sleep(K_MSEC(500));
-								goto process_next_file;
 							}
 							goto process_next_file;
 						} else {
 							consecutive_empty_refreshes++;
 
-							if (consecutive_empty_refreshes > 10) {
-								extern bool audio_is_recording(void);
+							if (consecutive_empty_refreshes > 3) {
+								/* After 3 checks (1.5s), decide what to do */
 								if (!audio_is_recording()) {
-									LOG_INF("Transfer completed: %u files", current_transfer.file_index);
+									/* STOP: complete transfer */
+									LOG_INF("Transfer completed (stopped): %u files", current_transfer.file_index);
 									current_transfer.state = TRANSFER_STATE_COMPLETED;
 
 									ble_svc_send_transfer_complete(current_transfer.session_id,
@@ -566,6 +595,47 @@ process_next_file:
 									consecutive_empty_refreshes = 0;
 									goto process_next_file;
 								}
+
+								if (audio_is_paused()) {
+									/* PAUSED: no new files expected, wait for resume */
+									LOG_INF("Transfer paused (%u files transferred), waiting for resume",
+									        current_transfer.file_index);
+									/* Wait for resume or stop */
+									do {
+										if (!ble_svc_is_ready()) {
+											LOG_INF("BLE disconnected, stopping transfer");
+											transfer_cleanup();
+											transfer_thread_waiting = true;
+											k_sem_take(&transfer_trigger_sem, K_FOREVER);
+											transfer_thread_waiting = false;
+											goto process_next_file;
+										}
+										extern bool audio_is_recording(void);
+										extern bool audio_is_paused(void);
+										if (!audio_is_recording()) {
+											LOG_INF("Transfer completed (stopped): %u files", current_transfer.file_index);
+											current_transfer.state = TRANSFER_STATE_COMPLETED;
+											ble_svc_send_transfer_complete(current_transfer.session_id,
+											                               (int)current_transfer.file_index);
+											transfer_cleanup();
+											transfer_thread_waiting = true;
+											k_sem_take(&transfer_trigger_sem, K_FOREVER);
+											transfer_thread_waiting = false;
+											consecutive_empty_refreshes = 0;
+											goto process_next_file;
+										}
+										if (!audio_is_paused()) {
+											/* Resumed - check for files again */
+											LOG_INF("Transfer resumed, checking for new files");
+											consecutive_empty_refreshes = 0;
+											goto process_next_file;
+										}
+										k_sleep(K_MSEC(500));
+									} while (true);
+								}
+
+								/* Still recording but no files - keep checking */
+								consecutive_empty_refreshes = 0;
 							}
 
 							k_sleep(K_MSEC(500));

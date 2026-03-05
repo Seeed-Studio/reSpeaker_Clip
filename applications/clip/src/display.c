@@ -824,17 +824,6 @@ static void draw_battery_by_level(uint8_t *buf, int x, int y, uint8_t percent, b
 }
 
 /**
- * @brief Draw WiFi connection icon
- */
-static void draw_wifi_icon(uint8_t *buf, int x, int y)
-{
-	const uint8_t *bitmap = icon_get_bitmap(ICON_WIFI_CONNECTED, NULL, NULL);
-	if (bitmap) {
-		icon_draw_bitmap(buf, x, y, bitmap, ICON_WIDTH, ICON_HEIGHT);
-	}
-}
-
-/**
  * @brief Draw BLE connection icon
  */
 static void draw_ble_icon(uint8_t *buf, int x, int y, bool connected)
@@ -870,7 +859,6 @@ typedef struct {
 	bool charging;
 	bool ble_connected;
 	bool transferring;
-	bool wifi_on;
 } display_info_t;
 
 /**
@@ -887,7 +875,6 @@ static void render_info_page(uint8_t *buf, const display_info_t *info)
 	bool charging = info ? info->charging : false;
 	bool ble_connected = info ? info->ble_connected : false;
 	bool transferring = info ? info->transferring : false;
-	bool wifi_on = info ? info->wifi_on : false;
 
 	/*
 	 * UI Layout (88px x 48px):
@@ -896,7 +883,7 @@ static void render_info_page(uint8_t *buf, const display_info_t *info)
 	 * - Battery icon:     (4, 16) - 16x16, vertically centered
 	 * - "100" text:       (19, 16) - aligned with battery top
 	 * - "%" symbol:        (45, 15) - large percent
-	 * - BLE icon:         (52, 17) - 16x16
+	 * - BLE icon:         (68, 17) - 16x16
 	 * - Transfer icon:     (68, 17) - 16x16
 	 */
 
@@ -920,12 +907,7 @@ static void render_info_page(uint8_t *buf, const display_info_t *info)
 	int percent_y = 20;
 	draw_large_percent(buf, percent_x, percent_y);
 
-	/* 4. WiFi icon at (52, 17) - placeholder, always shown */
-	if (wifi_on) {
-		draw_wifi_icon(buf, 52, 17);
-	}
-
-	/* 5. Connection/Transfer icons at (68, 17) */
+	/* 4. Connection/Transfer icons at (68, 17) */
 	/* Priority: Transferring > BLE > Nothing */
 	if (transferring) {
 		draw_transfer_icon(buf, 68, 17);
@@ -945,14 +927,13 @@ static void render_info_page(uint8_t *buf, const display_info_t *info)
  * @param ble_connected BLE connection status
  * @param transferring File transfer status
  */
-void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring, bool wifi_on)
+void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring)
 {
 	display_info_t info = {
 		.battery_percent = battery_percent,
 		.charging = charging,
 		.ble_connected = ble_connected,
 		.transferring = transferring,
-		.wifi_on = wifi_on,
 	};
 
 	render_info_page(display_buffer, &info);
@@ -1306,17 +1287,17 @@ void display_show_pause_icon(void)
 	clear_screen(display_buffer);
 
 	/* Draw two vertical bars (pause icon) in the center
-	 * Each bar is 4 pixels wide, 20 pixels tall
-	 * Left bar: x = 36, Right bar: x = 48
-	 * Vertical center: y = 14 (for 20px height in 48px display)
+	 * Each bar is 3 pixels wide, 14 pixels tall
+	 * Left bar: x = 37-39, Right bar: x = 48-50
+	 * Vertical center: y = 17-30 (centered in 48px display)
 	 */
-	for (int y = 14; y < 34; y++) {
+	for (int y = 17; y < 31; y++) {
 		/* Left bar */
-		for (int x = 36; x < 40; x++) {
+		for (int x = 37; x < 40; x++) {
 			set_pixel(display_buffer, x, y);
 		}
 		/* Right bar */
-		for (int x = 48; x < 52; x++) {
+		for (int x = 48; x < 51; x++) {
 			set_pixel(display_buffer, x, y);
 		}
 	}
@@ -1333,17 +1314,17 @@ void display_show_pause_icon(void)
 void display_overlay_pause_icon(void)
 {
 	/* Draw two vertical bars (pause icon) in the center
-	 * Each bar is 4 pixels wide, 20 pixels tall
-	 * Left bar: x = 36, Right bar: x = 48
-	 * Vertical center: y = 14 (for 20px height in 48px display)
+	 * Each bar is 3 pixels wide, 14 pixels tall
+	 * Left bar: x = 37-39, Right bar: x = 48-50
+	 * Vertical center: y = 17-30 (centered in 48px display)
 	 */
-	for (int y = 14; y < 34; y++) {
+	for (int y = 17; y < 31; y++) {
 		/* Left bar */
-		for (int x = 36; x < 40; x++) {
+		for (int x = 37; x < 40; x++) {
 			set_pixel(display_buffer, x, y);
 		}
 		/* Right bar */
-		for (int x = 48; x < 52; x++) {
+		for (int x = 48; x < 51; x++) {
 			set_pixel(display_buffer, x, y);
 		}
 	}

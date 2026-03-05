@@ -432,6 +432,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 			session_id, duration_sec, actual_opus_count, synced, channels, sample_rate,
 			mode ? mode : "normal");
 		fs_write(&file, json_buf, len);
+		fs_sync(&file);  /* Ensure metadata is flushed to SD card */
 		fs_close(&file);
 	}
 
@@ -454,7 +455,14 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 			}
 			fs_closedir(&dirp);
 		}
+		fs_sync(&file);  /* Ensure file list is flushed to SD card */
 		fs_close(&file);
+	}
+
+	/* Sync the entire filesystem to ensure all metadata is flushed */
+	rc = fs_sync(&mp);
+	if (rc != 0) {
+		LOG_WRN("Filesystem sync failed: %d", rc);
 	}
 
 	memset(current_session_dir, 0, sizeof(current_session_dir));

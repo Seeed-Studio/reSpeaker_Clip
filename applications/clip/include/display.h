@@ -46,7 +46,7 @@ void display_show_recording(bool enhanced_mode);
  * - Battery icon + percentage (e.g., "85%")
  * - BLE icon (if connected) or Transfer icon (if transferring)
  */
-void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring, bool wifi_on);
+void display_show_info(uint8_t battery_percent, bool charging, bool ble_connected, bool transferring);
 
 /**
  * @brief Show a single frame of the dot circle animation
