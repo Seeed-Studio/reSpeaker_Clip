@@ -77,6 +77,15 @@ static bool start_requested = false;
 static enum audio_mode pending_start_mode = AUDIO_MODE_MERGE;
 static bool stop_requested = false;
 
+/* Pause/resume requests */
+static bool pause_requested = false;
+static bool resume_requested = false;
+
+/* Pause state tracking */
+static bool recording_paused = false;
+static uint32_t pause_start_time = 0;
+static uint32_t total_paused_time = 0;
+
 /* Audio recording thread */
 K_THREAD_STACK_DEFINE(audio_thread_stack, CLIP_AUDIO_STACK_SIZE);
 static struct k_thread audio_thread_data;
@@ -119,6 +128,8 @@ static void cleanup_speex_preprocessor(void);
 static int16_t *process_pcm_frame(int16_t *stereo_input, int frame_size);
 static int mic_power_on(void);
 static int mic_power_off(void);
+static int audio_pause_recording_internal(void);
+static int audio_resume_recording_internal(void);
 
 int audio_init(void)
 {
@@ -375,6 +386,24 @@ int audio_get_stats(struct audio_stats *stats_out)
 		return -EINVAL;
 	}
 
+	/* Calculate recording time excluding paused time */
+	uint32_t elapsed_paused_time = 0;
+	if (recording_active) {
+		/* If currently paused, add current pause duration */
+		if (recording_paused) {
+			elapsed_paused_time = total_paused_time +
+				(uint32_t)(k_uptime_get() / 1000) - pause_start_time;
+		} else {
+			elapsed_paused_time = total_paused_time;
+		}
+	} else {
+		elapsed_paused_time = total_paused_time;
+	}
+
+	/* Update recording time (total time minus paused time) */
+	uint32_t total_time = (uint32_t)(k_uptime_get() / 1000) - recording_start_time;
+	stats.recording_time_ms = (total_time - elapsed_paused_time) * 1000;
+
 	/* Calculate average if recording stopped */
 	if (!recording_active && stats.frames_encoded > 0) {
 		stats.encode_time_avg_ms = encode_time_total / stats.frames_encoded;
@@ -613,12 +642,26 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 			/* Perform cleanup in audio thread context */
 			audio_stop_recording_internal();
 			continue;
+		} else if (pause_requested && recording_active && !recording_paused) {
+			pause_requested = false;
+			k_mutex_unlock(&audio_state_mutex);
+
+			/* Perform pause in audio thread context */
+			audio_pause_recording_internal();
+			continue;
+		} else if (resume_requested && recording_paused) {
+			resume_requested = false;
+			k_mutex_unlock(&audio_state_mutex);
+
+			/* Perform resume in audio thread context */
+			audio_resume_recording_internal();
+			continue;
 		} else {
 			k_mutex_unlock(&audio_state_mutex);
 		}
 
-		/* Wait for recording to be active */
-		if (!recording_active) {
+		/* Wait for recording to be active (and not paused) */
+		if (!recording_active || recording_paused) {
 			k_msleep(100);
 			continue;
 		}
@@ -1089,4 +1132,132 @@ bool audio_is_recording(void)
 	k_mutex_unlock(&audio_state_mutex);
 
 	return is_active;
+}
+
+int audio_pause_recording(void)
+{
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+
+	if (!recording_active) {
+		k_mutex_unlock(&audio_state_mutex);
+		LOG_WRN("Cannot pause: not recording");
+		return -EINVAL;
+	}
+
+	if (recording_paused) {
+		k_mutex_unlock(&audio_state_mutex);
+		LOG_WRN("Already paused");
+		return -EALREADY;
+	}
+
+	pause_requested = true;
+	k_mutex_unlock(&audio_state_mutex);
+
+	LOG_INF("Recording pause requested");
+	return 0;
+}
+
+int audio_resume_recording(void)
+{
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+
+	if (!recording_active) {
+		k_mutex_unlock(&audio_state_mutex);
+		LOG_WRN("Cannot resume: not recording");
+		return -EINVAL;
+	}
+
+	if (!recording_paused) {
+		k_mutex_unlock(&audio_state_mutex);
+		LOG_WRN("Not paused");
+		return -EALREADY;
+	}
+
+	resume_requested = true;
+	k_mutex_unlock(&audio_state_mutex);
+
+	LOG_INF("Recording resume requested");
+	return 0;
+}
+
+bool audio_is_paused(void)
+{
+	k_mutex_lock(&audio_state_mutex, K_FOREVER);
+	bool is_paused = recording_paused;
+	k_mutex_unlock(&audio_state_mutex);
+
+	return is_paused;
+}
+
+/* Internal pause function - executes in audio thread context */
+static int audio_pause_recording_internal(void)
+{
+	int ret;
+
+	LOG_INF("Pausing recording (audio thread)");
+
+	/* Stop DMIC */
+	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_STOP);
+	if (ret < 0) {
+		LOG_ERR("Failed to stop DMIC for pause: %d", ret);
+		return ret;
+	}
+
+	/* Close current file */
+	if (current_storage_file.is_open) {
+		ret = storage_close_file(&current_storage_file);
+		if (ret != 0) {
+			LOG_WRN("Failed to close file for pause: %d", ret);
+		}
+		storage_set_writing_file(NULL, NULL);
+		memset(&current_storage_file, 0, sizeof(current_storage_file));
+	}
+
+	/* Record pause start time */
+	pause_start_time = (uint32_t)(k_uptime_get() / 1000);
+	recording_paused = true;
+
+	LOG_INF("Recording paused at %u sec", pause_start_time - recording_start_time - total_paused_time);
+	return 0;
+}
+
+/* Internal resume function - executes in audio thread context */
+static int audio_resume_recording_internal(void)
+{
+	int ret;
+
+	LOG_INF("Resuming recording (audio thread)");
+
+	/* Calculate and accumulate paused time */
+	uint32_t now = (uint32_t)(k_uptime_get() / 1000);
+	uint32_t paused_duration = now - pause_start_time;
+	total_paused_time += paused_duration;
+
+	/* Create new file with incremented index */
+	current_file_index++;
+	ret = storage_create_file(&current_storage_file, current_session_id, current_file_index);
+	if (ret != 0) {
+		LOG_ERR("Failed to create new file for resume: %d", ret);
+		current_file_index--;
+		return ret;
+	}
+
+	LOG_INF("Created new file: %s", current_storage_file.filename);
+	storage_set_writing_file(current_session_id, current_storage_file.filename);
+
+	/* Reset frame counter for new file */
+	file_start_frame_count = recording_frame_count;
+
+	/* Restart DMIC */
+	ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
+	if (ret < 0) {
+		LOG_ERR("Failed to restart DMIC for resume: %d", ret);
+		return ret;
+	}
+
+	recording_paused = false;
+
+	LOG_INF("Recording resumed after %u sec pause (total paused: %u sec)",
+		paused_duration, total_paused_time);
+	return 0;
 }

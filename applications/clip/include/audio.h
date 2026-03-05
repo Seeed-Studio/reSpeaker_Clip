@@ -156,4 +156,30 @@ const char *audio_get_session_id(void);
  */
 const char *audio_get_current_filename(void);
 
+/**
+ * @brief Pause ongoing recording
+ *
+ * Stops DMIC capture and closes current file, but keeps session open.
+ * Recording can be resumed with audio_resume_recording().
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int audio_pause_recording(void);
+
+/**
+ * @brief Resume paused recording
+ *
+ * Creates a new file and resumes DMIC capture.
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int audio_resume_recording(void);
+
+/**
+ * @brief Check if recording is paused
+ *
+ * @return true if recording is paused, false otherwise
+ */
+bool audio_is_paused(void);
+
 #endif /* AUDIO_H */

@@ -15,9 +15,9 @@ static const bool state_transitions[CLIP_STATE_ERROR + 1][CLIP_STATE_ERROR + 1] 
     /*                     UNINITIALIZED IDLE RECORDING TRANSMITTING PAUSED ERROR */
     /* UNINITIALIZED */  { false,      true, false,    false,          false, false },
     /* IDLE */            { false,      false, true,     true,           false, true },
-    /* RECORDING */       { false,      true,  false,    false,          false, true },
-    /* TRANSMITTING */     { false,      true,  false,    false,          true,  true },
-    /* PAUSED */           { false,      true,  false,    true,           false, true },
+    /* RECORDING */       { false,      true,  false,    false,          true,  true },  /* RECORDING→PAUSED for pause recording */
+    /* TRANSMITTING */     { false,      true,  false,    false,          false, true },  /* Removed PAUSED - transfer only supports cancel */
+    /* PAUSED */           { false,      true,  true,     false,          false, true },  /* PAUSED→RECORDING for resume, removed PAUSED→TRANSMITTING */
     /* ERROR */            { false,      true,  false,    false,          false, false },
 };
 

@@ -804,11 +804,11 @@ AT+PROGRESS
 
 ---
 
-#### 3.3.5 Transfer Control
+#### 3.3.5 Recording Control
 
-##### AT+PAUSE - Pause Transfer
+##### AT+PAUSE - Pause Recording
 
-Pause ongoing file transfer.
+Pause ongoing recording.
 
 **Request:**
 ```
@@ -822,16 +822,22 @@ AT+PAUSE
 }
 ```
 
-**State Change:** TRANSMITTING → PAUSED
+**State Change:** RECORDING → PAUSED
+
+**Side Effects:**
+- Stops DMIC capture
+- Closes current file
+- Keeps session open
+- Recording can be resumed with `AT+RESUME`
 
 **Error Cases:**
-- `5004`: No transfer in progress
+- `5004`: Not recording
 
 ---
 
-##### AT+RESUME - Resume Transfer
+##### AT+RESUME - Resume Recording
 
-Resume paused file transfer.
+Resume paused recording.
 
 **Request:**
 ```
@@ -845,10 +851,15 @@ AT+RESUME
 }
 ```
 
-**State Change:** PAUSED → TRANSMITTING
+**State Change:** PAUSED → RECORDING
+
+**Side Effects:**
+- Creates new file with incremented index
+- Resumes DMIC capture
+- Continues in same session
 
 **Error Cases:**
-- `5005`: No transfer to resume
+- `5005`: Not paused
 
 ---
 
@@ -1277,34 +1288,29 @@ AT+RESET
 ### 4.1 Transfer States
 
 ```
-┌─────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────┐
 │                    File Transfer State Machine          │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │   ┌─────────┐    AT+DOWNLOAD    ┌──────────────┐       │
-│   │   IDLE  │ ─────────────────>│ TRANSMITTING │       │
-│   └─────────┘                    └──────┬───────┘       │
-│        ▲                                │               │
-│        │                        AT+PAUSE/│               │
-│        │                         disconnect│              │
-│        │                                ▼               │
-│        │                         ┌─────────┐            │
-│        │                         │  PAUSED │            │
-│        │                         └────┬────┘            │
-│        │                              │                 │
-│        │                   AT+RESUME │  AT+CANCEL       │
-│        └──────────────────────────────┴─────────────────┘
-│                              │              │
-│                              ▼              ▼
-│                         TRANSMITTING     IDLE
-│                                                      │
-└─────────────────────────────────────────────────────────┘
+│   │   IDLE  │ ─────────────────>│ TRANSMITTING │──────>│ IDLE │
+│   └─────────┘                    └──────┬───────┘       └───────┘
+│        ▲                                │               │           ▲
+│        │                          AT+CANCEL│              │           │
+│        │                          disconnect│              │           │
+│        ▼                                ▼               │           │
+│   TRANSMITTING <───────────────────────────────────────────────┘
+│        │                                                         │
+│        │                                                         │
+│        ▼                                                         │
+│      IDLE <──────────────────────────────────────────────────────────
+│                                                                  │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 **States:**
 - **IDLE**: No transfer in progress
 - **TRANSMITTING**: Actively sending file data
-- **PAUSED**: Transfer paused, can be resumed
 - **COMPLETED**: Transfer finished (transient state, returns to IDLE)
 
 ### 4.2 Flow Control (Non-blocking Commands)
@@ -1320,8 +1326,6 @@ Critical design feature: Commands can be processed during file transfer!
 **Supported Commands During Transfer:**
 - `AT+GSTAT` - Query status (returns "TRANSMITTING" state)
 - `AT+PROGRESS` - Get transfer progress
-- `AT+PAUSE` - Pause transfer
-- `AT+RESUME` - Resume transfer
 - `AT+CANCEL` - Cancel transfer
 
 **Sequence:**

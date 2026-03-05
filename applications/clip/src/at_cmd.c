@@ -1401,14 +1401,22 @@ static int cmd_progress(const struct at_command *cmd, char **response)
 
 static int cmd_pause(const struct at_command *cmd, char **response)
 {
-    int err;
+    int ret;
 
-    err = transfer_pause();
-    if (err != 0) {
-        return json_create_error("No transfer in progress", response);
+    /* Only support recording pause */
+    if (!audio_is_recording()) {
+        return json_create_error("Not recording", response);
     }
 
-    /* Transition to paused state */
+    if (audio_is_paused()) {
+        return json_create_error("Already paused", response);
+    }
+
+    ret = audio_pause_recording();
+    if (ret != 0) {
+        return json_create_error("Failed to pause", response);
+    }
+
     state_transition(CLIP_STATE_PAUSED);
 
     return json_create_success(NULL, response);
@@ -1416,15 +1424,18 @@ static int cmd_pause(const struct at_command *cmd, char **response)
 
 static int cmd_resume(const struct at_command *cmd, char **response)
 {
-    int err;
+    int ret;
 
-    err = transfer_resume();
-    if (err != 0) {
-        return json_create_error("No transfer to resume", response);
+    if (!audio_is_paused()) {
+        return json_create_error("Not paused", response);
     }
 
-    /* Transition back to transmitting state */
-    state_transition(CLIP_STATE_TRANSMITTING);
+    ret = audio_resume_recording();
+    if (ret != 0) {
+        return json_create_error("Failed to resume", response);
+    }
+
+    state_transition(CLIP_STATE_RECORDING);
 
     return json_create_success(NULL, response);
 }

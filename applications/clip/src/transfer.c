@@ -333,38 +333,9 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 	return 0;
 }
 
-int transfer_pause(void)
-{
-	if (!transfer_is_active()) {
-		return -EINVAL;
-	}
-
-	if (current_transfer.state == TRANSFER_STATE_TRANSMITTING) {
-		current_transfer.state = TRANSFER_STATE_PAUSED;
-		LOG_INF("Transfer paused");
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-int transfer_resume(void)
-{
-	if (current_transfer.state != TRANSFER_STATE_PAUSED) {
-		return -EINVAL;
-	}
-
-	current_transfer.state = TRANSFER_STATE_TRANSMITTING;
-	k_sem_give(&transfer_trigger_sem);
-
-	LOG_INF("Transfer resumed");
-
-	return 0;
-}
-
 int transfer_cancel(void)
 {
-	if (!transfer_is_active() && current_transfer.state != TRANSFER_STATE_PAUSED) {
+	if (!transfer_is_active()) {
 		return -EINVAL;
 	}
 
@@ -388,13 +359,7 @@ int transfer_get_progress(struct transfer_info *info)
 
 bool transfer_is_active(void)
 {
-	return (current_transfer.state == TRANSFER_STATE_TRANSMITTING ||
-	        current_transfer.state == TRANSFER_STATE_PAUSED);
-}
-
-bool transfer_is_paused(void)
-{
-	return (current_transfer.state == TRANSFER_STATE_PAUSED);
+	return (current_transfer.state == TRANSFER_STATE_TRANSMITTING);
 }
 
 enum transfer_state transfer_get_state(void)
@@ -488,25 +453,6 @@ process_next_file:
 			transfer_thread_waiting = true;
 			k_sem_take(&transfer_trigger_sem, K_FOREVER);
 			transfer_thread_waiting = false;
-			goto process_next_file;
-		}
-
-		/* Check if paused */
-		if (current_transfer.state == TRANSFER_STATE_PAUSED) {
-			/* If paused due to BLE disconnect, stop transfer (don't wait for reconnect) */
-			if (!ble_svc_is_ready()) {
-				LOG_INF("BLE disconnected, stopping transfer");
-				transfer_cleanup();
-				/* Wait for next transfer */
-				transfer_thread_waiting = true;
-				k_sem_take(&transfer_trigger_sem, K_FOREVER);
-				transfer_thread_waiting = false;
-				goto process_next_file;
-			}
-
-			/* Resume transfer (still connected) */
-			current_transfer.state = TRANSFER_STATE_TRANSMITTING;
-			LOG_INF("Transfer resumed");
 			goto process_next_file;
 		}
 
@@ -670,12 +616,8 @@ process_next_file:
 
 			/* Check if BLE is connected before sending */
 			if (!ble_svc_is_ready()) {
-				LOG_INF("BLE disconnected, pausing transfer");
-				current_transfer.state = TRANSFER_STATE_PAUSED;
-				if (transfer_file_open) {
-					fs_close(&transfer_file);
-					transfer_file_open = false;
-				}
+				LOG_INF("BLE disconnected, canceling transfer");
+				transfer_cleanup();
 				break;
 			}
 
@@ -708,14 +650,9 @@ process_next_file:
 					/* Break to let outer loop handle next file */
 					break;
 				} else if (ret == -ENOTCONN || ret == -EIO) {
-					/* BLE connection error, pause and wait for reconnect */
-					LOG_INF("BLE connection lost, pausing transfer (error: %d)", ret);
-					current_transfer.state = TRANSFER_STATE_PAUSED;
-					/* Close file while paused */
-					if (transfer_file_open) {
-						fs_close(&transfer_file);
-						transfer_file_open = false;
-					}
+					/* BLE connection error, cancel transfer */
+					LOG_INF("BLE connection lost, canceling transfer (error: %d)", ret);
+					transfer_cleanup();
 					break;
 				} else {
 					current_transfer.state = TRANSFER_STATE_ERROR;
@@ -729,16 +666,6 @@ process_next_file:
 			if (current_transfer.total_bytes > 0) {
 				current_transfer.progress_percent =
 					(uint8_t)((current_transfer.bytes_transferred * 100) / current_transfer.total_bytes);
-			}
-
-			/* Check if paused */
-			if (current_transfer.state == TRANSFER_STATE_PAUSED) {
-				/* Close file while paused */
-				if (transfer_file_open) {
-					fs_close(&transfer_file);
-					transfer_file_open = false;
-				}
-				break;
 			}
 		}
 	}

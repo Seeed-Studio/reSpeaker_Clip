@@ -16,7 +16,6 @@
 enum transfer_state {
 	TRANSFER_STATE_IDLE = 0,
 	TRANSFER_STATE_TRANSMITTING,
-	TRANSFER_STATE_PAUSED,
 	TRANSFER_STATE_COMPLETED,
 	TRANSFER_STATE_ERROR
 };
@@ -74,20 +73,6 @@ int transfer_start(const char *session_id, const char *filename);
 int transfer_resume_from(const char *session_id, const char *start_file);
 
 /**
- * @brief Pause ongoing transfer
- *
- * @return 0 on success, negative error code on failure
- */
-int transfer_pause(void);
-
-/**
- * @brief Resume paused transfer
- *
- * @return 0 on success, negative error code on failure
- */
-int transfer_resume(void);
-
-/**
  * @brief Cancel ongoing transfer
  *
  * @return 0 on success, negative error code on failure
@@ -108,13 +93,6 @@ int transfer_get_progress(struct transfer_info *info);
  * @return true if transferring, false otherwise
  */
 bool transfer_is_active(void);
-
-/**
- * @brief Check if transfer is paused
- *
- * @return true if paused, false otherwise
- */
-bool transfer_is_paused(void);
 
 /**
  * @brief Get current transfer state
