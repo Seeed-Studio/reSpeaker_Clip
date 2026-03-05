@@ -182,12 +182,30 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				break;
 
 			case UI_EVT_REC_STOP:
-				LOG_INF("[UI] EVT: REC_STOP");
-				battery_request_update();
-				set_state(UI_STATE_STATUS_BAR);
-				status_bar_start_ms = k_uptime_get();
-				do_show_status_bar();
-				break;
+                LOG_INF("[UI] EVT: REC_STOP");
+                battery_request_update();
+                set_state(UI_STATE_STATUS_BAR);
+                status_bar_start_ms = k_uptime_get();
+                do_show_status_bar();
+                break;
+
+        case UI_EVT_REC_PAUSE:
+                LOG_INF("[UI] EVT: REC_PAUSE");
+                if (ui_current_state == UI_STATE_REC_WAVE ||
+                    ui_current_state == UI_STATE_REC_DOT) {
+                    /* Show pause icon - keep in current state but set paused flag */
+                    display_show_pause_icon();
+                }
+                break;
+
+        case UI_EVT_REC_RESUME:
+                LOG_INF("[UI] EVT: REC_RESUME");
+                if (ui_current_state == UI_STATE_REC_WAVE ||
+                    ui_current_state == UI_STATE_REC_DOT) {
+                    /* Resume recording - restore recording display */
+                    display_show_recording(g_config.mode == MODE_ENHANCED);
+                }
+                break;
 
 			case UI_EVT_MARK:
 				LOG_INF("[UI] EVT: MARK");
@@ -348,6 +366,16 @@ void display_show_error(const char *error)
 void display_set_recording(bool recording)
 {
 	ui_post_event(recording ? UI_EVT_REC_START : UI_EVT_REC_STOP);
+}
+
+void display_set_recording_paused(void)
+{
+	ui_post_event(UI_EVT_REC_PAUSE);
+}
+
+void display_set_recording_resumed(void)
+{
+	ui_post_event(UI_EVT_REC_RESUME);
 }
 
 void display_update_battery(uint8_t percent)

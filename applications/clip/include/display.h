@@ -89,6 +89,14 @@ void display_show_pairing_guide(void);
 void display_show_poweroff(void);
 
 /**
+ * @brief Show pause icon during recording pause
+ *
+ * Displays a pause icon (two vertical bars) in the center of the screen.
+ * Called when recording is paused via AT+PAUSE.
+ */
+void display_show_pause_icon(void);
+
+/**
  * @brief Set OLED contrast/brightness
  *
  * @param contrast 0 = minimum brightness, 255 = maximum brightness

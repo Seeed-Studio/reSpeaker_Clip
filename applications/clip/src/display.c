@@ -1294,3 +1294,32 @@ void display_show_poweroff(void)
 
 	flush_display();
 }
+
+/**
+ * @brief Show pause icon during recording pause
+ *
+ * Displays a pause icon (two vertical bars) in the center of the screen.
+ * Called when recording is paused via AT+PAUSE.
+ */
+void display_show_pause_icon(void)
+{
+	clear_screen(display_buffer);
+
+	/* Draw two vertical bars (pause icon) in the center
+	 * Each bar is 4 pixels wide, 20 pixels tall
+	 * Left bar: x = 36, Right bar: x = 48
+	 * Vertical center: y = 14 (for 20px height in 48px display)
+	 */
+	for (int y = 14; y < 34; y++) {
+		/* Left bar */
+		for (int x = 36; x < 40; x++) {
+			set_pixel(display_buffer, x, y);
+		}
+		/* Right bar */
+		for (int x = 48; x < 52; x++) {
+			set_pixel(display_buffer, x, y);
+		}
+	}
+
+	flush_display();
+}

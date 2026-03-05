@@ -34,6 +34,8 @@ enum ui_state {
 enum ui_event {
 	UI_EVT_REC_START,    /**< Recording started */
 	UI_EVT_REC_STOP,     /**< Recording stopped */
+	UI_EVT_REC_PAUSE,    /**< Recording paused */
+	UI_EVT_REC_RESUME,    /**< Recording resumed */
 	UI_EVT_MARK,         /**< Bookmark added during recording */
 	UI_EVT_STATUS_SHOW,  /**< Single click in idle -> show status bar */
 	UI_EVT_BONDED,       /**< BLE pairing completed -> hide pairing guide */
@@ -98,6 +100,20 @@ void display_show_error(const char *error);
  * @param recording true if recording started, false if stopped
  */
 void display_set_recording(bool recording);
+
+/**
+ * @brief Notify recording pause state change
+ *
+ * Posts UI_EVT_REC_PAUSE.
+ */
+void display_set_recording_paused(void);
+
+/**
+ * @brief Notify recording resumed from pause
+ *
+ * Posts UI_EVT_REC_RESUME to restore recording display.
+ */
+void display_set_recording_resumed(void);
 
 /**
  * @brief Update battery level (log only)

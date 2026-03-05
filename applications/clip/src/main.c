@@ -233,7 +233,16 @@ static void state_change_handler(enum clip_state old_state,
 
     /* Notify UI of recording state changes */
     if (new_state == CLIP_STATE_RECORDING) {
-        display_set_recording(true);
+        if (old_state == CLIP_STATE_PAUSED) {
+            /* Recording resumed from pause */
+            display_set_recording_resumed();
+        } else {
+            /* Normal recording start */
+            display_set_recording(true);
+        }
+    } else if (new_state == CLIP_STATE_PAUSED) {
+        /* Recording paused - show pause icon */
+        display_set_recording_paused();
     } else if (old_state == CLIP_STATE_RECORDING) {
         display_set_recording(false);
     }
