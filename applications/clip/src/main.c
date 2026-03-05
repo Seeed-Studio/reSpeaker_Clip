@@ -22,6 +22,7 @@
 #include "transfer.h"
 #include "battery.h"
 #include "display_ctrl.h"
+#include "watchdog.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -112,6 +113,13 @@ int clip_init(void)
     int err;
 
     LOG_INF("Initializing reSpeaker Clip...");
+
+    /* Initialize watchdog first (as early as possible) */
+    err = watchdog_init();
+    if (err) {
+        LOG_WRN("Watchdog init failed: %d", err);
+        /* Continue anyway, watchdog is not critical */
+    }
 
     /* Initialize state machine */
     err = state_init();
@@ -259,6 +267,9 @@ void clip_main_loop(void)
 
     while (true)
     {
+        /* Feed watchdog every second (timeout is 30 seconds) */
+        watchdog_feed();
+
         /* Sleep to save power */
         k_sleep(K_MSEC(1000));
 

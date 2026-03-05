@@ -213,4 +213,11 @@ void clip_main_loop(void);
 /* Default OLED contrast (0-255) */
 #define OLED_CONTRAST_DEFAULT  128
 
+/* Watchdog timeout in milliseconds */
+#ifndef CONFIG_WDT_TIMEOUT_MS
+#define CLIP_WDT_TIMEOUT_MS               10000
+#else
+#define CLIP_WDT_TIMEOUT_MS               CONFIG_WDT_TIMEOUT_MS
+#endif
+
 #endif /* CLIP_H */

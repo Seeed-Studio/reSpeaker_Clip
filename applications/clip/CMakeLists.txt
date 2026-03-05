@@ -25,4 +25,5 @@ target_sources(app PRIVATE
     src/display_ctrl.c
     src/display.c
     src/icons.c
+    src/watchdog.c
 )

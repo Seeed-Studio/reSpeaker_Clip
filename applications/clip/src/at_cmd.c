@@ -240,7 +240,9 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
 {
     char buffer[512];
     struct storage_stats stats;
+    struct audio_stats audio_stats;
     uint32_t free_space = 0;
+    uint32_t recording_duration = 0;
 
     /* Refresh battery reading before reporting */
     battery_request_update();
@@ -250,9 +252,15 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
         free_space = stats.free_space_mb;
     }
 
+    /* Get recording duration if recording */
+    if (audio_is_recording() && audio_get_stats(&audio_stats) == 0) {
+        recording_duration = (uint32_t)(audio_stats.recording_time_ms / 1000);
+    }
+
     snprintf(buffer, sizeof(buffer),
              "{\"state\":\"%s\","
              "\"recording\":%s,"
+             "\"duration\":%u,"
              "\"battery\":%u,"
              "\"charging\":%s,"
              "\"mode\":\"%s\","
@@ -260,6 +268,7 @@ static int cmd_gstat(const struct at_command *cmd, char **response)
              "\"free_space\":%u}",
              state_to_string(state_get_current()),
              audio_is_recording() ? "true" : "false",
+             recording_duration,
              battery_get_level(),
              battery_is_charging() ? "true" : "false",
              g_config.mode == MODE_NORMAL ? "normal" : "enhanced",

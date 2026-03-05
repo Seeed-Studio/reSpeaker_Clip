@@ -64,15 +64,15 @@ static time_t utc_to_timestamp(int year, int month, int day, int hour, int min, 
 
 /* Factory default configuration */
 static const struct clip_config factory_config = {
-    .bitrate = 48000,
+    .bitrate = 24000,          /* 24kbps mono */
     .complexity = 1,
-    .mode = MODE_ENHANCED,
-    .noise_suppress = 30,     /* Enable noise suppression by default (30dB) */
+    .mode = MODE_ENHANCED,     /* Enhanced mode (mono) */
+    .noise_suppress = 0,       /* Disable noise suppression temporarily */
     .chunk_size = 500,
     .auto_delete_days = -1,
     .agc_target = 0,
     .agc_enabled = false,
-    .dereverb_enabled = true, /* Enable dereverberation by default */
+    .dereverb_enabled = false, /* Disable dereverberation temporarily */
     .oled_contrast = OLED_CONTRAST_DEFAULT,
 };
 
@@ -226,6 +226,14 @@ int config_init(void)
                 (g_config.mode == MODE_NORMAL) ? "normal" : "enhanced",
                 g_config.bitrate, g_config.complexity);
     }
+
+    /* TEMPORARY: Force enhanced mode and 24kbps */
+    g_config.mode = MODE_ENHANCED;
+    g_config.bitrate = 24000;
+    g_config.noise_suppress = 0;
+    g_config.dereverb_enabled = false;
+    LOG_INF("Config forced: enhanced mode, 24kbps, DSP disabled");
+
     /* Load time settings separately (ignore errors - time is optional) */
     settings_load_subtree("time");
 #else

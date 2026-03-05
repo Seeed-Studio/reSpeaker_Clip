@@ -378,9 +378,13 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
                           uint8_t channels, uint32_t sample_rate, const char *mode)
 {
 	char filepath[128];
+	char session_path[64];
 	struct fs_file_t file;
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
 	int rc;
 	uint32_t synced = 0;
+	uint16_t actual_opus_count = 0;
 
 	if (!sd_mounted) {
 		return -ENODEV;
@@ -388,6 +392,29 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 
 	if (!session_id) {
 		return -EINVAL;
+	}
+
+	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
+
+	/* Count actual opus files in the session directory */
+	fs_dir_t_init(&dirp);
+	if (fs_opendir(&dirp, session_path) == 0) {
+		while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != 0) {
+			if (entry.type == FS_DIR_ENTRY_FILE &&
+			    strstr(entry.name, ".opus") != NULL &&
+			    entry.size > 0) {
+				actual_opus_count++;
+			}
+		}
+		fs_closedir(&dirp);
+	}
+
+	/* If no valid opus files, delete the entire session directory */
+	if (actual_opus_count == 0) {
+		LOG_INF("Session %s has no valid opus files, deleting", session_id);
+		storage_delete_session(session_id);
+		memset(current_session_dir, 0, sizeof(current_session_dir));
+		return 0;
 	}
 
 	/* Read current synced value before overwriting */
@@ -402,7 +429,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 		int len = snprintf(json_buf, sizeof(json_buf),
 			"{\"id\":\"%s\",\"duration\":%u,\"files\":%u,\"synced\":%u,"
 			"\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}\n",
-			session_id, duration_sec, file_count, synced, channels, sample_rate,
+			session_id, duration_sec, actual_opus_count, synced, channels, sample_rate,
 			mode ? mode : "normal");
 		fs_write(&file, json_buf, len);
 		fs_close(&file);
@@ -413,11 +440,6 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 	fs_file_t_init(&file);
 	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
 	if (rc == 0) {
-		char session_path[64];
-		struct fs_dir_t dirp;
-		struct fs_dirent entry;
-
-		snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
 		fs_dir_t_init(&dirp);
 
 		if (fs_opendir(&dirp, session_path) == 0) {
@@ -437,7 +459,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 
 	memset(current_session_dir, 0, sizeof(current_session_dir));
 
-	LOG_INF("Session: %s %u files", session_id, file_count);
+	LOG_INF("Session: %s %u files", session_id, actual_opus_count);
 	return 0;
 }
 
@@ -708,6 +730,52 @@ int storage_get_current_session(char *out_session_id)
 	return 0;
 }
 
+/**
+ * @brief Delete an empty session directory (internal helper)
+ *
+ * @param session_id Session ID to delete
+ * @return 0 on success, negative error code on failure
+ */
+static int storage_delete_empty_session(const char *session_id)
+{
+	char session_path[64];
+	char filepath[320];
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+
+	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
+
+	/* Delete all files in the session directory */
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, session_path);
+	if (rc != 0) {
+		return rc;
+	}
+
+	while (1) {
+		rc = fs_readdir(&dirp, &entry);
+		if (rc != 0 || entry.name[0] == 0) {
+			break;
+		}
+
+		if (entry.type == FS_DIR_ENTRY_FILE) {
+			snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s", session_id, entry.name);
+			fs_unlink(filepath);
+		}
+	}
+
+	fs_closedir(&dirp);
+
+	/* Delete the directory itself */
+	rc = fs_unlink(session_path);
+	if (rc == 0) {
+		LOG_INF("Deleted empty session: %s", session_id);
+	}
+
+	return rc;
+}
+
 int storage_list_sessions(struct storage_session_info *sessions, int max_sessions)
 {
 	struct fs_dir_t dirp;
@@ -754,23 +822,18 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 			continue;
 		}
 
-		/* Copy session ID */
-		strncpy(sessions[count].session_id, entry.name, sizeof(sessions[count].session_id) - 1);
-		sessions[count].session_id[sizeof(sessions[count].session_id) - 1] = '\0';
-
 		/* Count files and calculate size in this session */
 		char session_path[280];  /* /SD:/REC/ + 255 char filename + null */
 		struct fs_dir_t session_dir;
 		struct fs_dirent file_entry;
+		uint16_t file_count = 0;
+		uint64_t total_bytes = 0;
 
 		snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", entry.name);
 		fs_dir_t_init(&session_dir);
 
 		rc = fs_opendir(&session_dir, session_path);
 		if (rc == 0) {
-			sessions[count].file_count = 0;
-			sessions[count].total_bytes = 0;
-
 			while (1) {
 				rc = fs_readdir(&session_dir, &file_entry);
 				if (rc != 0 || file_entry.name[0] == 0) {
@@ -779,16 +842,42 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 
 				if (file_entry.type == FS_DIR_ENTRY_FILE &&
 				    strstr(file_entry.name, ".opus") != NULL) {
-					sessions[count].file_count++;
-					sessions[count].total_bytes += file_entry.size;
+					file_count++;
+					total_bytes += file_entry.size;
 				}
 			}
 
 			fs_closedir(&session_dir);
 		}
 
+		/* Skip and delete empty sessions (no .opus files) */
+		if (file_count == 0) {
+			/* Check if this is the current recording session */
+			if (current_session_dir[0] != '\0') {
+				const char *session_start = strrchr(current_session_dir, '/');
+				if (session_start) {
+					session_start++;
+				} else {
+					session_start = current_session_dir;
+				}
+				/* Don't delete current recording session */
+				if (strcmp(session_start, entry.name) == 0) {
+					continue;
+				}
+			}
+			/* Delete empty session directory */
+			storage_delete_empty_session(entry.name);
+			continue;
+		}
+
+		/* Copy session info to output array */
+		strncpy(sessions[count].session_id, entry.name, sizeof(sessions[count].session_id) - 1);
+		sessions[count].session_id[sizeof(sessions[count].session_id) - 1] = '\0';
+		sessions[count].file_count = file_count;
+		sessions[count].total_bytes = total_bytes;
+
 		/* Calculate duration (rough estimate: bytes / bitrate / 8) */
-		sessions[count].duration_sec = sessions[count].total_bytes / 3000;  /* ~24kbps */
+		sessions[count].duration_sec = total_bytes / 3000;  /* ~24kbps */
 
 		count++;
 	}
