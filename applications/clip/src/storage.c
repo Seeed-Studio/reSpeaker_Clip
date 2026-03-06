@@ -884,8 +884,8 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 			fs_closedir(&session_dir);
 		}
 
-		/* Skip and delete empty sessions (no .opus files) */
-		if (file_count == 0) {
+		/* Skip and delete empty sessions (no files or no data) */
+		if (file_count == 0 || total_bytes == 0) {
 			/* Check if this is the current recording session */
 			if (current_session_dir[0] != '\0') {
 				const char *session_start = strrchr(current_session_dir, '/');

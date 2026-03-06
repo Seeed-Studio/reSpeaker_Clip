@@ -1365,11 +1365,14 @@ static void calculate_energy_level(int16_t *pcm_data, int frame_size)
 	k_mutex_unlock(&audio_energy_mutex);
 
 	/* Send audio visualization data via BLE (every ~200ms)
-	 * Send 13 bytes with energy history (oldest to newest) */
+	 * Pack 13 values (4 bits each) into 7 bytes (oldest to newest)
+	 * Byte format: [val0:val1] [val2:val3] [val4:val5] [val6:val7]
+	 *              [val8:val9] [val10:val11] [val12:0x0] */
 	static int64_t last_vis_send = 0;
 	int64_t now = k_uptime_get();
 	if (now - last_vis_send >= 200) {
 		uint8_t history_copy[13];
+		uint8_t packed[7];
 
 		/* Copy history in order: oldest to newest */
 		k_mutex_lock(&audio_energy_mutex, K_FOREVER);
@@ -1389,7 +1392,13 @@ static void calculate_energy_level(int16_t *pcm_data, int frame_size)
 		}
 		k_mutex_unlock(&audio_energy_mutex);
 
-		ble_svc_send_audio_vis(history_copy, 13);
+		/* Pack 13 values (4 bits each) into 7 bytes */
+		for (int i = 0; i < 6; i++) {
+			packed[i] = (history_copy[i * 2] & 0x0F) | ((history_copy[i * 2 + 1] & 0x0F) << 4);
+		}
+		packed[6] = history_copy[12] & 0x0F;  /* Last value in low nibble */
+
+		ble_svc_send_audio_vis(packed, 7);
 		last_vis_send = now;
 	}
 }

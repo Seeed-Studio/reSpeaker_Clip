@@ -68,7 +68,7 @@ enum ui_state ui_get_state(void)
 
 /* Timeout configuration */
 #define UI_STATUS_BAR_DURATION_MS  3000
-#define UI_REC_WAVE_DURATION_MS    60000000  /* Show wave during entire recording (~16 hours max) */
+#define UI_REC_WAVE_DURATION_MS    5000  /* Show wave for 5 seconds, then transition to DOT */
 
 static void set_state(enum ui_state new_state)
 {

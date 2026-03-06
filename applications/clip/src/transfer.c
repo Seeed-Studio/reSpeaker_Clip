@@ -41,12 +41,14 @@ static K_SEM_DEFINE(transfer_trigger_sem, 0, 1);
 static volatile bool transfer_thread_running = false;
 static volatile bool transfer_thread_waiting = false;  /* Thread is waiting on semaphore */
 static volatile bool transfer_is_resume = false;  /* Is this a resume transfer (not for current recording)? */
+static volatile bool transfer_complete_sent = false;  /* Track if transfer_complete event was sent */
 
 /* Forward declarations */
 static void transfer_thread_main(void *, void *, void *);
 static int transfer_next_file(void);
 static int transfer_send_chunk(void);
 static void transfer_cleanup(void);
+static void send_transfer_complete_once(const char *session_id, int file_count);
 
 int transfer_init(void)
 {
@@ -133,6 +135,7 @@ int transfer_start(const char *session_id, const char *filename)
 
 	/* Clear resume flag - this is a normal transfer, not a resume */
 	transfer_is_resume = false;
+	transfer_complete_sent = false;  /* Reset complete event flag for new transfer */
 
 	/* Initialize transfer state */
 	memset(&current_transfer, 0, sizeof(current_transfer));
@@ -558,8 +561,8 @@ process_next_file:
 											/* Stopped - complete transfer */
 											LOG_INF("Transfer completed (stopped): %u files", current_transfer.file_index);
 											current_transfer.state = TRANSFER_STATE_COMPLETED;
-											ble_svc_send_transfer_complete(current_transfer.session_id,
-											                               (int)current_transfer.file_index);
+											send_transfer_complete_once(current_transfer.session_id,
+											                            (int)current_transfer.file_index);
 											transfer_cleanup();
 											transfer_thread_waiting = true;
 											k_sem_take(&transfer_trigger_sem, K_FOREVER);
@@ -578,7 +581,7 @@ process_next_file:
 									LOG_INF("Transfer completed: %u files", current_transfer.file_index);
 									current_transfer.state = TRANSFER_STATE_COMPLETED;
 
-									ble_svc_send_transfer_complete(current_transfer.session_id,
+									send_transfer_complete_once(current_transfer.session_id,
 									                               (int)current_transfer.file_index);
 
 									transfer_cleanup();
@@ -603,7 +606,7 @@ process_next_file:
 									LOG_INF("Transfer completed (stopped): %u files", current_transfer.file_index);
 									current_transfer.state = TRANSFER_STATE_COMPLETED;
 
-									ble_svc_send_transfer_complete(current_transfer.session_id,
+									send_transfer_complete_once(current_transfer.session_id,
 									                               (int)current_transfer.file_index);
 
 									transfer_cleanup();
@@ -633,8 +636,8 @@ process_next_file:
 										if (!audio_is_recording()) {
 											LOG_INF("Transfer completed (stopped): %u files", current_transfer.file_index);
 											current_transfer.state = TRANSFER_STATE_COMPLETED;
-											ble_svc_send_transfer_complete(current_transfer.session_id,
-											                               (int)current_transfer.file_index);
+											send_transfer_complete_once(current_transfer.session_id,
+											                            (int)current_transfer.file_index);
 											transfer_cleanup();
 											transfer_thread_waiting = true;
 											k_sem_take(&transfer_trigger_sem, K_FOREVER);
@@ -663,8 +666,8 @@ process_next_file:
 						LOG_INF("Transfer completed: %u files", current_transfer.file_index);
 						current_transfer.state = TRANSFER_STATE_COMPLETED;
 
-						ble_svc_send_transfer_complete(current_transfer.session_id,
-						                               (int)current_transfer.file_index);
+						send_transfer_complete_once(current_transfer.session_id,
+						                            (int)current_transfer.file_index);
 
 						transfer_cleanup();
 						transfer_thread_waiting = true;
@@ -899,6 +902,33 @@ static int transfer_send_chunk(void)
 	current_transfer.bytes_transferred += bytes_read;
 
 	return 0;
+}
+
+/**
+ * @brief Send transfer_complete event only once per transfer
+ *
+ * Prevents duplicate transfer_complete events from multiple code paths.
+ * Uses transfer_complete_sent flag to ensure event is sent only once.
+ *
+ * @param session_id Session ID (will be cleared after sending)
+ * @param file_count Number of files transferred
+ */
+static void send_transfer_complete_once(const char *session_id, int file_count)
+{
+	if (transfer_complete_sent) {
+		LOG_DBG("transfer_complete already sent, skipping duplicate");
+		return;
+	}
+
+	if (!session_id || session_id[0] == '\0') {
+		LOG_WRN("Cannot send transfer_complete: empty session_id");
+		return;
+	}
+
+	LOG_INF("Sending transfer_complete event: session=%s, files=%d",
+	        session_id, file_count);
+	ble_svc_send_transfer_complete(session_id, file_count);
+	transfer_complete_sent = true;
 }
 
 static void transfer_cleanup(void)

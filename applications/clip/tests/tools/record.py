@@ -32,14 +32,26 @@ class AudioVisualizer:
     """Display audio waveform visualization in terminal."""
 
     def __init__(self):
-        self.bars = [0] * 26  # 26 energy history values (0-10)
+        self.bars = [0] * 13  # 13 energy history values (0-10)
         self.last_display = ""
         self.enabled = True
 
     def update(self, data: bytes):
-        """Update energy history from BLE notification data (26 bytes: oldest to newest)."""
-        if len(data) >= 26:
-            self.bars = list(data[:26])
+        """Update energy history from BLE notification data (7 bytes packed format).
+
+        Format: 13 values (4 bits each) packed into 7 bytes (oldest to newest).
+        Byte 0: [val0:val1], Byte 1: [val2:val3], ..., Byte 5: [val10:val11]
+        Byte 6: [val12:0x0]
+        """
+        if len(data) >= 7:
+            # Unpack 7 bytes into 13 values (4 bits each)
+            self.bars = []
+            for i in range(6):
+                byte_val = data[i]
+                self.bars.append(byte_val & 0x0F)         # Low nibble
+                self.bars.append((byte_val >> 4) & 0x0F)  # High nibble
+            # Last byte: only low nibble is valid
+            self.bars.append(data[6] & 0x0F)
             # Clamp values to 0-10 range
             self.bars = [min(10, max(0, b)) for b in self.bars]
 

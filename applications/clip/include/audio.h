@@ -199,11 +199,11 @@ int audio_get_energy_level(void);
 /**
  * @brief Get audio energy history for trend display
  *
- * Returns array of 26 energy levels (0-10) representing recent audio history.
+ * Returns array of 13 energy levels (0-10) representing recent audio history.
  * Ordered from oldest to newest.
  *
- * @param history Output array of 26 uint8_t values (0-10)
- * @return Number of valid values (1-26), or 0 if not recording
+ * @param history Output array of 13 uint8_t values (0-10)
+ * @return Number of valid values (1-13), or 0 if not recording
  */
 int audio_get_energy_history(uint8_t *history);
 
