@@ -15,6 +15,7 @@
 #include <stdio.h>
 
 #include "icons.h"
+#include "ble_svc.h"
 
 LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 
@@ -1175,7 +1176,7 @@ void display_show_mark_animation_frame(int frame, bool fast_mode)
  * ======================================== */
 
 /**
- * @brief Render pairing guide page (empty implementation)
+ * @brief Render pairing guide page with device name
  * @param buf Frame buffer
  */
 static void render_pairing_guide_page(uint8_t *buf)
@@ -1185,47 +1186,53 @@ static void render_pairing_guide_page(uint8_t *buf)
 	/*
 	 * UI Layout (88px x 48px):
 	 *
-	 * Right side: PHONE icon (16x16), centered vertically
-	 * Left/Top: "Open APP" (line 1), "to Pair" (line 2)
+	 * Line 1: Device name "Clip XXXX" (centered)
+	 * Line 2: "to Pair" (right-aligned)
+	 * Right side: PHONE icon (16x16)
 	 *
 	 * Positions:
 	 * - PHONE icon: right edge at (OLED_WIDTH - PAIRING_PHONE_ICON_RIGHT_MARGIN)
-	 *               vertically centered at ((OLED_HEIGHT - ICON_HEIGHT) / 2)
-	 * - Text "Open APP": starts at (PAIRING_TEXT_RIGHT_MARGIN from right, PAIRING_TEXT_TOP_MARGIN from top)
-	 * - Text "to Pair": starts below "Open APP" with PAIRING_LINE_SPACING gap
-	 *   't' aligned horizontally with 'O'
+	 *               vertically centered
+	 * - Device name: centered at top
+	 * - "to Pair": right-aligned below device name
 	 */
 
+	/* Get BLE device name */
+	const char *device_name = ble_svc_get_device_name();
+	if (!device_name) {
+		device_name = "Clip ----";  /* Fallback if name not available */
+	}
+
+	/* Calculate device name width for centering */
+	int name_len = strlen(device_name);
+	int name_width = name_len * 6;  /* 6px per character */
+	int name_x = (OLED_WIDTH - name_width) / 2;
+	int name_y = 2;  /* 2px from top */
+
+	/* Draw PHONE icon on the right, vertically centered */
 	int phone_x = OLED_WIDTH - PAIRING_PHONE_ICON_RIGHT_MARGIN - ICON_WIDTH;
 	int phone_y = (OLED_HEIGHT - ICON_HEIGHT) / 2;
-
-	/* 1. Draw PHONE icon on the right, vertically centered */
 	const uint8_t *phone_bitmap = icon_get_bitmap(ICON_PHONE, NULL, NULL);
 	if (phone_bitmap) {
 		icon_draw_bitmap(buf, phone_x, phone_y, phone_bitmap, ICON_WIDTH, ICON_HEIGHT);
 	}
 
-	/* 2. Draw text "Open APP" then "to Pair" on new line */
-	/* Text start position: from right margin, from top margin */
-	int text_start_x = OLED_WIDTH - PAIRING_TEXT_RIGHT_MARGIN - 6;  /* -6 for character width */
-	int text_y = PAIRING_TEXT_TOP_MARGIN;
-
-	/* Line 1: "Open APP" */
-	const char *line1 = "Open APP";
-	int x = text_start_x;
-	for (const char *p = line1; *p; p++) {
-		display_draw_char_6x12(buf, *p, x, text_y);
-		x += 6;  /* Character width (6x12 font) */
+	/* Draw device name on line 1 (centered) */
+	int x = name_x;
+	for (const char *p = device_name; *p; p++) {
+		display_draw_char_6x12(buf, *p, x, name_y);
+		x += 6;
 	}
 
-	/* Line 2: "to Pair" */
-	/* 't' aligned with 'O' horizontally */
+	/* Draw "to Pair" on line 2 (right-aligned) */
 	const char *line2 = "to Pair";
+	int text_start_x = OLED_WIDTH - PAIRING_TEXT_RIGHT_MARGIN - 6;  /* -6 for first character width */
+	int text_y = name_y + 12 + PAIRING_LINE_SPACING;  /* Below device name */
+
 	x = text_start_x;
-	text_y += 12 + PAIRING_LINE_SPACING;  /* Move to next line (12 is font height) */
 	for (const char *p = line2; *p; p++) {
 		display_draw_char_6x12(buf, *p, x, text_y);
-		x += 6;  /* Character width */
+		x += 6;
 	}
 }
 

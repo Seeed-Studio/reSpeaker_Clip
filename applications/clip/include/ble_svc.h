@@ -110,4 +110,11 @@ void ble_svc_schedule_reboot(uint32_t delay_ms);
  */
 struct bt_conn *ble_svc_get_connection(void);
 
+/**
+ * @brief Get BLE device name
+ *
+ * @return Device name string (e.g., "Clip XXXX")
+ */
+const char *ble_svc_get_device_name(void);
+
 #endif /* BLE_SVC_H */

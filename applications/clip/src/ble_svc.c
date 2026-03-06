@@ -872,3 +872,8 @@ struct bt_conn *ble_svc_get_connection(void)
 {
     return current_conn;
 }
+
+const char *ble_svc_get_device_name(void)
+{
+    return device_name;
+}
