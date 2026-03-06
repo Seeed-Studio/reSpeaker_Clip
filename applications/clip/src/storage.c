@@ -43,6 +43,7 @@ static uint64_t total_bytes = 0;
 /* Internal functions */
 static int flush_write_buffer(void);
 static int update_free_space(void);
+static int cleanup_invalid_sessions(void);
 
 static uint32_t free_space_mb = 0;
 
@@ -67,6 +68,9 @@ int storage_init(void)
 	LOG_INF("SD card ready");
 
 	update_free_space();
+
+	/* Clean up invalid sessions (empty/corrupted sessions from old firmware) */
+	cleanup_invalid_sessions();
 
 	return 0;
 }
@@ -595,6 +599,10 @@ int storage_format_card(void)
 	}
 	sd_mounted = false;
 
+	/* Work around: force FatFS to unmount by mounting NULL */
+	/* This requires the ff.h header */
+	f_mount(NULL, "0:", 0);
+
 	k_sleep(K_MSEC(200));
 
 	LOG_INF("Re-initializing disk...");
@@ -606,19 +614,30 @@ int storage_format_card(void)
 
 	k_sleep(K_MSEC(100));
 
-	/* Try simpler format approach - no work area */
-	LOG_INF("Calling f_mkfs (no work area)...");
+	/* Prepare mkfs options */
+	LOG_INF("Calling f_mkfs with work area...");
 	memset(&opt, 0, sizeof(opt));
 	opt.fmt = FM_ANY | FM_SFD;  /* Auto-detect, default to FAT16 */
+	opt.align = 0;               /* Get sector size via diskio query */
+	opt.n_root = 512;            /* Number of root directory entries */
+	opt.au_size = 0;             /* Auto calculate cluster size */
 
-	/* First try without work area (NULL) */
-	rc = f_mkfs("0:", &opt, NULL, 0);
-	LOG_INF("f_mkfs returned: %d", rc);
+	/* Use work area for formatting */
+	int mkfs_rc = f_mkfs("0:", &opt, work, sizeof(work));
+	LOG_INF("f_mkfs returned: %d", mkfs_rc);
 
-	if (rc == 0) {
+	if (mkfs_rc != 0) {
+		/* Try with FAT32 explicitly */
+		LOG_WRN("f_mkfs failed: %d, trying with FAT32...", mkfs_rc);
+		opt.fmt = FM_FAT32;
+		mkfs_rc = f_mkfs("0:", &opt, work, sizeof(work));
+		LOG_INF("f_mkfs (FAT32) returned: %d", mkfs_rc);
+	}
+
+	if (mkfs_rc == 0) {
 		LOG_INF("Format successful!");
 	} else {
-		LOG_ERR("f_mkfs failed: %d", rc);
+		LOG_ERR("f_mkfs failed after all attempts: %d", mkfs_rc);
 	}
 
 	/* Try to remount regardless of result */
@@ -633,10 +652,11 @@ int storage_format_card(void)
 	total_files = 0;
 	total_bytes = 0;
 
-	if (rc == 0) {
+	if (mkfs_rc == 0) {
 		LOG_INF("SD card formatted successfully");
 		return 0;
 	} else {
+		LOG_ERR("SD card format failed (code %d), but card is usable", mkfs_rc);
 		return -EIO;
 	}
 }
@@ -1392,4 +1412,97 @@ int storage_increment_synced(const char *session_id)
 		return current;
 	}
 	return storage_set_synced_files(session_id, (uint32_t)(current + 1));
+}
+
+/* Clean up invalid sessions (empty or corrupted sessions from old firmware) */
+static int cleanup_invalid_sessions(void)
+{
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	char session_path[128];
+	int rc;
+	int cleaned_count = 0;
+
+	if (!sd_mounted) {
+		return 0;
+	}
+
+	/* Open REC directory */
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, "/SD:/REC");
+	if (rc != 0) {
+		/* REC directory doesn't exist yet - nothing to clean */
+		return 0;
+	}
+
+	/* Scan each session directory */
+	while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != 0) {
+		/* Only look for directories (skip . and ..) */
+		if (entry.type != FS_DIR_ENTRY_DIR) {
+			continue;
+		}
+
+		/* Skip special entries */
+		if (strcmp(entry.name, ".") == 0 || strcmp(entry.name, "..") == 0) {
+			continue;
+		}
+
+		/* Build session path */
+		snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", entry.name);
+
+		/* Check if session has valid content */
+		struct fs_dir_t session_dirp;
+		struct fs_dirent session_entry;
+		int file_count = 0;
+		bool has_opus = false;
+
+		fs_dir_t_init(&session_dirp);
+		if (fs_opendir(&session_dirp, session_path) == 0) {
+			/* Count files and check for .opus files */
+			while (fs_readdir(&session_dirp, &session_entry) == 0 && session_entry.name[0] != 0) {
+				if (session_entry.type == FS_DIR_ENTRY_FILE) {
+					file_count++;
+					if (strstr(session_entry.name, ".opus") != NULL) {
+						has_opus = true;
+					}
+				}
+			}
+			fs_closedir(&session_dirp);
+		}
+
+		/* Delete session if:
+		 * 1. No files at all (completely empty)
+		 * 2. No .opus files (corrupted or incomplete)
+		 * AND not the current recording session
+		 */
+		bool is_current_session = false;
+		if (current_session_dir[0] != '\0') {
+			const char *session_start = strrchr(current_session_dir, '/');
+			if (session_start) {
+				session_start++;  /* Skip the '/' */
+			} else {
+				session_start = current_session_dir;
+			}
+			if (strcmp(session_start, entry.name) == 0) {
+				is_current_session = true;
+			}
+		}
+
+		if (!is_current_session && (file_count == 0 || !has_opus)) {
+			LOG_INF("Cleaning up invalid session: %s (files=%d, has_opus=%d)",
+				entry.name, file_count, has_opus);
+
+			/* Delete the session directory */
+			storage_delete_session(entry.name);
+			cleaned_count++;
+		}
+	}
+
+	fs_closedir(&dirp);
+
+	if (cleaned_count > 0) {
+		LOG_INF("Cleaned up %d invalid session(s)", cleaned_count);
+	}
+
+	return 0;
 }

@@ -522,11 +522,13 @@ class SessionSync(FileTransfer):
                     result["merged_file"] = str(merged_path)
             return result
 
-        # Log sync info
+        # Log sync info (use logging to avoid interfering with progress bar)
+        import logging
+        logger = logging.getLogger(__name__)
         if start_file:
-            print(f"Resuming from: {start_file} (synced: {synced_files}/{total_files})")
+            logger.debug(f"Resuming from: {start_file} (synced: {synced_files}/{total_files})")
         else:
-            print(f"Starting from beginning ({total_files} files total)")
+            logger.debug(f"Starting from beginning ({total_files} files total)")
 
         # Download with merge (start_file is calculated above)
         # In continuous mode, use a very long timeout since recording may be long
@@ -553,6 +555,7 @@ class SessionSync(FileTransfer):
         self,
         output_dir: Path,
         delete_after: bool = True,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Sync all sessions from device.
@@ -560,6 +563,7 @@ class SessionSync(FileTransfer):
         Args:
             output_dir: Base directory for downloads
             delete_after: Delete sessions after successful sync
+            progress_callback: Optional callback(filename, file_count, total_size)
 
         Returns:
             List of sync results for each session
@@ -575,6 +579,7 @@ class SessionSync(FileTransfer):
                     session_dir,
                     delete_after,
                     continuous=False,
+                    progress_callback=progress_callback,
                 )
                 results.append(result)
             except Exception as e:

@@ -228,6 +228,8 @@ Examples:
     parser.add_argument("--all-sessions", "-a", action="store_true",
                        help="Sync all sessions from device")
     parser.add_argument("--status", action="store_true", help="Show status and exit")
+    parser.add_argument("--convert-ogg", action="store_true",
+                       help="Convert existing .opus files to .ogg format (no device connection needed)")
     parser.add_argument("--output", "-o", type=Path, default=Path("recordings"),
                        help="Output directory (default: recordings/)")
     parser.add_argument("--keep", "-k", action="store_true",
@@ -236,6 +238,79 @@ Examples:
                        help="One-shot mode: exit when no new files")
 
     args = parser.parse_args()
+
+    # Handle --convert-ogg (no device connection needed)
+    if args.convert_ogg:
+        print("=" * 60)
+        print("Convert OGG Opus")
+        print("=" * 60)
+
+        output_dir = args.output
+        if not output_dir.exists():
+            print(f"Error: Output directory not found: {output_dir}")
+            return 1
+
+        # Find all device directories
+        device_dirs = [d for d in output_dir.iterdir() if d.is_dir()]
+
+        if not device_dirs:
+            print(f"No device directories found in {output_dir}")
+            return 0
+
+        total_converted = 0
+        total_failed = 0
+
+        for device_dir in sorted(device_dirs):
+            print(f"\nDevice: {device_dir.name}")
+
+            # Find all session directories
+            session_dirs = [d for d in device_dir.iterdir() if d.is_dir()]
+
+            for session_dir in sorted(session_dirs):
+                session_id = session_dir.name
+                merged_path = session_dir / f"{session_id}.opus"
+                ogg_path = session_dir / f"{session_id}.ogg"
+
+                # Skip if OGG already exists
+                if ogg_path.exists():
+                    continue
+
+                # Check if merged .opus exists
+                if not merged_path.exists():
+                    continue
+
+                print(f"  {session_id}: ", end="", flush=True)
+
+                # Try to get audio format from session.json
+                session_json_path = session_dir / "session.json"
+                channels = 1
+                sample_rate = 16000
+
+                if session_json_path.exists():
+                    try:
+                        import json
+                        with open(session_json_path) as f:
+                            session_data = json.load(f)
+                            channels = session_data.get("channels", 1)
+                            sample_rate = session_data.get("sample_rate", 16000)
+                    except Exception:
+                        pass
+
+                # Convert to OGG
+                if convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels):
+                    print(" OK")
+                    total_converted += 1
+                else:
+                    print(" Failed")
+                    total_failed += 1
+
+        print("\n" + "=" * 60)
+        print("Summary")
+        print("=" * 60)
+        print(f"  Converted: {total_converted}")
+        print(f"  Failed: {total_failed}")
+
+        return 0 if total_failed == 0 else 1
 
     # Create device
     print("Connecting to device...")
@@ -283,16 +358,121 @@ Examples:
             # First, list all sessions
             cmds = ClipCommands(device)
             sessions = await cmds.list_sessions()
+
             print(f"\nFound {len(sessions)} session(s) on device:")
             for s in sessions:
                 print(f"  - {s.id}: {s.files} files, {format_bytes(s.size)}")
 
+            # Get sync status for each session
+            print(f"\nSync status:")
+            for s in sessions:
+                try:
+                    session_info = await cmds.get_session_info(s.id)
+                    if session_info.synced_files > 0 and session_info.synced_files < session_info.files:
+                        next_file = session_info.synced_files + 1
+                        print(f"  {s.id}: Resuming from {next_file:04d}.opus ({session_info.synced_files}/{session_info.files} synced)")
+                    elif session_info.synced_files >= session_info.files:
+                        print(f"  {s.id}: Already synced ({session_info.files} files)")
+                    else:
+                        print(f"  {s.id}: Starting sync ({session_info.files} files)")
+                except Exception:
+                    print(f"  {s.id}: Starting sync ({s.files} files)")
+
             print(f"\nStarting sync...")
 
-            results = await sync.sync_all(
-                args.output / device_dir_name,
-                delete_after=not args.keep,
-            )
+            # Sync sessions one by one with individual progress bars
+            results = []
+            for idx, session in enumerate(sessions, 1):
+                print(f"\n[{idx}/{len(sessions)}] Syncing: {session.id}")
+
+                # Get session info for this session
+                try:
+                    session_info = await cmds.get_session_info(session.id)
+                    session_total_size = session_info.size
+                    session_total_files = session_info.files
+                except Exception:
+                    session_total_size = None
+                    session_total_files = session.files
+
+                # Create progress bar for this session
+                session_pbar = None
+                last_callback_size = 0
+
+                if HAS_TQDM:
+                    try:
+                        import colorama
+                        colorama.init()
+                    except ImportError:
+                        pass
+                    session_pbar = tqdm(
+                        total=session_total_size,
+                        unit="B",
+                        unit_scale=True,
+                        unit_divisor=1024,
+                        desc=f"[{session.id[:8]}]",
+                        leave=False,
+                        ncols=80,
+                    )
+
+                def session_progress_callback(filename: str, file_count: int, total_size: int):
+                    nonlocal last_callback_size
+
+                    if session_pbar is not None:
+                        # Detect new session (total reset)
+                        if total_size < last_callback_size:
+                            last_callback_size = 0
+
+                        delta = total_size - last_callback_size
+                        if delta > 0:
+                            session_pbar.update(delta)
+                            last_callback_size = total_size
+
+                        session_pbar.set_description(f"[{file_count:2d}] {filename[:8]}", refresh=True)
+                    else:
+                        print(f"  [{file_count:3d}] {filename}: {format_bytes(total_size)}")
+
+                session_dir = args.output / device_dir_name / session.id
+                result = await sync.sync(
+                    session.id,
+                    session_dir,
+                    delete_after=not args.keep,
+                    continuous=False,
+                    progress_callback=session_progress_callback,
+                )
+                results.append(result)
+
+                if session_pbar is not None:
+                    session_pbar.close()
+
+                # Convert to OGG Opus immediately after session completes
+                if result.get("file_count", 0) > 0:
+                    merged_path = session_dir / f"{session.id}.opus"
+
+                    if merged_path.exists() and merged_path.stat().st_size > 0:
+                        # Get audio format
+                        try:
+                            session_info = await cmds.get_session_info(session.id)
+                            if session_info:
+                                channels = session_info.channels
+                                sample_rate = session_info.sample_rate
+                            else:
+                                channels = 1
+                                sample_rate = 16000
+                        except Exception:
+                            channels = 1
+                            sample_rate = 16000
+
+                        ch_str = "stereo" if channels == 2 else "mono"
+                        ogg_path = session_dir / f"{session.id}.ogg"
+                        print(f"  Converting to OGG ({ch_str}, {sample_rate//1000}kHz)...", end="", flush=True)
+                        if convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels):
+                            print(" OK")
+                        else:
+                            print(" Failed")
+                    else:
+                        print(f"  No merged file found")
+                else:
+                    print(f"  No files synced")
 
             print("\n" + "=" * 60)
             print("Summary")
@@ -344,6 +524,18 @@ Examples:
         # Sync the session
         print("\n" + "=" * 60)
         print(f"Sync Session: {session_id}")
+
+        # Get session info for total size
+        session_total_size = None
+        session_total_files = None
+        try:
+            session_info = await cmds.get_session_info(session_id)
+            session_total_size = session_info.size
+            session_total_files = session_info.files
+            print(f"  Files: {session_total_files}, Size: {format_bytes(session_total_size)}")
+        except Exception:
+            print("  (Could not get session info)")
+
         if continuous:
             print("  (Recording in progress - will sync files as they are created)")
             print("  (Press Ctrl+C to stop)")
@@ -371,34 +563,60 @@ Examples:
         # tqdm progress bar (if available)
         pbar = None
         if HAS_TQDM:
+            try:
+                # Try to import colorama for Windows compatibility
+                import colorama
+                colorama.init()
+            except ImportError:
+                pass
+
             pbar = tqdm(
-                total=0,
+                total=session_total_size,  # Use session total size
                 unit="B",
                 unit_scale=True,
                 unit_divisor=1024,
-                desc=f"{session_id[:8]}",
+                desc="Sync",
                 leave=False,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+                ncols=80,
+                colour='green',
+                disable=False,
+                file=sys.stdout,  # Explicitly use stdout
             )
         else:
             # Fallback: show initial message
             print(f"  Syncing... (waiting for first file)")
 
         # Update progress callback to use tqdm
+        last_total = 0
+        callback_count = 0
+
         def update_progress(filename: str, file_count: int, total_size: int):
+            nonlocal last_total, callback_count
+            callback_count += 1
             sync_stats['last_filename'] = filename
             sync_stats['file_count'] = file_count
             sync_stats['total_bytes'] = total_size
 
-            if pbar:
-                pbar.set_description(f"{filename[:15]}")
-                pbar.total = total_size if total_size > 0 else 1
-                pbar.n = total_size
-                pbar.refresh()
+            # Debug: print first few calls to verify callback is working
+            if callback_count <= 3:
+                print(f"  DEBUG: Callback #{callback_count}: {filename}, {file_count} files, {format_bytes(total_size)}")
+
+            if pbar is not None:
+                # Update description with current filename
+                desc = f"{filename[:10]:<10} [{file_count:3d}]"
+                try:
+                    pbar.set_description(desc, refresh=True)
+                    # Update progress with delta
+                    delta = total_size - last_total
+                    if delta > 0:
+                        pbar.update(delta)
+                        last_total = total_size
+                except Exception as e:
+                    # If tqdm fails, fallback to print
+                    print(f"  [{file_count:3d}] {filename}: {format_bytes(total_size)} (tqdm error: {e})")
             else:
-                # Fallback: print progress on first file
-                if file_count == 1:
-                    print(f"  Receiving: {filename}")
+                # Fallback: print progress
+                print(f"  [{file_count:3d}] {filename}: {format_bytes(total_size)}")
 
         # Create sync task
         sync_task = asyncio.create_task(
@@ -420,7 +638,7 @@ Examples:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=0.1)
                 # User pressed Ctrl+C
-                if pbar:
+                if pbar is not None:
                     pbar.close()
                 print("\nStopping sync...")
                 await sync.cancel()
@@ -429,13 +647,6 @@ Examples:
                 pass
 
             elapsed = time.time() - sync_start
-
-            # Update tqdm with rate if available
-            if pbar and sync_stats['total_bytes'] > 0:
-                speed = sync_stats['total_bytes'] / elapsed if elapsed > 0 else 0
-                # tqdm automatically calculates rate from n/elapsed
-                pbar.n = sync_stats['total_bytes']
-                pbar.refresh()
 
             # Fallback: show progress without tqdm every 3 seconds
             if not HAS_TQDM and elapsed - last_shown > 3.0 and sync_stats['file_count'] > 0:
@@ -450,21 +661,21 @@ Examples:
             if sync_stats['file_count'] > 0 and elapsed - last_shown > 60:
                 no_progress_count += 1
                 if no_progress_count >= 2:  # 120 seconds with no progress
-                    if pbar:
+                    if pbar is not None:
                         pbar.close()
                     print(f"\nNo new files for 2 minutes, assuming transfer complete")
                     await sync.cancel()
                     break
             elif sync_stats['file_count'] == 0 and elapsed > 120:
                 # No files at all after 2 minutes - something wrong
-                if pbar:
+                if pbar is not None:
                     pbar.close()
                 print(f"\nNo files received after 2 minutes, aborting")
                 await sync.cancel()
                 break
 
         # Close progress bar
-        if pbar:
+        if pbar is not None:
             pbar.close()
 
         # Get result (handle TransferError gracefully)
