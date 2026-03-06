@@ -1146,6 +1146,15 @@ static int cmd_format(const struct at_command *cmd, char **response)
         return json_create_error("FORMAT takes no arguments", response);
     }
 
+    /* Check state machine - only allow IDLE state */
+    enum clip_state state = state_get_current();
+    if (state != CLIP_STATE_IDLE) {
+        char err_buf[64];
+        snprintf(err_buf, sizeof(err_buf), "Cannot format while busy (state=%d)", (int)state);
+        LOG_WRN("FORMAT: %s", err_buf);
+        return json_create_error(err_buf, response);
+    }
+
     /* Check if recording is active */
     if (audio_is_recording()) {
         LOG_WRN("FORMAT: recording is active");
