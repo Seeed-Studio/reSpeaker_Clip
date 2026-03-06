@@ -2,7 +2,7 @@
 """
 ReSpeaker Clip Record Tool
 
-Record and sync in real-time. Press SPACE to add bookmarks during recording.
+Record and sync in real-time. Press SPACE to pause/resume, M to add bookmarks.
 
 Usage:
     python tools/record.py [--mode MODE] [--duration SECONDS] [--output DIR]
@@ -297,6 +297,11 @@ class KeyboardListener:
                             self._loop.call_soon_threadsafe(
                                 self._key_queue.put_nowait, 'space'
                             )
+                    elif ch == b'm' or ch == b'M':
+                        if self._loop and not self._loop.is_closed():
+                            self._loop.call_soon_threadsafe(
+                                self._key_queue.put_nowait, 'mark'
+                            )
                     elif ch == b'q' or ch == b'Q':
                         if self._loop and not self._loop.is_closed():
                             self._loop.call_soon_threadsafe(
@@ -327,6 +332,11 @@ class KeyboardListener:
                     if self._loop and not self._loop.is_closed():
                         self._loop.call_soon_threadsafe(
                             self._key_queue.put_nowait, 'space'
+                        )
+                elif ch == 'm' or ch == 'M':
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(
+                            self._key_queue.put_nowait, 'mark'
                         )
                 elif ch == '\x03':  # Ctrl+C
                     if self._loop and not self._loop.is_closed():
@@ -453,12 +463,14 @@ async def record_and_sync(
 
         print(f"Starting real-time sync to: {output_path}")
         print(f"\nControls:")
-        print(f"  SPACE  - Add bookmark mark")
+        print(f"  SPACE  - Pause/Resume recording")
+        print(f"  M      - Add bookmark mark")
         print(f"  Q      - Stop recording")
         print(f"  Ctrl+C - Stop recording")
         print(f"\nRecording...\n")
 
         keyboard = await KeyboardListener().start()
+        paused = False
 
         sync_task = asyncio.create_task(
             sync.sync(
@@ -476,10 +488,28 @@ async def record_and_sync(
             try:
                 key = await keyboard.get_key(timeout=0.1)
                 if key == 'space':
+                    # Toggle pause/resume
+                    paused = not paused
+                    if paused:
+                        try:
+                            await commands.pause_recording()
+                            print(f"\n  [PAUSED]")
+                        except Exception as e:
+                            print(f"\n  [Pause failed: {e}]")
+                            paused = False
+                    else:
+                        try:
+                            await commands.resume_recording()
+                            print(f"\n  [RESUMED]")
+                        except Exception as e:
+                            print(f"\n  [Resume failed: {e}]")
+                            paused = False
+                elif key == 'mark':
+                    # Add bookmark
                     try:
                         bookmark = await commands.add_bookmark("")
                         bookmark_count += 1
-                        print(f"\n  [Mark #{bookmark_count}] at {bookmark.offset}s")
+                        print(f"\n  [Mark #{bookmark_count}]")
                     except Exception as e:
                         print(f"\n  [Mark failed: {e}]")
                 elif key == 'quit' or key == 'ctrl_c':
@@ -514,7 +544,8 @@ async def record_and_sync(
 
             try:
                 current_speed = sync_stats['total_bytes'] / (time.time() - sync_start_time) if (time.time() - sync_start_time) > 0 else 0
-                status = f"\r[Recording] {format_duration(elapsed).ljust(10)} | "
+                state_str = "[PAUSED]" if paused else "[Recording]"
+                status = f"\r{state_str} {format_duration(elapsed).ljust(10)} | "
                 status += f"Files: {sync_stats['file_count']} | "
                 status += f"Total: {format_bytes(sync_stats['total_bytes'])} | "
                 status += f"Speed: {format_speed(current_speed)} | "
@@ -717,7 +748,8 @@ Examples:
   python tools/record.py --duration 30
 
 Controls during recording:
-  SPACE  - Add bookmark mark
+  SPACE  - Pause/Resume recording
+  M      - Add bookmark mark
   Q      - Stop recording
   Ctrl+C - Stop recording
 
