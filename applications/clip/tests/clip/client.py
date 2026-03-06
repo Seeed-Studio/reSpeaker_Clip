@@ -34,6 +34,7 @@ SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 CMD_RECV_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 RESP_SEND_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 FILE_DATA_UUID = "6E400004-B5A3-F393-E0A9-E50E24DCCA9E"
+AUDIO_VIS_UUID = "6E400005-B5A3-F393-E0A9-E50E24DCCA9E"
 
 # Device discovery filter
 # Device name format: "Clip XXXX" where XXXX is last 4 hex digits of chip ID
@@ -82,6 +83,10 @@ class ClipDevice:
         self._canceled = False
         self._file_lock = threading.Lock()
 
+        # Audio visualization state
+        self._audio_vis_callback = None  # Callback for audio visualization data
+        self._audio_vis_data = bytearray()  # Buffer for audio vis data
+
     async def connect(self, timeout: float = CONNECT_TIMEOUT, sync_time: bool = True) -> None:
         """Connect to the device.
 
@@ -110,6 +115,7 @@ class ClipDevice:
             await self.client.connect()
             await self.client.start_notify(RESP_SEND_UUID, self._notification_handler)
             await self.client.start_notify(FILE_DATA_UUID, self._file_data_handler)
+            await self.client.start_notify(AUDIO_VIS_UUID, self._audio_vis_handler)
             await asyncio.sleep(0.5)
             self._connected = True
 
@@ -137,6 +143,7 @@ class ClipDevice:
         if self.client and self.client.is_connected:
             await self.client.stop_notify(RESP_SEND_UUID)
             await self.client.stop_notify(FILE_DATA_UUID)
+            await self.client.stop_notify(AUDIO_VIS_UUID)
             await self.client.disconnect()
 
         self._connected = False
@@ -438,6 +445,36 @@ class ClipDevice:
         """Handle file data during transfer."""
         with self._file_lock:
             self._current_file_data.extend(data)
+
+    def _audio_vis_handler(self, sender, data: bytearray):
+        """
+        Handle audio visualization data notifications.
+
+        Receives 13 bytes representing bar heights (0-10).
+        Calls the registered callback with the data.
+        """
+        if self._debug:
+            print(f"[Audio Vis] Received {len(data)} bytes: {data[:13]}")
+
+        if self._audio_vis_callback and self._loop:
+            # Schedule the async callback as a task in the event loop
+            try:
+                self._loop.call_soon_threadsafe(
+                    lambda: asyncio.create_task(self._audio_vis_callback(bytes(data)))
+                )
+            except Exception as e:
+                if self._debug:
+                    print(f"[Audio Vis] Callback error: {e}")
+
+    def set_audio_vis_callback(self, callback):
+        """
+        Set callback for audio visualization data.
+
+        Args:
+            callback: Async callback function that receives bytes data
+                     Signature: async def callback(data: bytes) -> None
+        """
+        self._audio_vis_callback = callback
 
     # State management methods
     def _clear_file_state(self):

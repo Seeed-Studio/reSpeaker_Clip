@@ -24,6 +24,80 @@ from clip import ClipDevice, ClipCommands, SessionSync
 from clip.utils import format_bytes, format_duration
 
 
+# ============================================================================
+# Audio Visualization Display
+# ============================================================================
+
+class AudioVisualizer:
+    """Display audio waveform visualization in terminal."""
+
+    def __init__(self):
+        self.bars = [0] * 26  # 26 energy history values (0-10)
+        self.last_display = ""
+        self.enabled = True
+
+    def update(self, data: bytes):
+        """Update energy history from BLE notification data (26 bytes: oldest to newest)."""
+        if len(data) >= 26:
+            self.bars = list(data[:26])
+            # Clamp values to 0-10 range
+            self.bars = [min(10, max(0, b)) for b in self.bars]
+
+    def render(self) -> str:
+        """Render the visualization as ASCII art (energy trend: left=oldest, right=newest)."""
+        if not self.enabled:
+            return ""
+
+        max_height = 10
+
+        # Build visualization from top to bottom
+        lines = []
+        for level in range(max_height, 0, -1):
+            line = "  "
+            for height in self.bars:
+                if height >= level:
+                    # Different characters for different heights
+                    if level >= 8:
+                        line += "█"  # Full bar at top
+                    elif level >= 5:
+                        line += "▓"  # Medium-high
+                    elif level >= 3:
+                        line += "▒"  # Medium
+                    else:
+                        line += "░"  # Low
+                else:
+                    line += " "
+                line += " "
+            lines.append(line)
+
+        # Add current energy level indicator (rightmost/newest)
+        current_energy = self.bars[-1] if self.bars else 0
+        energy_bar = "=" * current_energy + "-" * (10 - current_energy)
+        lines.append(f"  [{energy_bar}] {current_energy}/10")
+
+        return "\n".join(lines)
+
+    def display(self, force_clear: bool = False):
+        """Display the visualization (only if changed)."""
+        new_display = self.render()
+        if new_display != self.last_display or force_clear:
+            # Clear previous visualization area
+            if self.last_display:
+                line_count = self.last_display.count('\n') + 1
+                sys.stdout.write("\033[F\033[J" * line_count)  # Clear lines
+            sys.stdout.write(new_display + "\n")
+            sys.stdout.flush()
+            self.last_display = new_display
+
+    def clear(self):
+        """Clear the visualization display."""
+        if self.last_display:
+            line_count = self.last_display.count('\n') + 1
+            sys.stdout.write("\033[F\033[J" * line_count)
+            sys.stdout.flush()
+            self.last_display = ""
+
+
 def format_speed(bytes_per_sec: float) -> str:
     """Format transfer speed."""
     if bytes_per_sec < 1024:
@@ -379,6 +453,13 @@ async def record_and_sync(
     commands = ClipCommands(device)
     sync = SessionSync(device)
 
+    # Audio visualizer for waveform display
+    visualizer = AudioVisualizer()
+
+    # Audio visualization callback
+    async def audio_vis_callback(data: bytes):
+        visualizer.update(data)
+
     # Helper to get device name for directory organization
     def get_device_name():
         if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
@@ -422,6 +503,9 @@ async def record_and_sync(
 
         print("\nConnecting to device...")
         await device.connect()
+
+        # Set up audio visualization callback
+        device.set_audio_vis_callback(audio_vis_callback)
 
         if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
             device_name = device._client._ble_device.name
@@ -542,6 +626,10 @@ async def record_and_sync(
                 print(f"\nDuration ({duration}s) reached")
                 break
 
+            # Update audio visualization display
+            if not paused:
+                visualizer.display()
+
             try:
                 current_speed = sync_stats['total_bytes'] / (time.time() - sync_start_time) if (time.time() - sync_start_time) > 0 else 0
                 state_str = "[PAUSED]" if paused else "[Recording]"
@@ -556,6 +644,9 @@ async def record_and_sync(
 
         if keyboard:
             keyboard.stop()
+
+        # Clear audio visualization display
+        visualizer.clear()
 
         print(f"\n\nStopping recording...")
 
@@ -617,6 +708,21 @@ async def record_and_sync(
                     pass
 
         # Delete session from device after successful sync
+        # Note: Get audio format info BEFORE deleting
+        channels = 2 if mode in ["normal", "stereo"] else 1
+        sample_rate = 16000
+        audio_mode = mode
+        try:
+            if device.is_connected:
+                session_info = await commands.get_session_info(session_id)
+                if session_info:
+                    channels = session_info.channels
+                    sample_rate = session_info.sample_rate
+                    audio_mode = session_info.mode
+        except Exception:
+            pass  # Use defaults from mode
+
+        # Now safe to delete session
         if device.is_connected and session_id:
             try:
                 print(f"Deleting session from device: {session_id}")
@@ -643,27 +749,6 @@ async def record_and_sync(
         print("=" * 60)
         print(f"  Session: {session_id}")
         print(f"  Duration: {format_duration(duration_sec)}")
-
-        # Get audio format from device for accurate display (may fail if BLE disconnected)
-        try:
-            if device.is_connected:
-                session_info = await commands.get_session_info(session_id)
-                if session_info:
-                    channels = session_info.channels
-                    sample_rate = session_info.sample_rate
-                    audio_mode = session_info.mode
-                else:
-                    channels = 2 if mode in ["normal", "stereo"] else 1
-                    sample_rate = 16000
-                    audio_mode = mode
-            else:
-                channels = 2 if mode in ["normal", "stereo"] else 1
-                sample_rate = 16000
-                audio_mode = mode
-        except Exception:
-            channels = 2 if mode in ["normal", "stereo"] else 1
-            sample_rate = 16000
-            audio_mode = mode
 
         ch_str = "stereo" if channels == 2 else "mono"
         print(f"  Format: {audio_mode} ({ch_str}), {sample_rate//1000}kHz, Opus")

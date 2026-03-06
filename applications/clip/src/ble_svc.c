@@ -85,10 +85,15 @@ static const struct bt_uuid_128 resp_send_uuid = BT_UUID_INIT_128(
 static const struct bt_uuid_128 file_data_uuid = BT_UUID_INIT_128(
     BT_UUID_128_ENCODE(0x6E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
 
+/* Audio Visualization: 6E400005-B5A3-F393-E0A9-E50E24DCCA9E */
+static const struct bt_uuid_128 audio_vis_uuid = BT_UUID_INIT_128(
+    BT_UUID_128_ENCODE(0x6E400005, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
+
 /* Connection and notification state */
 static struct bt_conn *current_conn;
 static volatile bool resp_notify_enabled;
 static volatile bool file_data_notify_enabled;
+static volatile bool audio_vis_notify_enabled;
 static volatile bool mtu_exchanged;
 
 /* Forward declarations */
@@ -98,6 +103,7 @@ static ssize_t cmd_recv_write(struct bt_conn *conn,
                              uint16_t offset, uint8_t flags);
 static void resp_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
+static void audio_vis_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 
 /* GATT service definition */
 BT_GATT_SERVICE_DEFINE(clip_svc,
@@ -124,6 +130,14 @@ BT_GATT_SERVICE_DEFINE(clip_svc,
                            NULL, NULL, NULL),
     BT_GATT_CCC(file_data_ccc_cfg_changed,
                BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
+
+    /* Audio Visualization Characteristic (Notify) - requires encryption */
+    BT_GATT_CHARACTERISTIC(&audio_vis_uuid.uuid,
+                           BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ,
+                           NULL, NULL, NULL),
+    BT_GATT_CCC(audio_vis_ccc_cfg_changed,
+               BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
 );
 
 /* CCC callbacks */
@@ -137,6 +151,12 @@ static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t 
 {
     file_data_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
     LOG_DBG("data_notify: %d", file_data_notify_enabled);
+}
+
+static void audio_vis_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    audio_vis_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
+    LOG_INF("audio_vis_notify: %d", audio_vis_notify_enabled);
 }
 
 /* Reboot work handler */
@@ -740,6 +760,29 @@ int ble_svc_send_file_data(const uint8_t *data, uint16_t len)
     }
 
     return 0;
+}
+
+int ble_svc_send_audio_vis(const uint8_t *data, uint16_t len)
+{
+    int err;
+
+    if (!audio_vis_notify_enabled || !current_conn) {
+        return -ENOTCONN;
+    }
+
+    if (!data || len == 0) {
+        return -EINVAL;
+    }
+
+    /* Send audio visualization data (1 byte: energy level 0-10)
+     * Audio vis characteristic value is at attrs[10] */
+    err = bt_gatt_notify(current_conn, &clip_svc.attrs[10], data, len);
+
+    if (err != 0 && err != -ENOTCONN) {
+        LOG_DBG("Audio vis notify failed: %d", err);
+    }
+
+    return err;
 }
 
 int ble_svc_send_file_ready(const char *session_id, const char *filename, uint64_t size)

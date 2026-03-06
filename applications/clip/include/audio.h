@@ -182,4 +182,29 @@ int audio_resume_recording(void);
  */
 bool audio_is_paused(void);
 
+/* Audio visualization */
+#define AUDIO_ENERGY_SCALE 10  /* 0-10 range for visualization */
+#define AUDIO_ENERGY_HISTORY 13  /* Number of history points for trend display */
+
+/**
+ * @brief Get current audio energy level
+ *
+ * Returns overall audio energy level (0-10) based on RMS of the audio frame.
+ * Updated every audio frame (20ms).
+ *
+ * @return Energy level 0-10, or 0 if not recording
+ */
+int audio_get_energy_level(void);
+
+/**
+ * @brief Get audio energy history for trend display
+ *
+ * Returns array of 26 energy levels (0-10) representing recent audio history.
+ * Ordered from oldest to newest.
+ *
+ * @param history Output array of 26 uint8_t values (0-10)
+ * @return Number of valid values (1-26), or 0 if not recording
+ */
+int audio_get_energy_history(uint8_t *history);
+
 #endif /* AUDIO_H */

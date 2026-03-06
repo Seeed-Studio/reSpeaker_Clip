@@ -135,6 +135,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 
 	/* Check and create session directory */
 	snprintf(dir_path, sizeof(dir_path), "/SD:/REC/%s", session_id);
+	LOG_INF("storage_create_session: session_id='%s', dir_path='%s'", session_id, dir_path);
 	rc = fs_stat(dir_path, &entry);
 	if (rc != 0 || entry.type != FS_DIR_ENTRY_DIR) {
 		rc = fs_mkdir(dir_path);
@@ -150,6 +151,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 		char marks_path[128];
 		struct fs_file_t marks_file;
 		snprintf(marks_path, sizeof(marks_path), "%s/marks.bin", dir_path);
+		LOG_INF("Creating marks.bin: path='%s'", marks_path);
 		fs_file_t_init(&marks_file);
 		rc = fs_open(&marks_file, marks_path, FS_O_CREATE | FS_O_WRITE);
 		if (rc == 0) {
@@ -158,8 +160,9 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 			memset(&header[4], 0, 2);  /* count = 0 */
 			fs_write(&marks_file, header, 6);
 			fs_close(&marks_file);
+			LOG_INF("Created marks.bin successfully");
 		} else {
-			LOG_DBG("Could not create marks.bin: %d", rc);
+			LOG_WRN("Could not create marks.bin: %d", rc);
 		}
 	}
 
@@ -175,7 +178,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 			session_id, channels, sample_rate, mode ? mode : "normal");
 		fs_write(&file, json_buf, len);
 		fs_close(&file);
-		LOG_DBG("Created session.json for %s", session_id);
+		LOG_INF("Created session.json for %s", session_id);
 	} else {
 		LOG_WRN("Could not create session.json: %d", rc);
 	}
@@ -373,7 +376,7 @@ int storage_close_file(struct storage_file *file)
 
 	update_free_space();
 
-	LOG_DBG("File: %s %uKB", file->filename, file->bytes_written/1024);
+	LOG_INF("File: %s %uKB", file->filename, file->bytes_written/1024);
 
 	return 0;
 }
@@ -1130,7 +1133,7 @@ int storage_delete_session(const char *session_id)
 				rc = fs_unlink(filepath);
 				if (rc == 0) {
 					deleted_count++;
-					LOG_DBG("Deleted file: %s", entry.name);
+					LOG_INF("Deleted file: %s", entry.name);
 				} else {
 					LOG_WRN("Failed to delete file %s: %d", entry.name, rc);
 				}
@@ -1183,12 +1186,12 @@ void storage_set_writing_file(const char *session_id, const char *filename)
 		writing_session[sizeof(writing_session) - 1] = '\0';
 		strncpy(writing_filename, filename, sizeof(writing_filename) - 1);
 		writing_filename[sizeof(writing_filename) - 1] = '\0';
-		LOG_DBG("Writing file set: %s/%s", writing_session, writing_filename);
+		LOG_INF("Writing file set: %s/%s", writing_session, writing_filename);
 	} else {
 		/* Clear writing file info */
 		writing_session[0] = '\0';
 		writing_filename[0] = '\0';
-		LOG_DBG("Writing file cleared");
+		LOG_INF("Writing file cleared");
 	}
 }
 

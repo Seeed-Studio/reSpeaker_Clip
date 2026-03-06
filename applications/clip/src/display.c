@@ -16,6 +16,7 @@
 
 #include "icons.h"
 #include "ble_svc.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
 
@@ -197,7 +198,7 @@ static void clear_screen(uint8_t *buf)
 }
 
 /* ========================================
- * Recording Animation - Wave Implementation
+ * Recording Animation - Wave with Audio Energy
  * ======================================== */
 
 /**
@@ -263,7 +264,7 @@ static void fast_anim_init(void)
 }
 
 /**
- * @brief Step fast animation - update bar heights
+ * @brief Step fast animation - update bar heights from wave + audio energy
  */
 static void fast_anim_step(void)
 {
@@ -276,15 +277,33 @@ static void fast_anim_step(void)
 	int min_height = GET_ANIM_MIN_HEIGHT();
 	int max_height = GET_ANIM_MAX_HEIGHT();
 
-	/* Update each bar's height based on its phase */
+	/* Get audio energy level (0-10) for scaling wave amplitude */
+	int energy = audio_get_energy_level();
+	if (energy < 0) energy = 0;
+	if (energy > 10) energy = 10;
+
+	/* Scale max height based on audio energy
+	 * Energy 0 -> use min_height (quiet/small wave)
+	 * Energy 10 -> use max_height (loud/large wave) */
+	int scaled_max = min_height + ((max_height - min_height) * energy / 10);
+
+	/* Update each bar's height based on its phase and audio-scaled amplitude */
 	for (int i = 0; i < bar_count; i++) {
 		/* Calculate current phase for this bar */
 		int current_phase = (int)g_fast_anim_frame + g_fast_bars[i].phase_offset;
 
-		/* Calculate new height using wave function */
-		int new_height = fast_anim_wave(current_phase, period, min_height, max_height);
+		/* Calculate new height using wave function with audio-scaled max */
+		int new_height = fast_anim_wave(current_phase, period, min_height, scaled_max);
 
 		g_fast_bars[i].current_height = (uint8_t)new_height;
+	}
+
+	/* Debug: print frame count every 100 frames to verify animation is running */
+	static int debug_frame_count = 0;
+	if (++debug_frame_count >= 100) {
+		LOG_INF("Wave anim: frame=%u, energy=%d, scaled_max=%d",
+			(unsigned int)g_fast_anim_frame, energy, scaled_max);
+		debug_frame_count = 0;
 	}
 }
 

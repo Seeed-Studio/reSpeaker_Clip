@@ -12,6 +12,7 @@
 #include <zephyr/sys/byteorder.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <nrfx_pdm.h>
 
 #include <opus.h>
@@ -86,6 +87,13 @@ static bool recording_paused = false;
 static uint32_t pause_start_time = 0;
 static uint32_t total_paused_time = 0;
 
+/* Audio energy level (0-10) for visualization */
+static uint8_t audio_energy_level = 0;
+static uint8_t audio_energy_history[13];  /* History for trend display */
+static int audio_energy_history_index = 0;
+static bool audio_energy_history_filled = false;
+static K_MUTEX_DEFINE(audio_energy_mutex);
+
 /* Audio recording thread */
 K_THREAD_STACK_DEFINE(audio_thread_stack, CLIP_AUDIO_STACK_SIZE);
 static struct k_thread audio_thread_data;
@@ -121,6 +129,7 @@ static uint32_t recording_start_time = 0;  /* For duration calculation */
 /* Forward declarations */
 static int init_opus_encoder(void);
 static void cleanup_opus_encoder(void);
+static void calculate_energy_level(int16_t *pcm_data, int frame_size);
 #ifdef CONFIG_SPEEXDSP
 static int init_speex_preprocessor(void);
 static void cleanup_speex_preprocessor(void);
@@ -766,6 +775,9 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		stats.total_bytes += encoded_bytes;
 		recording_frame_count++;
 
+		/* Calculate energy level from PCM data */
+		calculate_energy_level(pcm_data, AUDIO_OPUS_FRAME_SIZE);
+
 		/* Check if we need to create a new file (segmentation)
 		 * Use different segment durations based on transfer state:
 		 * - When transferring: shorter segments (CLIP_AUDIO_SEGMENT_DURATION_SYNC)
@@ -1262,4 +1274,187 @@ static int audio_resume_recording_internal(void)
 	LOG_INF("Recording resumed after %u sec pause (total paused: %u sec)",
 		paused_duration, total_paused_time);
 	return 0;
+}
+
+/* ========================================
+ * Audio Visualization
+ * ======================================== */
+
+/**
+ * @brief Calculate energy level from PCM data
+ *
+ * Calculates the RMS energy of the entire audio frame and maps it to 0-10 range.
+ *
+ * @param pcm_data PCM audio data (mono or stereo interleaved)
+ * @param frame_size Number of samples in pcm_data
+ */
+static void calculate_energy_level(int16_t *pcm_data, int frame_size)
+{
+	int64_t sum_squares = 0;
+
+	/* Calculate RMS energy for the entire frame */
+	for (int i = 0; i < frame_size; i++) {
+		int16_t sample;
+
+		/* Handle stereo vs mono */
+		if (current_mode == AUDIO_MODE_STEREO) {
+			/* Average of L+R channels */
+			int16_t left = pcm_data[i * 2];
+			int16_t right = pcm_data[i * 2 + 1];
+			sample = (left + right) / 2;
+		} else {
+			/* Mono or merged - already processed */
+			sample = pcm_data[i];
+		}
+
+		sum_squares += (int64_t)sample * sample;
+	}
+
+	/* Calculate RMS */
+	int32_t rms = (int32_t)sqrt((float)sum_squares / frame_size);
+
+	/* Map RMS to 0-10 range using logarithmic scale
+	 * Adjusted for microphone noise floor (~300-400 RMS)
+	 * - rms < 256: level 0 (below noise floor)
+	 * - rms 256-511: level 1 (noise floor)
+	 * - rms 512-1023: level 2 (quiet speech)
+	 * - rms 1024-2047: level 3 (normal speech)
+	 * - rms 2048-4095: level 4 (loud speech)
+	 * - rms 4096-8191: level 5 (very loud)
+	 * - rms 8192-16383: level 6
+	 * - rms 16384-32767: level 7
+	 * - rms 32768-65535: level 8
+	 * - rms > 65535: level 9-10
+	 */
+	uint8_t new_level;
+	if (rms < 256) {
+		new_level = 0;
+	} else if (rms < 512) {
+		new_level = 1;
+	} else if (rms < 1024) {
+		new_level = 2;
+	} else if (rms < 2048) {
+		new_level = 3;
+	} else if (rms < 4096) {
+		new_level = 4;
+	} else if (rms < 8192) {
+		new_level = 5;
+	} else if (rms < 16384) {
+		new_level = 6;
+	} else if (rms < 32768) {
+		new_level = 7;
+	} else if (rms < 65536) {
+		new_level = 8;
+	} else if (rms < 131072) {
+		new_level = 9;
+	} else {
+		new_level = 10;
+	}
+
+	/* Update shared data with mutex protection */
+	k_mutex_lock(&audio_energy_mutex, K_FOREVER);
+	audio_energy_level = new_level;
+
+	/* Update energy history for trend display */
+	audio_energy_history[audio_energy_history_index] = new_level;
+	audio_energy_history_index = (audio_energy_history_index + 1) % 13;
+	if (audio_energy_history_index == 0) {
+		audio_energy_history_filled = true;
+	}
+
+	k_mutex_unlock(&audio_energy_mutex);
+
+	/* Send audio visualization data via BLE (every ~200ms)
+	 * Send 13 bytes with energy history (oldest to newest) */
+	static int64_t last_vis_send = 0;
+	int64_t now = k_uptime_get();
+	if (now - last_vis_send >= 200) {
+		uint8_t history_copy[13];
+
+		/* Copy history in order: oldest to newest */
+		k_mutex_lock(&audio_energy_mutex, K_FOREVER);
+		if (audio_energy_history_filled) {
+			/* History array has wrapped, copy from current index */
+			int idx = 0;
+			for (int i = 0; i < 13; i++) {
+				history_copy[idx++] = audio_energy_history[(audio_energy_history_index + i) % 13];
+			}
+		} else {
+			/* Not filled yet, copy from start */
+			memcpy(history_copy, audio_energy_history, audio_energy_history_index);
+			/* Fill remaining with current value */
+			for (int i = audio_energy_history_index; i < 13; i++) {
+				history_copy[i] = new_level;
+			}
+		}
+		k_mutex_unlock(&audio_energy_mutex);
+
+		ble_svc_send_audio_vis(history_copy, 13);
+		last_vis_send = now;
+	}
+}
+
+/**
+ * @brief Get current audio energy level
+ *
+ * Returns energy level (0-10) representing audio volume.
+ *
+ * @return Energy level 0-10, or 0 if not recording
+ */
+int audio_get_energy_level(void)
+{
+	int level;
+
+	/* Check if recording is active */
+	if (!recording_active) {
+		return 0;
+	}
+
+	/* Get current energy level with mutex protection */
+	k_mutex_lock(&audio_energy_mutex, K_FOREVER);
+	level = audio_energy_level;
+	k_mutex_unlock(&audio_energy_mutex);
+
+	return level;
+}
+
+/**
+ * @brief Get audio energy history for trend display
+ *
+ * Returns array of energy levels (0-10) representing recent audio history.
+ *
+ * @param history Output array of 13 uint8_t values
+ * @return Number of valid values (1-13), or 0 if not recording
+ */
+int audio_get_energy_history(uint8_t *history)
+{
+	int count;
+
+	if (!history) {
+		return 0;
+	}
+
+	/* Check if recording is active */
+	if (!recording_active) {
+		return 0;
+	}
+
+	k_mutex_lock(&audio_energy_mutex, K_FOREVER);
+
+	if (audio_energy_history_filled) {
+		/* History array has wrapped, return all 13 in order */
+		int idx = 0;
+		for (int i = 0; i < 13; i++) {
+			history[idx++] = audio_energy_history[(audio_energy_history_index + i) % 13];
+		}
+		count = 13;
+	} else {
+		/* Not filled yet, return what we have */
+		count = audio_energy_history_index;
+		memcpy(history, audio_energy_history, count);
+	}
+
+	k_mutex_unlock(&audio_energy_mutex);
+
+	return count;
 }

@@ -29,6 +29,11 @@
 #define BT_UUID_CLIP_FILE_DATA \
     BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400004, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))
 
+/* Characteristic UUID: Audio Visualization (Notify) */
+/* UUID: 6E400005-B5A3-F393-E0A9-E50E24DCCA9E */
+#define BT_UUID_CLIP_AUDIO_VIS \
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0x6E400005, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E))
+
 /**
  * @brief Initialize BLE service for AT commands
  *
@@ -116,5 +121,16 @@ struct bt_conn *ble_svc_get_connection(void);
  * @return Device name string (e.g., "Clip XXXX")
  */
 const char *ble_svc_get_device_name(void);
+
+/**
+ * @brief Send audio visualization data via BLE
+ *
+ * Sends audio energy level for real-time audio visualization.
+ *
+ * @param data Data buffer (typically 1 byte with energy level 0-10)
+ * @param len Length of data
+ * @return 0 on success, negative error code on failure
+ */
+int ble_svc_send_audio_vis(const uint8_t *data, uint16_t len);
 
 #endif /* BLE_SVC_H */
