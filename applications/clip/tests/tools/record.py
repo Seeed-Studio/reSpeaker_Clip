@@ -626,8 +626,21 @@ async def record_and_sync(
         )
 
         start_time = asyncio.get_event_loop().time()
+        recording_duration = 0.0  # Actual recording duration from device (GSTAT)
+        last_gstat_update = 0  # Track when we last updated from GSTAT
 
         while recording:
+            # Update recording duration from device (in attach mode)
+            current_time = asyncio.get_event_loop().time()
+            if attach_mode and current_time - last_gstat_update >= 1.0:
+                try:
+                    state = await commands.get_state()
+                    if state.duration is not None:
+                        recording_duration = state.duration
+                except Exception:
+                    pass  # Use last known value
+                last_gstat_update = current_time
+
             try:
                 key = await keyboard.get_key(timeout=0.1)
                 if key == 'space':
@@ -701,11 +714,13 @@ async def record_and_sync(
             try:
                 current_speed = sync_stats['total_bytes'] / (time.time() - sync_start_time) if (time.time() - sync_start_time) > 0 else 0
                 if attach_mode:
-                    # Attached mode: show monitoring status
+                    # Attached mode: show actual recording duration from device
                     state_str = "[Monitoring]"
+                    display_duration = recording_duration  # Use device recording duration
                 else:
                     state_str = "[PAUSED]" if paused else "[Recording]"
-                status = f"\r{state_str} {format_duration(elapsed).ljust(10)} | "
+                    display_duration = elapsed  # Use sync elapsed time
+                status = f"\r{state_str} {format_duration(display_duration).ljust(10)} | "
                 status += f"Files: {sync_stats['file_count']} | "
                 status += f"Total: {format_bytes(sync_stats['total_bytes'])} | "
                 status += f"Speed: {format_speed(current_speed)}"
