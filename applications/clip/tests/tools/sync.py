@@ -280,6 +280,15 @@ Examples:
             print("Sync All Sessions")
             print("=" * 60)
 
+            # First, list all sessions
+            cmds = ClipCommands(device)
+            sessions = await cmds.list_sessions()
+            print(f"\nFound {len(sessions)} session(s) on device:")
+            for s in sessions:
+                print(f"  - {s.id}: {s.files} files, {format_bytes(s.size)}")
+
+            print(f"\nStarting sync...")
+
             results = await sync.sync_all(
                 args.output / device_dir_name,
                 delete_after=not args.keep,
@@ -338,6 +347,12 @@ Examples:
         if continuous:
             print("  (Recording in progress - will sync files as they are created)")
             print("  (Press Ctrl+C to stop)")
+        else:
+            print("  (Waiting for files to transfer...)")
+        if HAS_TQDM:
+            print("  (Progress bar with transfer rate)")
+        else:
+            print("  (Install tqdm for better progress: pip install tqdm)")
         print("=" * 60)
 
         sync_start = time.time()
@@ -365,6 +380,9 @@ Examples:
                 leave=False,
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
             )
+        else:
+            # Fallback: show initial message
+            print(f"  Syncing... (waiting for first file)")
 
         # Update progress callback to use tqdm
         def update_progress(filename: str, file_count: int, total_size: int):
@@ -377,6 +395,10 @@ Examples:
                 pbar.total = total_size if total_size > 0 else 1
                 pbar.n = total_size
                 pbar.refresh()
+            else:
+                # Fallback: print progress on first file
+                if file_count == 1:
+                    print(f"  Receiving: {filename}")
 
         # Create sync task
         sync_task = asyncio.create_task(
@@ -415,8 +437,8 @@ Examples:
                 pbar.n = sync_stats['total_bytes']
                 pbar.refresh()
 
-            # Fallback: show progress without tqdm every 10 seconds
-            if not HAS_TQDM and elapsed - last_shown > 10.0 and sync_stats['file_count'] > 0:
+            # Fallback: show progress without tqdm every 3 seconds
+            if not HAS_TQDM and elapsed - last_shown > 3.0 and sync_stats['file_count'] > 0:
                 speed = sync_stats['total_bytes'] / elapsed if elapsed > 0 else 0
                 print(f"  Progress: {sync_stats['last_filename']} ({sync_stats['file_count']} files, "
                       f"{format_bytes(sync_stats['total_bytes'])}, {format_speed(speed)})")
