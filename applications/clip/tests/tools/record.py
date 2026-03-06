@@ -489,6 +489,7 @@ async def record_and_sync(
     sync_task = None
     stop_event = asyncio.Event()
     keyboard: Optional[KeyboardListener] = None
+    attach_mode = False  # Track if we attached to existing recording
 
     sync_start_time = time.time()
     sync_stats = {'file_count': 0, 'total_bytes': 0, 'last_filename': ''}
@@ -560,7 +561,6 @@ async def record_and_sync(
 
             recording = True
             attach_mode = True  # Flag: we attached to existing recording
-            can_control = False  # Cannot control (pause/resume/stop) existing recording from app
 
         else:
             # Not recording - start new recording
@@ -575,7 +575,6 @@ async def record_and_sync(
             await asyncio.sleep(0.5)
             recording = True
             attach_mode = False
-            can_control = True  # Can control recording we started
 
             channels = 2 if mode == "stereo" else 1
             sample_rate = 16000
@@ -597,20 +596,15 @@ async def record_and_sync(
 
         if attach_mode:
             print(f"Syncing to: {output_path}")
-            print(f"\nInfo:")
-            print(f"  - Attached to existing recording")
-            print(f"  - Audio visualization enabled")
-            print(f"  - Real-time sync enabled")
-            print(f"  - Press Q or Ctrl+C to stop sync and exit")
-            print(f"\nMonitoring...\n")
+            print(f"\nAttached to existing recording ({format_duration(recording_duration)} already recorded)")
         else:
             print(f"Starting real-time sync to: {output_path}")
-            print(f"\nControls:")
-            print(f"  SPACE  - Pause/Resume recording")
-            print(f"  M      - Add bookmark mark")
-            print(f"  Q      - Stop recording")
-            print(f"  Ctrl+C - Stop recording")
-            print(f"\nRecording...\n")
+        print(f"\nControls:")
+        print(f"  SPACE  - Pause/Resume recording")
+        print(f"  M      - Add bookmark mark")
+        print(f"  Q      - Stop recording")
+        print(f"  Ctrl+C - Stop recording")
+        print(f"\nRecording...\n")
 
         keyboard = await KeyboardListener().start()
         paused = False
@@ -644,10 +638,7 @@ async def record_and_sync(
             try:
                 key = await keyboard.get_key(timeout=0.1)
                 if key == 'space':
-                    # Toggle pause/resume (only if we started the recording)
-                    if not can_control:
-                        print(f"\n  [Cannot pause: attached to existing recording]")
-                        continue
+                    # Toggle pause/resume
                     paused = not paused
                     if paused:
                         try:
@@ -664,16 +655,10 @@ async def record_and_sync(
                             print(f"\n  [Resume failed: {e}]")
                             paused = False
                 elif key == 'mark':
-                    # Add bookmark (only if we started the recording)
-                    if not can_control:
-                        print(f"\n  [Cannot add bookmark: attached to existing recording]")
-                        continue
+                    # Add bookmark
                     try:
                         bookmark = await commands.add_bookmark("")
                         bookmark_count += 1
-                        print(f"\n  [Mark #{bookmark_count}]")
-                    except Exception as e:
-                        print(f"\n  [Mark failed: {e}]")
                         print(f"\n  [Mark #{bookmark_count}]")
                     except Exception as e:
                         print(f"\n  [Mark failed: {e}]")
@@ -715,7 +700,7 @@ async def record_and_sync(
                 current_speed = sync_stats['total_bytes'] / (time.time() - sync_start_time) if (time.time() - sync_start_time) > 0 else 0
                 if attach_mode:
                     # Attached mode: show actual recording duration from device
-                    state_str = "[Monitoring]"
+                    state_str = "[Monitoring]" if not paused else "[Paused]"
                     display_duration = recording_duration  # Use device recording duration
                 else:
                     state_str = "[PAUSED]" if paused else "[Recording]"
@@ -723,9 +708,8 @@ async def record_and_sync(
                 status = f"\r{state_str} {format_duration(display_duration).ljust(10)} | "
                 status += f"Files: {sync_stats['file_count']} | "
                 status += f"Total: {format_bytes(sync_stats['total_bytes'])} | "
-                status += f"Speed: {format_speed(current_speed)}"
-                if not attach_mode:
-                    status += f" | Marks: {bookmark_count}"
+                status += f"Speed: {format_speed(current_speed)} | "
+                status += f"Marks: {bookmark_count}"
                 print(status, end='', flush=True)
             except Exception:
                 pass
@@ -736,25 +720,20 @@ async def record_and_sync(
         # Clear audio visualization display
         visualizer.clear()
 
-        if attach_mode:
-            # Attached mode: don't stop recording, just disconnect sync
-            print(f"\n\nDetaching from session...")
-            print(f"  Recording continues on device")
-        else:
-            # Normal mode: stop recording
-            print(f"\n\nStopping recording...")
+        # Stop recording (same behavior for both attach and normal mode)
+        print(f"\n\nStopping recording...")
 
-            # Try to stop recording on device (may fail if BLE disconnected)
-            result = None
-            if device.is_connected:
-                try:
-                    result = await commands.stop_recording()
-                except Exception as e:
-                    print(f"  Warning: Could not stop recording on device: {e}")
-                    print(f"  (Recording will continue on device until timeout)")
-            else:
-                print(f"  Warning: BLE disconnected, could not stop recording on device")
+        # Try to stop recording on device (may fail if BLE disconnected)
+        result = None
+        if device.is_connected:
+            try:
+                result = await commands.stop_recording()
+            except Exception as e:
+                print(f"  Warning: Could not stop recording on device: {e}")
                 print(f"  (Recording will continue on device until timeout)")
+        else:
+            print(f"  Warning: BLE disconnected, could not stop recording on device")
+            print(f"  (Recording will continue on device until timeout)")
 
         # Only wait for sync if BLE is still connected
         sync_result = None
@@ -803,7 +782,6 @@ async def record_and_sync(
 
         # Delete session from device after successful sync
         # Note: Get audio format info BEFORE deleting
-        # In attach mode, don't delete session (recording still in progress)
         channels = 2 if mode in ["normal", "stereo"] else 1
         sample_rate = 16000
         audio_mode = mode
@@ -817,8 +795,8 @@ async def record_and_sync(
         except Exception:
             pass  # Use defaults from mode
 
-        # Only delete session if we started the recording (not attached mode)
-        if not attach_mode and device.is_connected and session_id:
+        # Delete session from device (same for both attach and normal mode)
+        if device.is_connected and session_id:
             try:
                 print(f"Deleting session from device: {session_id}")
                 await commands.delete_session(session_id)
@@ -826,8 +804,6 @@ async def record_and_sync(
             except Exception as e:
                 print(f"  Warning: Could not delete session: {e}")
                 print(f"  (Session will remain on device)")
-        elif attach_mode:
-            print(f"  Session kept on device (recording still in progress)")
 
         duration_sec = result.get('duration', 0) if result else 0
         sync_elapsed = time.time() - sync_start_time
@@ -842,14 +818,11 @@ async def record_and_sync(
         bookmarks = sync_result.get('bookmarks', []) if sync_result else []
 
         print("\n" + "=" * 60)
-        if attach_mode:
-            print("Sync Summary (Attached)")
-        else:
-            print("Recording Summary")
+        print("\n" + "=" * 60)
+        print("Recording Summary")
         print("=" * 60)
         print(f"  Session: {session_id}")
-        if not attach_mode:
-            print(f"  Duration: {format_duration(duration_sec)}")
+        print(f"  Duration: {format_duration(duration_sec)}")
 
         ch_str = "stereo" if channels == 2 else "mono"
         print(f"  Format: {audio_mode} ({ch_str}), {sample_rate//1000}kHz, Opus")
@@ -857,8 +830,7 @@ async def record_and_sync(
             print(f"  Merged file: {merged_path.name} ({format_bytes(total_bytes)})")
         print(f"  Total synced: {format_bytes(total_bytes)}")
         print(f"  Avg speed: {format_speed(avg_speed)}")
-        if not attach_mode:
-            print(f"  Bookmarks: {bookmark_count}")
+        print(f"  Bookmarks: {bookmark_count}")
 
         if bookmarks:
             print(f"\n  Bookmark details:")
