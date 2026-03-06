@@ -369,6 +369,18 @@ async def record_and_sync(
     commands = ClipCommands(device)
     sync = SessionSync(device)
 
+    # Helper to get device name for directory organization
+    def get_device_name():
+        if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
+            name = device._client._ble_device.name
+            if name:
+                # Sanitize device name for filesystem use
+                # Replace spaces with underscores and remove invalid chars
+                name = name.replace(' ', '_')
+                name = ''.join(c for c in name if c.isalnum() or c in '_.-')
+                return name
+        return "Unknown_Device"
+
     recording = False
     session_id = None
     sync_task = None
@@ -405,6 +417,10 @@ async def record_and_sync(
             device_name = device._client._ble_device.name
             print(f"Device: {device_name}")
 
+        # Get device name for directory organization
+        device_dir_name = get_device_name()
+        print(f"Device directory: {device_dir_name}")
+
         await commands.ensure_idle()
 
         state = await commands.get_state()
@@ -418,7 +434,8 @@ async def record_and_sync(
         await asyncio.sleep(0.5)
         recording = True
 
-        output_path = output_dir / session_id
+        # Organize recordings by device name
+        output_path = output_dir / device_dir_name / session_id
         output_path.mkdir(parents=True, exist_ok=True)
 
         # Save session.json immediately with format info

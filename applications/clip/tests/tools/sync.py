@@ -238,9 +238,14 @@ Examples:
         await device.connect()
 
         # Print device name
+        device_dir_name = "Unknown_Device"
         if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
             device_name = device._client._ble_device.name
             print(f"Device: {device_name}")
+            # Sanitize device name for filesystem use
+            device_dir_name = device_name.replace(' ', '_')
+            device_dir_name = ''.join(c for c in device_dir_name if c.isalnum() or c in '_.-')
+            print(f"Device directory: {device_dir_name}")
 
         # Create sync handler
         sync = SessionSync(device)
@@ -269,7 +274,7 @@ Examples:
             print("=" * 60)
 
             results = await sync.sync_all(
-                args.output,
+                args.output / device_dir_name,
                 delete_after=not args.keep,
             )
 
@@ -350,7 +355,7 @@ Examples:
         sync_task = asyncio.create_task(
             sync.sync(
                 session_id,
-                args.output / session_id,
+                args.output / device_dir_name / session_id,
                 delete_after=not args.keep,
                 continuous=continuous,
                 progress_callback=progress_callback,
@@ -407,7 +412,7 @@ Examples:
                 print(f"\nSync was stopped ({type(e).__name__})")
 
                 # Check what we actually got
-                output_path = args.output / session_id
+                output_path = args.output / device_dir_name / session_id
                 if output_path.exists():
                     files = list(output_path.glob("*.opus"))
                     merged_file = output_path / f"{session_id}.opus"
@@ -459,7 +464,7 @@ Examples:
             print(f"  Merged: {merged_path}")
         else:
             # Fallback: check if merged file exists locally
-            potential_merged = args.output / session_id / f"{session_id}.opus"
+            potential_merged = args.output / device_dir_name / session_id / f"{session_id}.opus"
             if potential_merged.exists():
                 merged_path = potential_merged
                 print(f"  Merged: {merged_path}")
@@ -485,7 +490,7 @@ Examples:
             ogg_path = merged_path.parent / f"{session_id}.ogg"
             convert_to_ogg_opus(merged_path, ogg_path, sample_rate=sample_rate, channels=channels)
 
-        print(f"  Location: {args.output / session_id}")
+        print(f"  Location: {args.output / device_dir_name / session_id}")
         print("=" * 60)
 
         return 0
