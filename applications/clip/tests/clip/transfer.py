@@ -541,6 +541,21 @@ class SessionSync(FileTransfer):
             timeout=86400.0 if continuous else 300.0,  # 24 hours for continuous, 5 min otherwise
         )
 
+        # Get audio format info BEFORE deleting session
+        # (so we don't query after deletion which causes errors)
+        if result.get("file_count", 0) > 0:
+            try:
+                session_info = await self.commands.get_session_info(session_id)
+                if session_info:
+                    result["channels"] = session_info.channels
+                    result["sample_rate"] = session_info.sample_rate
+                    result["audio_mode"] = session_info.mode
+            except Exception:
+                # Session might already be deleted, use defaults
+                result["channels"] = 1
+                result["sample_rate"] = 16000
+                result["audio_mode"] = "normal"
+
         # Delete from device if requested
         # Note: In continuous mode, recording is still active so we should not delete
         if delete_after and not continuous and result["file_count"] > 0:

@@ -449,18 +449,9 @@ Examples:
                     merged_path = session_dir / f"{session.id}.opus"
 
                     if merged_path.exists() and merged_path.stat().st_size > 0:
-                        # Get audio format
-                        try:
-                            session_info = await cmds.get_session_info(session.id)
-                            if session_info:
-                                channels = session_info.channels
-                                sample_rate = session_info.sample_rate
-                            else:
-                                channels = 1
-                                sample_rate = 16000
-                        except Exception:
-                            channels = 1
-                            sample_rate = 16000
+                        # Use audio format from result (fetched before session deletion)
+                        channels = result.get("channels", 1)
+                        sample_rate = result.get("sample_rate", 16000)
 
                         ch_str = "stereo" if channels == 2 else "mono"
                         ogg_path = session_dir / f"{session.id}.ogg"
@@ -747,19 +738,9 @@ Examples:
 
         # Convert to OGG Opus format
         if merged_path and merged_path.exists() and merged_path.stat().st_size > 0:
-            # Get audio format from session info
-            try:
-                cmds = ClipCommands(device)
-                session_info = await cmds.get_session_info(session_id)
-                if session_info:
-                    channels = session_info.channels
-                    sample_rate = session_info.sample_rate
-                else:
-                    channels = 1
-                    sample_rate = 16000
-            except Exception:
-                channels = 1
-                sample_rate = 16000
+            # Use audio format from result (fetched before session deletion)
+            channels = result.get("channels", 1)
+            sample_rate = result.get("sample_rate", 16000)
 
             ch_str = "stereo" if channels == 2 else "mono"
             print(f"\nConverting to OGG Opus ({ch_str}, {sample_rate//1000}kHz)...")
