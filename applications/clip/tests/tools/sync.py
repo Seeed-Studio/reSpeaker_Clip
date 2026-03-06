@@ -20,6 +20,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from clip import ClipDevice, SessionSync, ClipCommands
 from clip.utils import format_bytes, format_duration
 
+try:
+    from tqdm import tqdm
+    from tqdm.utils import _screen_shape_wrapper
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+
 
 # ============================================================================
 # OGG CRC32 Implementation (OGG-specific polynomial)
@@ -296,11 +303,6 @@ Examples:
         continuous = not args.oneshot
         sync_stats = {'file_count': 0, 'total_bytes': 0, 'last_filename': ''}
 
-        def progress_callback(filename: str, file_count: int, total_size: int):
-            sync_stats['last_filename'] = filename
-            sync_stats['file_count'] = file_count
-            sync_stats['total_bytes'] = total_size
-
         # Auto-detect session if not specified
         if not session_id:
             cmds = ClipCommands(device)
@@ -351,6 +353,31 @@ Examples:
         except ValueError:
             pass
 
+        # tqdm progress bar (if available)
+        pbar = None
+        if HAS_TQDM:
+            pbar = tqdm(
+                total=0,
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                desc=f"{session_id[:8]}",
+                leave=False,
+                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+            )
+
+        # Update progress callback to use tqdm
+        def update_progress(filename: str, file_count: int, total_size: int):
+            sync_stats['last_filename'] = filename
+            sync_stats['file_count'] = file_count
+            sync_stats['total_bytes'] = total_size
+
+            if pbar:
+                pbar.set_description(f"{filename[:15]}")
+                pbar.total = total_size if total_size > 0 else 1
+                pbar.n = total_size
+                pbar.refresh()
+
         # Create sync task
         sync_task = asyncio.create_task(
             sync.sync(
@@ -358,7 +385,7 @@ Examples:
                 args.output / device_dir_name / session_id,
                 delete_after=not args.keep,
                 continuous=continuous,
-                progress_callback=progress_callback,
+                progress_callback=update_progress,
             )
         )
 
@@ -369,8 +396,10 @@ Examples:
 
         while not sync_task.done():
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=0.5)
+                await asyncio.wait_for(stop_event.wait(), timeout=0.1)
                 # User pressed Ctrl+C
+                if pbar:
+                    pbar.close()
                 print("\nStopping sync...")
                 await sync.cancel()
                 break
@@ -379,12 +408,18 @@ Examples:
 
             elapsed = time.time() - sync_start
 
-            # Show progress every 3 seconds (only if files received)
-            if elapsed - last_shown > 3.0 and sync_stats['file_count'] > 0:
+            # Update tqdm with rate if available
+            if pbar and sync_stats['total_bytes'] > 0:
+                speed = sync_stats['total_bytes'] / elapsed if elapsed > 0 else 0
+                # tqdm automatically calculates rate from n/elapsed
+                pbar.n = sync_stats['total_bytes']
+                pbar.refresh()
+
+            # Fallback: show progress without tqdm every 10 seconds
+            if not HAS_TQDM and elapsed - last_shown > 10.0 and sync_stats['file_count'] > 0:
                 speed = sync_stats['total_bytes'] / elapsed if elapsed > 0 else 0
                 print(f"  Progress: {sync_stats['last_filename']} ({sync_stats['file_count']} files, "
-                      f"{format_bytes(sync_stats['total_bytes'])}, {format_duration(elapsed)}, "
-                      f"{format_speed(speed)})")
+                      f"{format_bytes(sync_stats['total_bytes'])}, {format_speed(speed)})")
                 last_count = sync_stats['file_count']
                 last_shown = elapsed
                 no_progress_count = 0
@@ -393,14 +428,22 @@ Examples:
             if sync_stats['file_count'] > 0 and elapsed - last_shown > 60:
                 no_progress_count += 1
                 if no_progress_count >= 2:  # 120 seconds with no progress
+                    if pbar:
+                        pbar.close()
                     print(f"\nNo new files for 2 minutes, assuming transfer complete")
                     await sync.cancel()
                     break
             elif sync_stats['file_count'] == 0 and elapsed > 120:
                 # No files at all after 2 minutes - something wrong
+                if pbar:
+                    pbar.close()
                 print(f"\nNo files received after 2 minutes, aborting")
                 await sync.cancel()
                 break
+
+        # Close progress bar
+        if pbar:
+            pbar.close()
 
         # Get result (handle TransferError gracefully)
         try:
