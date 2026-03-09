@@ -114,6 +114,12 @@ static bool speex_enabled = false;
 static struct audio_stats stats = {0};
 static int64_t encode_time_total = 0;
 
+#ifdef CONFIG_SPEEXDSP
+static int64_t dsp_time_total = 0;
+static int64_t dsp_time_min = INT64_MAX;
+static int64_t dsp_time_max = 0;
+#endif
+
 /* Storage for recording */
 static struct storage_file current_storage_file = {0};
 static bool storage_enabled = true;
@@ -477,6 +483,12 @@ static int audio_start_recording_internal(enum audio_mode mode)
 	stats.encode_time_min_ms = INT64_MAX;
 	encode_time_total = 0;
 
+#ifdef CONFIG_SPEEXDSP
+	dsp_time_total = 0;
+	dsp_time_min = INT64_MAX;
+	dsp_time_max = 0;
+#endif
+
 	/* Reset recording counters */
 	recording_frame_count = 0;
 	/* Note: current_file_index, file_start_frame_count, was_transferring, and
@@ -603,7 +615,25 @@ static int audio_stop_recording_internal(void)
 		stats.encode_time_avg_ms = encode_time_total / stats.frames_encoded;
 	}
 
+#ifdef CONFIG_SPEEXDSP
+	/* Calculate DSP timing statistics */
+	stats.dsp_enabled = speex_enabled;
+	if (speex_enabled && stats.frames_encoded > 0) {
+		stats.dsp_time_avg_ms = dsp_time_total / stats.frames_encoded;
+		stats.dsp_time_min_ms = dsp_time_min;
+		stats.dsp_time_max_ms = dsp_time_max;
+	}
+#endif
+
 	LOG_INF("Recording stopped: %u sec, %u KB", duration_sec, stats.total_bytes/1024);
+	LOG_INF("Encode time: avg=%lld ms, min=%lld ms, max=%lld ms",
+		stats.encode_time_avg_ms, stats.encode_time_min_ms, stats.encode_time_max_ms);
+#ifdef CONFIG_SPEEXDSP
+	if (stats.dsp_enabled) {
+		LOG_INF("DSP time: avg=%lld ms, min=%lld ms, max=%lld ms",
+			stats.dsp_time_avg_ms, stats.dsp_time_min_ms, stats.dsp_time_max_ms);
+	}
+#endif
 
 	/* Transition to IDLE state now that recording has actually stopped */
 	state_transition(CLIP_STATE_IDLE);
@@ -700,6 +730,9 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 #ifdef CONFIG_SPEEXDSP
 		/* Apply SpeexDSP preprocessing */
 		if (speex_enabled) {
+			/* Measure DSP processing time */
+			int64_t dsp_start = k_uptime_get();
+
 			if (current_mode == AUDIO_MODE_STEREO) {
 				/* Process stereo channels separately */
 				int16_t temp_left[AUDIO_OPUS_FRAME_SIZE];
@@ -723,6 +756,16 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 			} else {
 				/* Mono mode - process single channel */
 				speex_preprocess_run(speex_pp, pcm_data);
+			}
+
+			/* Update DSP timing statistics */
+			int64_t dsp_time = k_uptime_delta(&dsp_start);
+			dsp_time_total += dsp_time;
+			if (dsp_time < dsp_time_min) {
+				dsp_time_min = dsp_time;
+			}
+			if (dsp_time > dsp_time_max) {
+				dsp_time_max = dsp_time;
 			}
 		}
 #endif

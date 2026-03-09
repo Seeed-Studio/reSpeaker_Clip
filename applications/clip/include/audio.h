@@ -36,6 +36,12 @@ struct audio_stats {
 	int64_t encode_time_min_ms;
 	int64_t encode_time_max_ms;
 	int64_t encode_time_avg_ms;
+#ifdef CONFIG_SPEEXDSP
+	int64_t dsp_time_min_ms;
+	int64_t dsp_time_max_ms;
+	int64_t dsp_time_avg_ms;
+	bool dsp_enabled;
+#endif
 };
 
 /**
