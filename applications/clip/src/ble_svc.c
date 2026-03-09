@@ -50,6 +50,10 @@ static void generate_device_name(void)
 
 #define MTU_SIZE 247
 
+/* Zero-copy response buffer for AT command responses */
+static char response_buffer[BLE_RESPONSE_BUFFER_SIZE];
+static struct k_mutex response_buffer_mutex;
+
 /* Command queue configuration */
 #define CMD_QUEUE_SIZE 8
 #define CMD_MAX_LEN 256
@@ -607,6 +611,9 @@ int ble_svc_init(void)
     k_work_init_delayable(&reboot_work, reboot_work_handler);
     k_work_init(&transfer_cancel_work, transfer_cancel_work_handler);
 
+    /* Initialize response buffer mutex */
+    k_mutex_init(&response_buffer_mutex);
+
     /* Enable Bluetooth */
     err = bt_enable(NULL);
     if (err) {
@@ -919,4 +926,30 @@ struct bt_conn *ble_svc_get_connection(void)
 const char *ble_svc_get_device_name(void)
 {
     return device_name;
+}
+
+char *ble_svc_get_response_buffer(void)
+{
+    return response_buffer;
+}
+
+size_t ble_svc_get_response_buffer_size(void)
+{
+    return sizeof(response_buffer);
+}
+
+int ble_svc_send_response_buffer(size_t len)
+{
+    int err;
+
+    if (len == 0 || len > sizeof(response_buffer)) {
+        return -EINVAL;
+    }
+
+    /* Null-terminate for safety */
+    response_buffer[len] = '\0';
+
+    /* Send the response */
+    err = ble_svc_send_response(response_buffer);
+    return err;
 }

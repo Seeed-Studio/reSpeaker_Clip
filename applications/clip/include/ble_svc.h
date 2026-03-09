@@ -133,4 +133,35 @@ const char *ble_svc_get_device_name(void);
  */
 int ble_svc_send_audio_vis(const uint8_t *data, uint16_t len);
 
+/**
+ * @brief Zero-copy response buffer for AT commands
+ *
+ * Provides a pre-allocated buffer for building JSON responses
+ * without additional memory allocation.
+ *
+ * @return Pointer to buffer (size: BLE_RESPONSE_BUFFER_SIZE)
+ */
+char *ble_svc_get_response_buffer(void);
+
+/**
+ * @brief Get size of zero-copy response buffer
+ *
+ * @return Buffer size in bytes
+ */
+size_t ble_svc_get_response_buffer_size(void);
+
+/**
+ * @brief Send response from zero-copy buffer
+ *
+ * Sends data from the buffer returned by ble_svc_get_response_buffer().
+ * No memory allocation or copying required.
+ *
+ * @param len Length of data to send
+ * @return 0 on success, negative error code on failure
+ */
+int ble_svc_send_response_buffer(size_t len);
+
+/* Zero-copy response buffer size - 1KB sufficient for paginated responses */
+#define BLE_RESPONSE_BUFFER_SIZE 1024
+
 #endif /* BLE_SVC_H */

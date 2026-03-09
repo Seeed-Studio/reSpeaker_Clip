@@ -41,7 +41,9 @@ struct transfer_info {
 	uint64_t bytes_transferred;  /* Bytes transferred so far */
 	uint64_t total_bytes;     /* Total bytes to transfer */
 	uint8_t progress_percent; /* 0-100 */
-	char file_list[TRANSFER_MAX_FILES][32];  /* List of files in session */
+	/* File number range for sequential filename generation (saves 64KB!) */
+	uint32_t first_file_num;  /* First file number (e.g., 1 for 0001.opus) */
+	uint32_t last_file_num;   /* Last file number (e.g., 2000 for 2000.opus) */
 };
 
 /**

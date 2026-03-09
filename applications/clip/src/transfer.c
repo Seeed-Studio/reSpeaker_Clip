@@ -50,6 +50,19 @@ static int transfer_send_chunk(void);
 static void transfer_cleanup(void);
 static void send_transfer_complete_once(const char *session_id, int file_count);
 
+/**
+ * @brief Generate filename from file number
+ *
+ * Files are numbered sequentially: 0001.opus, 0002.opus, etc.
+ *
+ * @param file_num File number (1-based)
+ * @param filename Output buffer (must be at least 12 bytes)
+ */
+static void generate_filename(uint32_t file_num, char *filename)
+{
+	snprintf(filename, 12, "%04u.opus", file_num);
+}
+
 int transfer_init(void)
 {
 	memset(&current_transfer, 0, sizeof(current_transfer));
@@ -177,15 +190,18 @@ int transfer_start(const char *session_id, const char *filename)
 		LOG_INF("Transfer: %s (%u KB)", filename, (uint32_t)entry.size/1024);
 	} else {
 		/* Transfer entire session */
-		err = storage_list_session_files(session_id, current_transfer.file_list,
-		                                  TRANSFER_MAX_FILES);
+		struct storage_session_info session_info;
+		err = storage_get_session_info(session_id, &session_info);
 		if (err < 0) {
-			LOG_ERR("Failed to list files: %d", err);
+			LOG_ERR("Failed to get session info: %d", err);
 			return err;
 		}
-		current_transfer.total_files = err;
+		current_transfer.total_files = session_info.file_count;
+		current_transfer.total_bytes = session_info.total_bytes;
 		current_transfer.file_index = 0;
-		if (err == 0) {
+		current_transfer.first_file_num = 1;
+		current_transfer.last_file_num = session_info.file_count;
+		if (session_info.file_count == 0) {
 			LOG_INF("Transfer: %s (empty)", session_id);
 		} else {
 			LOG_INF("Transfer: %s (%u files)", session_id, current_transfer.total_files);
@@ -281,26 +297,24 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 	current_transfer.direction = TRANSFER_DIR_UPLOAD;
 	strncpy(current_transfer.session_id, session_id, sizeof(current_transfer.session_id) - 1);
 
-	/* List all files in session */
-	err = storage_list_session_files(session_id, current_transfer.file_list,
-	                                  TRANSFER_MAX_FILES);
+	/* Get total file count (we generate filenames dynamically) */
+	struct storage_session_info session_info;
+	err = storage_get_session_info(session_id, &session_info);
 	if (err < 0) {
-		LOG_ERR("Failed to list session files: %d", err);
+		LOG_ERR("Failed to get session info: %d", err);
 		return err;
 	}
 
-	current_transfer.total_files = err;
+	current_transfer.total_files = session_info.file_count;
+	current_transfer.total_bytes = session_info.total_bytes;
+
+	/* Set file number range (files are 1-indexed: 0001.opus, 0002.opus, etc.) */
+	current_transfer.first_file_num = 1;
+	current_transfer.last_file_num = session_info.file_count;
+
 	LOG_INF("Session has %u files to transfer", current_transfer.total_files);
 
-	/* Debug: log file list content */
-	LOG_INF("File list (first 5): %s, %s, %s, %s, %s",
-	        current_transfer.file_list[0],
-	        err > 1 ? current_transfer.file_list[1] : "",
-	        err > 2 ? current_transfer.file_list[2] : "",
-	        err > 3 ? current_transfer.file_list[3] : "",
-	        err > 4 ? current_transfer.file_list[4] : "");
-
-	/* Extract number from filename (e.g., "023.opus" -> 23)
+	/* Extract number from filename (e.g., "0023.opus" -> 23)
 	 * Files are numbered from 1, but indices are from 0
 	 */
 	int start_num = atoi(start_file);
@@ -318,8 +332,7 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 		        start_file, current_transfer.total_files);
 		/* Set last_transferred_file to the last file so we wait for new ones */
 		if (current_transfer.total_files > 0) {
-			strncpy(last_transferred_file, current_transfer.file_list[current_transfer.total_files - 1],
-			       sizeof(last_transferred_file) - 1);
+			generate_filename(current_transfer.total_files, last_transferred_file);
 		}
 	} else {
 		LOG_WRN("Invalid start file %s (num=%d), starting from beginning",
@@ -513,26 +526,38 @@ process_next_file:
 					 * STOP: only complete after all files are transferred
 					 */
 					if (is_recording && is_current_session) {
-						/* Still recording or paused, refresh file list and try again */
-						ret = storage_list_session_files(current_transfer.session_id,
-						                                 current_transfer.file_list,
-						                                 TRANSFER_MAX_FILES);
-						if (ret > 0) {
+						/* Still recording or paused, refresh file count and try again */
+						struct storage_session_info session_info;
+						ret = storage_get_session_info(current_transfer.session_id, &session_info);
+						if (ret >= 0 && session_info.file_count > 0) {
 							consecutive_empty_refreshes = 0;
 
-							current_transfer.total_files = ret;
+							uint32_t old_total = current_transfer.total_files;
+							current_transfer.total_files = session_info.file_count;
+							current_transfer.last_file_num = session_info.file_count;
+
 							LOG_INF("Waiting for new files... (have %u, sent %u)",
-							        ret, current_transfer.file_index);
+							        session_info.file_count, current_transfer.file_index);
+
+							/* Check if new files appeared */
+							if (session_info.file_count > old_total) {
+								/* New files appeared, continue from where we left off */
+								LOG_INF("New files appeared: %u -> %u", old_total, session_info.file_count);
+							}
 
 							/* Find first file that hasn't been transferred yet */
 							bool found_next = false;
-							for (int i = 0; i < ret; i++) {
-								if (current_transfer.file_list[i][0] == '\0') {
-									break;
-								}
+							uint32_t last_num = 0;
+							if (last_transferred_file[0] != '\0') {
+								last_num = atoi(last_transferred_file);
+							}
+
+							for (uint32_t i = last_num + 1; i <= session_info.file_count; i++) {
+								char test_filename[12];
+								generate_filename(i, test_filename);
 								if (last_transferred_file[0] == '\0' ||
-								    strcmp(current_transfer.file_list[i], last_transferred_file) > 0) {
-									current_transfer.file_index = i;
+								    strcmp(test_filename, last_transferred_file) > 0) {
+									current_transfer.file_index = i - 1;  /* Convert to 0-based */
 									found_next = true;
 									break;
 								}
@@ -789,18 +814,14 @@ static int transfer_next_file(void)
 		snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/%s",
 			 current_transfer.session_id, current_transfer.current_file);
 	} else {
-		/* Get next file from file list */
+		/* Generate next filename from file number */
 		if (current_transfer.file_index >= current_transfer.total_files) {
 			return -ENOENT;
 		}
 
-		if (current_transfer.file_list[current_transfer.file_index][0] == '\0') {
-			return -ENOENT;
-		}
-
-		strncpy(current_transfer.current_file,
-		        current_transfer.file_list[current_transfer.file_index],
-		        sizeof(current_transfer.current_file) - 1);
+		/* File numbers are 1-based, file_index is 0-based */
+		uint32_t file_num = current_transfer.file_index + 1;
+		generate_filename(file_num, current_transfer.current_file);
 
 		LOG_DBG("Next: %s (%u/%u)", current_transfer.current_file,
 		        current_transfer.file_index + 1, current_transfer.total_files);
