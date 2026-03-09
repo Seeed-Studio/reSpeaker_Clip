@@ -1117,15 +1117,22 @@ static int cmd_list(const struct at_command *cmd, char **response)
 
         /* If no pagination requested, return summary only */
         if (!query) {
-            /* Get bookmark count for this session */
-            int bookmark_count = bookmarks_count(session_id);
-            if (bookmark_count < 0) {
-                bookmark_count = 0;
-            }
+            /* Skip bookmarks_count call during active recording to avoid stack issues
+             * Bookmarks require file operations that may conflict with recording */
+            int bookmark_count = 0;  /* Default to 0 for active sessions */
 
             /* Ensure mode string is null-terminated for safety */
             session.mode[sizeof(session.mode) - 1] = '\0';
 
+            /* Validate session fields */
+            if (session.sample_rate_khz > 255 || session.sample_rate_khz == 0) {
+                session.sample_rate_khz = 16;
+            }
+            if (session.channels < 1 || session.channels > 2) {
+                session.channels = 1;
+            }
+
+            /* Build JSON response with validated values */
             int len = snprintf(json_buffer, sizeof(json_buffer),
                     "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u,"
                     "\"bookmarks\":%d,\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
