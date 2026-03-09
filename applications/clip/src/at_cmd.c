@@ -529,20 +529,22 @@ static int cmd_dereverb_set(const struct at_command *cmd, char **response)
             return json_create_error("Invalid enable value", response);
         }
 
-        /* Parse level */
+        /* Parse level (SpeexDSP uses 0-100 range) */
         if (level_str) {
-            level = (uint8_t)atoi(level_str);
-            if (level > 10) {
-                return json_create_error("Invalid level (0-10)", response);
+            int level_val = atoi(level_str);
+            if (level_val < 0 || level_val > 100) {
+                return json_create_error("Invalid level (0-100)", response);
             }
+            level = (uint8_t)level_val;
         }
 
-        /* Parse decay */
+        /* Parse decay (SpeexDSP uses 0-100 range) */
         if (decay_str) {
-            decay = (uint8_t)atoi(decay_str);
-            if (decay > 10) {
-                return json_create_error("Invalid decay (0-10)", response);
+            int decay_val = atoi(decay_str);
+            if (decay_val < 0 || decay_val > 100) {
+                return json_create_error("Invalid decay (0-100)", response);
             }
+            decay = (uint8_t)decay_val;
         }
     } else {
         /* Just enable/disable */
