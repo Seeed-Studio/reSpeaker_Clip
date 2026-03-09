@@ -20,7 +20,7 @@
 #include <zephyr/drivers/mfd/npm13xx.h>
 #include <zephyr/drivers/regulator.h>
 
-LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(button_handler, LOG_LEVEL_DBG);
 
 /* Button device from device tree */
 static const struct device *button_dev = DEVICE_DT_GET(DT_NODELABEL(usr_btn));
@@ -54,7 +54,7 @@ int button_handler_init(void)
 		return -ENODEV;
 	}
 
-	LOG_INF("Initializing button handler...");
+	LOG_DBG("Initializing button handler...");
 
 	/* Initialize work queue for button actions */
 	k_work_queue_start(&button_work_q, button_work_stack,
@@ -75,9 +75,7 @@ int button_handler_init(void)
 		return ret;
 	}
 
-	LOG_INF("Button handler initialized");
-	LOG_INF("Short press: Add bookmark (during recording)");
-	LOG_INF("Long press (1s): Toggle recording start/stop");
+	LOG_DBG("Button handler initialized");
 
 	return 0;
 }
@@ -106,7 +104,6 @@ static void button_start_work_handler(struct k_work *work)
 	err = audio_start_recording(mode);
 	if (err == 0) {
 		state_transition(CLIP_STATE_RECORDING);
-		LOG_INF("Button: Started recording");
 	} else if (err == -EBUSY) {
 		LOG_WRN("Button: Audio module busy (stopping previous recording), ignoring");
 	} else {
@@ -129,7 +126,7 @@ static void button_stop_work_handler(struct k_work *work)
 	/* Stop recording - state transition will be handled by audio thread */
 	err = audio_stop_recording();
 	if (err == 0) {
-		LOG_INF("Button: Stop requested, audio thread will transition to IDLE");
+		/* Stop requested - audio thread will handle transition */
 	} else if (err == -EBUSY) {
 		LOG_WRN("Button: Audio module busy (stopping previous recording)");
 	} else {
@@ -145,7 +142,6 @@ static void button_bookmark_work_handler(struct k_work *work)
 
 	err = audio_add_bookmark();
 	if (err == 0) {
-		LOG_INF("Button: Bookmark added at %u seconds", g_recording_time);
 		/* Trigger UI mark display */
 		ui_post_event(UI_EVT_MARK);
 	} else {
@@ -170,7 +166,7 @@ static void button_poweroff_show_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	LOG_INF("Button: 3s long press - showing power-off screen");
+	LOG_DBG("Button: 3s long press - showing power-off screen");
 	display_show_poweroff();
 	/* Mark that the next BUTTON_RELEASE should execute the power-off */
 	atomic_set(&poweroff_pending, 1);
@@ -180,7 +176,7 @@ static void button_poweroff_exec_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 
-	LOG_INF("Button released - entering ship mode (power off)");
+	LOG_DBG("Button released - entering ship mode (power off)");
 
 	/* Clear OLED before shutting down */
 	oled_clear();
@@ -214,32 +210,28 @@ static void button_event_callback(const struct device *dev,
 	enum clip_state current_state = state_get_current();
 
 	/* Log both state machine and actual audio state for debugging */
-	LOG_INF("Button event: %d (state_machine=%d, audio_recording=%d)",
+	LOG_DBG("Button event: %d (state=%d, recording=%d)",
 		action, current_state, audio_is_recording());
 
 	switch (action) {
 	case BUTTON_SINGLE_CLICK:
 		/* Short press: Add bookmark (only during recording) */
 		if (current_state == CLIP_STATE_RECORDING) {
-			LOG_INF("Button: Single click - submitting bookmark work");
 			k_work_submit_to_queue(&button_work_q, &button_bookmark_work);
 		} else if (current_state == CLIP_STATE_IDLE) {
 			/* Show status bar in IDLE state.
 			 * Use work queue so battery I2C read completes before UI renders. */
-			LOG_INF("Button: Single click - show status bar");
 			k_work_submit_to_queue(&button_work_q, &button_status_work);
 		} else {
-			LOG_INF("Button: Short press ignored (state=%d)", current_state);
+			LOG_DBG("Button: Short press ignored (state=%d)", current_state);
 		}
 		break;
 
 	case BUTTON_LONG_PRESS:       /* released after holding 1s–3s → toggle recording */
 		/* 1-second long press: toggle recording */
 		if (audio_is_recording()) {
-			LOG_INF("Button: 1s long press - submitting stop work");
 			k_work_submit_to_queue(&button_work_q, &button_stop_work);
 		} else {
-			LOG_INF("Button: 1s long press - submitting start work");
 			k_work_submit_to_queue(&button_work_q, &button_start_work);
 		}
 		break;
@@ -248,14 +240,12 @@ static void button_event_callback(const struct device *dev,
 	case BUTTON_LONG_PRESS_LEVEL_2:
 	case BUTTON_LONG_PRESS_LEVEL_3:
 		/* 3-second long press: show power-off prompt */
-		LOG_INF("Button: 3s long press - showing power-off screen");
 		k_work_submit_to_queue(&button_work_q, &button_poweroff_show_work);
 		break;
 
 	case BUTTON_RELEASE:
 		/* Button released after auto-triggered long press */
 		if (atomic_cas(&poweroff_pending, 1, 0)) {
-			LOG_INF("Button: released - executing power off");
 			k_work_submit_to_queue(&button_work_q, &button_poweroff_exec_work);
 		}
 		break;

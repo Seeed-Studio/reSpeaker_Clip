@@ -23,7 +23,7 @@
 #include "display.h"
 #include "display_ctrl.h"
 
-LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(ble_svc, LOG_LEVEL_DBG);
 
 /* Reboot work item - delays reboot to allow response to be sent */
 static struct k_work_delayable reboot_work;
@@ -46,7 +46,7 @@ static void generate_device_name(void)
     snprintf(device_name, sizeof(device_name), "Clip %04X", id_suffix);
     device_name_len = strlen(device_name);
 
-    LOG_INF("Device name: %s", device_name);
+    LOG_DBG("Device name: %s", device_name);
 }
 
 #define MTU_SIZE 247
@@ -161,7 +161,7 @@ static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t 
 static void audio_vis_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     audio_vis_notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("audio_vis_notify: %d", audio_vis_notify_enabled);
+    LOG_DBG("Audio vis notify: %d", audio_vis_notify_enabled);
 }
 
 /* Reboot work handler */
@@ -188,7 +188,7 @@ static void at_thread_main(void *p1, void *p2, void *p3)
             continue;
         }
 
-        LOG_INF("cmd: %s", item.data);
+        /* Command received - process it */
 
         /* Parse AT command */
         memset(&cmd, 0, sizeof(cmd));
@@ -321,7 +321,7 @@ static void adv_work_handler(struct k_work *work)
         if (err && err != -EALREADY) {
             LOG_ERR("adv_start (bonded): %d", err);
         } else {
-            LOG_INF("Advertising: bonded-only mode");
+            LOG_DBG("Advertising: bonded-only mode");
         }
     } else {
         /* Pairing mode: open advertising, show pairing guide */
@@ -332,7 +332,7 @@ static void adv_work_handler(struct k_work *work)
         if (err && err != -EALREADY) {
             LOG_ERR("adv_start (pairing): %d", err);
         } else {
-            LOG_INF("Advertising: pairing mode (no bond)");
+            LOG_DBG("Advertising: pairing mode");
         }
     }
 }
@@ -343,7 +343,7 @@ static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
 {
     if (!err) {
         mtu_exchanged = true;
-        LOG_INF("MTU: %u", bt_gatt_get_mtu(conn));
+        LOG_DBG("MTU: %u", bt_gatt_get_mtu(conn));
     } else {
         LOG_WRN("MTU fail: %d", err);
         mtu_exchanged = true;
@@ -532,7 +532,7 @@ static void pairing_confirm(struct bt_conn *conn)
     char addr[BT_ADDR_LE_STR_LEN];
 
     bt_addr_le_to_str(bt_conn_get_dst(conn), addr, sizeof(addr));
-    LOG_INF("Pairing confirm: %s", addr);
+    LOG_DBG("Pairing confirm: %s", addr);
     bt_conn_auth_pairing_confirm(conn);
 }
 
@@ -556,7 +556,7 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
         if (err) {
             LOG_WRN("settings_save after pairing failed: %d", err);
         } else {
-            LOG_INF("Bond saved to NVS");
+            LOG_DBG("Bond saved to NVS");
         }
         ui_post_event(UI_EVT_BONDED);
     }
@@ -653,7 +653,7 @@ int ble_svc_init(void)
     }
     k_thread_name_set(&at_thread_data, "at_cmd");
 
-    LOG_INF("AT command thread started");
+    LOG_DBG("AT command thread started");
 
     return 0;
 }
@@ -876,7 +876,7 @@ int ble_svc_send_transfer_complete(const char *session_id, int files_count)
     do {
         err = ble_svc_send_response(buffer);
         if (err == 0) {
-            LOG_INF("Sent transfer_complete event: session=%s, files=%d", session_id, files_count);
+            LOG_DBG("Sent transfer_complete: session=%s, files=%d", session_id, files_count);
             return 0;  /* Success */
         }
 

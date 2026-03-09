@@ -31,7 +31,7 @@
 #include "transfer.h"
 #include "state_machine.h"
 
-LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(audio, LOG_LEVEL_DBG);
 
 /* Memory slab for DMIC buffers (reduced for memory optimization)
  * 16 blocks sufficient for audio pipeline with proper queue management
@@ -216,7 +216,7 @@ int audio_init(void)
 		/* Calculate actual bitrate for logging */
 		uint32_t actual_bitrate = (current_mode == AUDIO_MODE_STEREO) ?
 			g_config.bitrate * 2 : g_config.bitrate;
-		LOG_INF("audio: %dch %ukbps", opus_channels, actual_bitrate/1000);
+		LOG_DBG("Audio config: %dch, %ukbps", opus_channels, actual_bitrate/1000);
 	}
 
 	/* Start audio recording thread */
@@ -233,7 +233,7 @@ int audio_init(void)
 		return -ENOMEM;
 	}
 	k_thread_name_set(&audio_thread_data, "audio_rec");
-	LOG_INF("Audio thread started");
+	LOG_DBG("Audio thread started");
 
 	return 0;
 }
@@ -337,7 +337,7 @@ int audio_set_bitrate(uint32_t bitrate)
 		}
 	}
 
-	LOG_INF("Bitrate set: mono=%u bps", bitrate);
+	LOG_DBG("Bitrate: %u bps", bitrate);
 	return 0;
 }
 
@@ -368,7 +368,7 @@ int audio_set_complexity(uint8_t complexity)
 
 	g_config.complexity = complexity;
 
-	LOG_INF("Complexity set to %u", complexity);
+	LOG_DBG("Complexity: %u", complexity);
 	return 0;
 }
 
@@ -382,7 +382,7 @@ int audio_set_noise_suppress(bool enable)
 #ifdef CONFIG_SPEEXDSP
 	g_config.noise_suppress = enable ? 1 : 0;
 	/* Note: speex_enabled is set based on mode during recording start */
-	LOG_INF("Noise suppression config: %s", enable ? "enabled" : "disabled");
+	LOG_DBG("Noise suppression: %s", enable ? "on" : "off");
 	return 0;
 #else
 	return -ENOTSUP;
@@ -436,7 +436,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
 {
 	int ret;
 
-	LOG_INF("Starting recording in mode %d (audio thread)", mode);
+	LOG_DBG("Starting recording in mode %d (audio thread)", mode);
 
 	/* Update mode if changed */
 	if (mode != current_mode) {
@@ -495,19 +495,21 @@ static int audio_start_recording_internal(enum audio_mode mode)
 	 * recording_start_time are already initialized in audio_start_recording() */
 
 	/* Session ID was already generated in audio_start_recording() */
-	LOG_INF("Starting recording with session: %s", current_session_id);
-	LOG_INF("Audio config: %d Hz, %d ch, frame=%u samples, %u ms, block=%u bytes",
-		AUDIO_SAMPLE_RATE, opus_channels, AUDIO_OPUS_FRAME_SIZE, AUDIO_FRAME_MS, AUDIO_BLOCK_SIZE);
+	LOG_DBG("Session: %s, %dHz, %dch, %ukbps", current_session_id,
+		AUDIO_SAMPLE_RATE, opus_channels,
+		(current_mode == AUDIO_MODE_STEREO) ? g_config.bitrate * 2 / 1000 : g_config.bitrate / 1000);
+	LOG_DBG("Audio: frame=%u samples, %u ms, block=%u bytes",
+		AUDIO_OPUS_FRAME_SIZE, AUDIO_FRAME_MS, AUDIO_BLOCK_SIZE);
 
 #ifdef CONFIG_SPEEXDSP
 	/* Log DSP configuration */
 	if (speex_enabled) {
-		LOG_INF("SpeexDSP: NS=%ddB, dereverb=%s, AGC=%s",
+		LOG_DBG("SpeexDSP: NS=%ddB, dereverb=%s, AGC=%s",
 			g_config.noise_suppress,
 			g_config.dereverb_enabled ? "on" : "off",
 			g_config.agc_enabled ? "on" : "off");
 	} else {
-		LOG_INF("SpeexDSP disabled (mode=stereo or NS=0)");
+		LOG_DBG("SpeexDSP disabled (mode=stereo or NS=0)");
 	}
 #endif
 
@@ -526,7 +528,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
 			if (ret != 0) {
 				LOG_WRN("Failed to create storage file: %d", ret);
 			} else {
-				LOG_INF("Recording to: %s", current_storage_file.filename);
+				LOG_DBG("Recording to: %s", current_storage_file.filename);
 				/* Mark this file as being written */
 				storage_set_writing_file(current_session_id,
 					current_storage_file.filename);
@@ -625,12 +627,11 @@ static int audio_stop_recording_internal(void)
 	}
 #endif
 
-	LOG_INF("Recording stopped: %u sec, %u KB", duration_sec, stats.total_bytes/1024);
-	LOG_INF("Encode time: avg=%lld ms, min=%lld ms, max=%lld ms",
+	LOG_DBG("Encode: avg=%lld ms, min=%lld ms, max=%lld ms",
 		stats.encode_time_avg_ms, stats.encode_time_min_ms, stats.encode_time_max_ms);
 #ifdef CONFIG_SPEEXDSP
 	if (stats.dsp_enabled) {
-		LOG_INF("DSP time: avg=%lld ms, min=%lld ms, max=%lld ms",
+		LOG_DBG("DSP: avg=%lld ms, min=%lld ms, max=%lld ms",
 			stats.dsp_time_avg_ms, stats.dsp_time_min_ms, stats.dsp_time_max_ms);
 	}
 #endif
@@ -650,7 +651,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 	uint8_t opus_packet[AUDIO_MAX_PACKET_SIZE];
 	enum audio_mode start_mode;
 
-	LOG_INF("Audio recording thread started");
+	LOG_DBG("Audio recording thread started");
 
 	while (true) {
 		/* Check for start/stop requests (under mutex for thread safety) */
@@ -839,7 +840,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 
 			if (current_file_frames >= sync_frames_per_file) {
 				/* File exceeds sync duration, slice immediately */
-				LOG_INF("Transfer started, slicing current file (%u frames >= %u sync frames)",
+				LOG_DBG("Transfer started, slicing current file (%u frames >= %u sync frames)",
 					current_file_frames, sync_frames_per_file);
 				goto create_new_segment;
 			}
@@ -852,8 +853,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 		if (recording_frame_count > 1 && (recording_frame_count - file_start_frame_count) >= frames_per_file) {
 create_new_segment:
 			/* Time to create a new segment file */
-			LOG_INF("Segment switch: frame %u, creating file #%u (duration: %us, transferring: %d)",
-				recording_frame_count, current_file_index + 1, segment_duration_sec, is_transferring);
+			LOG_INF("Segment: file #%u (%us)", current_file_index + 1, segment_duration_sec);
 
 			if (current_storage_file.is_open) {
 				/* Calculate segment statistics */
@@ -864,13 +864,11 @@ create_new_segment:
 				uint64_t encode_avg = stats.frames_encoded > 0 ?
 					encode_time_total / stats.frames_encoded : 0;
 
-				LOG_INF("Closing current segment: %s (%u bytes, %u frames, %u kbps, encode: avg %lld ms, max %lld ms)",
-					current_storage_file.filename,
+				LOG_DBG("Segment close: %u bytes, %u frames, %u kbps, encode avg=%lldms",
 					current_storage_file.bytes_written,
 					segment_frames,
 					bitrate_kbps,
-					encode_avg,
-					stats.encode_time_max_ms);
+					encode_avg);
 
 				/* Save filename and size before closing */
 				char completed_filename[64];
@@ -894,7 +892,7 @@ create_new_segment:
 				LOG_ERR("Failed to create segment file: %d", ret);
 				/* Continue recording without storage */
 			} else {
-				LOG_INF("Created new segment: %s", current_storage_file.filename);
+				LOG_DBG("Segment created: %s", current_storage_file.filename);
 				file_start_frame_count = recording_frame_count;
 			}
 		}
@@ -934,14 +932,14 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	LOG_INF("Opus encoder created: %d Hz, %d ch, application=VOIP",
-		AUDIO_SAMPLE_RATE, opus_channels);
-
 	/* Query and print default encoder parameters before configuration */
 	opus_int32 lookhead;
 	err = opus_encoder_ctl(opus_encoder, OPUS_GET_LOOKAHEAD(&lookhead));
 	if (err == OPUS_OK) {
-		LOG_INF("Opus lookahead: %d samples", lookhead);
+		LOG_DBG("Opus: %dHz, %dch, %ukbps, complexity=%u, lookahead=%d",
+			AUDIO_SAMPLE_RATE, opus_channels,
+			(current_mode == AUDIO_MODE_STEREO) ? g_config.bitrate * 2 / 1000 : g_config.bitrate / 1000,
+			g_config.complexity, lookhead);
 	}
 
 	/* Set bitrate (stereo = mono * 2) */
@@ -979,7 +977,7 @@ static int init_opus_encoder(void)
 		return err;
 	}
 
-	LOG_INF("Opus config: %d ch, bitrate=%u bps (requested=%u), complexity=%u",
+	LOG_DBG("Opus configured: %d ch, bitrate=%u bps (requested=%u), complexity=%u",
 		opus_channels, configured_bitrate, actual_bitrate, configured_complexity);
 
 	return 0;
@@ -1037,11 +1035,10 @@ static int init_speex_preprocessor(void)
 		speex_preprocess_ctl(speex_pp, SPEEX_PREPROCESS_SET_AGC_TARGET, &agc_level);
 	}
 
-	LOG_INF("SpeexDSP: NS=%ddB, dereverb=%s, AGC=%s (target=%d)",
+	LOG_DBG("SpeexDSP initialized: NS=%ddB, dereverb=%s, AGC=%s",
 		denoise,
 		dereverb ? "on" : "off",
-		g_config.agc_enabled ? "on" : "off",
-		g_config.agc_enabled ? (g_config.agc_target > 0 ? g_config.agc_target : 30) : 0);
+		g_config.agc_enabled ? "on" : "off");
 
 	return 0;
 }
@@ -1189,7 +1186,6 @@ int audio_pause_recording(void)
 	pause_requested = true;
 	k_mutex_unlock(&audio_state_mutex);
 
-	LOG_INF("Recording pause requested");
 	return 0;
 }
 
@@ -1212,7 +1208,6 @@ int audio_resume_recording(void)
 	resume_requested = true;
 	k_mutex_unlock(&audio_state_mutex);
 
-	LOG_INF("Recording resume requested");
 	return 0;
 }
 
@@ -1253,7 +1248,8 @@ static int audio_pause_recording_internal(void)
 	pause_start_time = (uint32_t)(k_uptime_get() / 1000);
 	recording_paused = true;
 
-	LOG_INF("Recording paused at %u sec", pause_start_time - recording_start_time - total_paused_time);
+	uint32_t paused_at = pause_start_time - recording_start_time - total_paused_time;
+	LOG_INF("Recording paused at %u sec", paused_at);
 	return 0;
 }
 
@@ -1278,7 +1274,7 @@ static int audio_resume_recording_internal(void)
 		return ret;
 	}
 
-	LOG_INF("Created new file: %s", current_storage_file.filename);
+	LOG_DBG("Created new file: %s", current_storage_file.filename);
 	storage_set_writing_file(current_session_id, current_storage_file.filename);
 
 	/* Reset frame counter for new file */
@@ -1293,8 +1289,7 @@ static int audio_resume_recording_internal(void)
 
 	recording_paused = false;
 
-	LOG_INF("Recording resumed after %u sec pause (total paused: %u sec)",
-		paused_duration, total_paused_time);
+	LOG_INF("Recording resumed after %u sec", paused_duration);
 	return 0;
 }
 

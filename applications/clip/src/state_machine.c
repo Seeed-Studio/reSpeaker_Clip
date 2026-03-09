@@ -6,7 +6,10 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/logging/log.h>
 #include "state_machine.h"
+
+LOG_MODULE_REGISTER(state_machine, LOG_LEVEL_DBG);
 
 #define MAX_CALLBACKS 4
 
@@ -81,6 +84,7 @@ int state_init(void)
 
     current_state = CLIP_STATE_UNINITIALIZED;
 
+    LOG_DBG("State machine initialized");
     return 0;
 }
 
@@ -107,11 +111,14 @@ int state_transition(enum clip_state new_state)
     if (new_state >= ARRAY_SIZE(state_transitions) ||
         old_state >= ARRAY_SIZE(state_transitions)) {
         k_mutex_unlock(&state_lock);
+        LOG_ERR("Invalid transition: state out of range");
         return -EINVAL;
     }
 
     if (!state_transitions[old_state][new_state]) {
         k_mutex_unlock(&state_lock);
+        LOG_ERR("Invalid transition: %s -> %s",
+                state_to_string(old_state), state_to_string(new_state));
         return -EINVAL;
     }
 
@@ -119,6 +126,9 @@ int state_transition(enum clip_state new_state)
     current_state = new_state;
 
     k_mutex_unlock(&state_lock);
+
+    /* Log state transition - core state change */
+    LOG_INF("State: %s -> %s", state_to_string(old_state), state_to_string(new_state));
 
     /* Notify callbacks */
     last_change.old_state = old_state;

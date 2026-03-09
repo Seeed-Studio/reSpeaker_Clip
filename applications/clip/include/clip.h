@@ -12,6 +12,21 @@
 #include <zephyr/sys/util.h>
 #include <stdint.h>
 
+/*
+ * ========================================================================
+ * Clip Application Log Level Configuration
+ * ========================================================================
+ * To change log level globally, modify the value below and recompile:
+ *
+ *   LOG_LEVEL_DBG (3) - All debug messages [DEVELOPMENT]
+ *   LOG_LEVEL_INF (2) - Info, warnings, and errors [PRODUCTION]
+ *   LOG_LEVEL_WRN (1) - Warnings and errors only
+ *   LOG_LEVEL_ERR (0) - Errors only
+ *
+ * Current: LOG_LEVEL_DBG (development mode)
+ * ========================================================================
+ */
+
 /**
  * @brief Device states
  */

@@ -13,7 +13,7 @@
 #include "bookmarks.h"
 #include "storage.h"
 
-LOG_MODULE_REGISTER(bookmarks, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(bookmarks, LOG_LEVEL_DBG);
 
 /* File format: binary
  * [Header: 4 bytes magic "BMRK"]
@@ -233,7 +233,7 @@ int bookmarks_clear(const char *session_id)
 
 	ret = fs_unlink(filepath);
 
-	LOG_INF("Cleared bookmarks for session: %s", session_id);
+	LOG_DBG("Cleared bookmarks: %s", session_id);
 
 	return ret;
 }

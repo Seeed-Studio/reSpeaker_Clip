@@ -12,7 +12,7 @@
 #include "watchdog.h"
 #include "clip.h"
 
-LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_DBG);
 
 /* Watchdog device */
 static const struct device *const wdt_dev = DEVICE_DT_GET(DT_NODELABEL(wdt0));
@@ -48,7 +48,7 @@ int watchdog_init(void)
 		return err;
 	}
 
-	LOG_INF("Watchdog started: timeout=%d ms", CLIP_WDT_TIMEOUT_MS);
+	LOG_DBG("Watchdog started: %d ms", CLIP_WDT_TIMEOUT_MS);
 	return 0;
 }
 

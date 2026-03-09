@@ -16,7 +16,7 @@
 #include "ble_svc.h"
 #include "clip.h"
 
-LOG_MODULE_REGISTER(transfer, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(transfer, LOG_LEVEL_DBG);
 
 /* Transfer state */
 static struct transfer_info current_transfer = {0};
@@ -202,7 +202,7 @@ int transfer_start(const char *session_id, const char *filename)
 		current_transfer.first_file_num = 1;
 		current_transfer.last_file_num = session_info.file_count;
 		if (session_info.file_count == 0) {
-			LOG_INF("Transfer: %s (empty)", session_id);
+			LOG_INF("Transfer: %s (empty session)", session_id);
 		} else {
 			LOG_INF("Transfer: %s (%u files)", session_id, current_transfer.total_files);
 		}
@@ -312,24 +312,23 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 	current_transfer.first_file_num = 1;
 	current_transfer.last_file_num = session_info.file_count;
 
-	LOG_INF("Session has %u files to transfer", current_transfer.total_files);
+	LOG_DBG("Resume: session has %u files", current_transfer.total_files);
 
 	/* Extract number from filename (e.g., "0023.opus" -> 23)
 	 * Files are numbered from 1, but indices are from 0
 	 */
 	int start_num = atoi(start_file);
-	LOG_INF("Start file: %s (parsed num=%d)", start_file, start_num);
 	if (start_num > 0 && start_num <= (int)current_transfer.total_files) {
 		/* Start from this file (convert to 0-based index) */
 		current_transfer.file_index = start_num - 1;
-		LOG_INF("Starting from file %s (index=%u)", start_file, current_transfer.file_index);
+		LOG_DBG("Starting from file %s (index=%u)", start_file, current_transfer.file_index);
 	} else if (start_num > (int)current_transfer.total_files) {
 		/* Requested file doesn't exist yet, start from last file
 		 * This allows transfer to wait for new files during recording
 		 */
 		current_transfer.file_index = current_transfer.total_files - 1;
-		LOG_INF("Start file %s doesn't exist yet (session has %u files), will wait for new files",
-		        start_file, current_transfer.total_files);
+		LOG_DBG("Start file %s doesn't exist yet, will wait for new files",
+		        start_file);
 		/* Set last_transferred_file to the last file so we wait for new ones */
 		if (current_transfer.total_files > 0) {
 			generate_filename(current_transfer.total_files, last_transferred_file);
@@ -343,8 +342,6 @@ int transfer_resume_from(const char *session_id, const char *start_file)
 	/* Start transfer thread */
 	transfer_thread_running = true;
 	k_sem_give(&transfer_trigger_sem);
-
-	LOG_INF("Transfer resumed from: %s", start_file);
 
 	return 0;
 }
@@ -732,7 +729,6 @@ process_next_file:
 
 			/* Check if BLE is connected before sending */
 			if (!ble_svc_is_ready()) {
-				LOG_INF("BLE disconnected, canceling transfer");
 				current_transfer.state = TRANSFER_STATE_IDLE;
 				break;  /* Let main loop handle cleanup */
 			}
@@ -741,7 +737,7 @@ process_next_file:
 			if (ret != 0) {
 				if (ret == -EOF) {
 					/* File complete */
-					LOG_INF("Sent: %s (%u KB)",
+					LOG_DBG("Sent: %s (%u KB)",
 					        current_transfer.current_file,
 					        (uint32_t)(current_transfer.bytes_transferred/1024));
 
@@ -767,7 +763,6 @@ process_next_file:
 					break;
 				} else if (ret == -ENOTCONN || ret == -EIO) {
 					/* BLE connection error, cancel transfer */
-					LOG_INF("BLE connection lost, canceling transfer (error: %d)", ret);
 					current_transfer.state = TRANSFER_STATE_IDLE;
 					break;  /* Let main loop handle cleanup */
 				} else {
@@ -785,7 +780,7 @@ process_next_file:
 		}
 	}
 
-	LOG_INF("Transfer thread exiting");
+	LOG_DBG("Transfer thread exiting");
 }
 
 static int transfer_next_file(void)
@@ -803,7 +798,6 @@ static int transfer_next_file(void)
 			current_transfer.current_file)) {
 			/* Check if BLE disconnected - abort transfer if so */
 			if (!ble_svc_is_ready()) {
-				LOG_INF("BLE disconnected while waiting for file, aborting transfer");
 				return -ENOTCONN;
 			}
 			LOG_DBG("File %s is being written, waiting...", current_transfer.current_file);
@@ -854,7 +848,7 @@ static int transfer_next_file(void)
 	struct fs_dirent entry;
 	ret = fs_stat(filepath, &entry);
 	if (ret == 0) {
-		LOG_INF("Sending: %s (%u KB)", current_transfer.current_file, (uint32_t)entry.size/1024);
+		LOG_DBG("Sending: %s (%u KB)", current_transfer.current_file, (uint32_t)entry.size/1024);
 
 		/* Check if file is empty - skip it if so */
 		if (entry.size == 0) {
@@ -871,7 +865,7 @@ static int transfer_next_file(void)
 			/* Clear current file to try next file */
 			current_transfer.current_file[0] = '\0';
 			/* Return -ENOENT to trigger file list refresh and check for more files */
-			LOG_INF("Empty file deleted, will refresh file list to check for more files");
+			LOG_DBG("Empty file deleted, will refresh file list");
 			return -ENOENT;
 		}
 
@@ -946,8 +940,6 @@ static void send_transfer_complete_once(const char *session_id, int file_count)
 		return;
 	}
 
-	LOG_INF("Sending transfer_complete event: session=%s, files=%d",
-	        session_id, file_count);
 	ble_svc_send_transfer_complete(session_id, file_count);
 	transfer_complete_sent = true;
 }

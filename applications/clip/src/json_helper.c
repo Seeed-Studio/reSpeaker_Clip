@@ -6,9 +6,12 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/logging/log.h>
 #include <string.h>
 #include <stdio.h>
 #include "json_helper.h"
+
+LOG_MODULE_REGISTER(json_helper, LOG_LEVEL_DBG);
 
 /* Simple JSON builder - minimal implementation for our needs */
 
@@ -52,10 +55,11 @@ int json_build_response(bool ok, const char *key, const char *value,
 
     *output = k_malloc(len + 1);
     if (!*output) {
+        LOG_ERR("JSON alloc failed");
         return -ENOMEM;
     }
     strcpy(*output, buffer);
-
+    LOG_DBG("JSON: %s", *output);
     return 0;
 }
 
@@ -67,6 +71,7 @@ int json_create_success(const char *data, char **output)
     /* With pagination, all data should fit in 1KB
      * If data is too large, return error instead of using separate buffer */
     if (data_len > JSON_STACK_BUFFER_SIZE - 50) {
+        LOG_WRN("JSON too large: %u bytes", data_len);
         return -ENOMEM;
     }
 

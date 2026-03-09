@@ -19,7 +19,7 @@
 #include "ble_svc.h"
 #include "transfer.h"
 
-LOG_MODULE_REGISTER(display_ctrl, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(display_ctrl, LOG_LEVEL_DBG);
 
 static bool display_ready = false;
 
@@ -90,7 +90,7 @@ static void do_show_status_bar(void)
 	static bool last_charging, last_ble, last_xfer;
 	if (batt != last_batt || charging != last_charging ||
 	    ble != last_ble || xfer != last_xfer) {
-		LOG_INF("[UI] STATUS_BAR: batt=%u%% charging=%d ble=%d xfer=%d",
+		LOG_DBG("[UI] STATUS_BAR: batt=%u%% charging=%d ble=%d xfer=%d",
 			batt, charging, ble, xfer);
 		last_batt = batt;
 		last_charging = charging;
@@ -103,7 +103,7 @@ static void do_show_status_bar(void)
 
 static void do_show_mark_animation(void)
 {
-	LOG_INF("[UI] MARK animation");
+	LOG_DBG("[UI] MARK animation");
 	for (int f = 0; f < MARK_ANIM_FRAMES; f++) {
 		display_show_mark_animation_frame(f, MARK_ANIM_USE_FAST_MODE);
 		k_sleep(K_MSEC(MARK_ANIM_FRAME_MS));
@@ -113,7 +113,7 @@ static void do_show_mark_animation(void)
 static void do_show_recording_dot(void)
 {
 	if (!dot_animation_played) {
-		LOG_INF("[UI] DOT ● animation (first time)");
+		LOG_DBG("[UI] DOT ● animation (first time)");
 		for (int f = 0; f < DOT_CIRCLE_FRAMES; f++) {
 			display_show_dot_circle_frame(f);
 			k_sleep(K_MSEC(DOT_CIRCLE_FRAME_MS));
@@ -132,7 +132,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 
-	LOG_INF("[UI] Thread started");
+	LOG_DBG("[UI] Thread started");
 
 	/* Initial state:
 	 *   bonded     -> show status bar 3s then OFF
@@ -145,11 +145,11 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 		set_state(UI_STATE_STATUS_BAR);
 		status_bar_start_ms = k_uptime_get();
 		do_show_status_bar();
-		LOG_INF("[UI] Initial state: STATUS_BAR (bonded, 3s then OFF)");
+		LOG_DBG("[UI] Initial state: STATUS_BAR (bonded)");
 	} else {
 		set_state(UI_STATE_PAIRING_GUIDE);
 		display_show_pairing_guide();
-		LOG_INF("[UI] Initial state: PAIRING_GUIDE (not bonded)");
+		LOG_DBG("[UI] Initial state: PAIRING_GUIDE");
 	}
 
 	while (1) {
@@ -176,7 +176,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 			/* ---- Event received ---- */
 			switch (evt) {
 			case UI_EVT_REC_START:
-				LOG_INF("[UI] EVT: REC_START");
+				LOG_DBG("[UI] EVT: REC_START");
 				rec_wave_start_ms = k_uptime_get();
 				dot_animation_played = false;
 				set_state(UI_STATE_REC_WAVE);
@@ -184,7 +184,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				break;
 
 			case UI_EVT_REC_STOP:
-                LOG_INF("[UI] EVT: REC_STOP");
+                LOG_DBG("[UI] EVT: REC_STOP");
                 battery_request_update();
                 set_state(UI_STATE_STATUS_BAR);
                 status_bar_start_ms = k_uptime_get();
@@ -192,7 +192,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
                 break;
 
         case UI_EVT_REC_PAUSE:
-                LOG_INF("[UI] EVT: REC_PAUSE");
+                LOG_DBG("[UI] EVT: REC_PAUSE");
                 if (ui_current_state == UI_STATE_REC_WAVE ||
                     ui_current_state == UI_STATE_REC_DOT) {
                     /* Switch to paused state */
@@ -204,7 +204,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
                 break;
 
         case UI_EVT_REC_RESUME:
-                LOG_INF("[UI] EVT: REC_RESUME");
+                LOG_DBG("[UI] EVT: REC_RESUME");
                 if (ui_current_state == UI_STATE_PAUSED) {
                     /* Clear paused flag */
                     recording_paused = false;
@@ -218,7 +218,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
                 break;
 
 			case UI_EVT_MARK:
-				LOG_INF("[UI] EVT: MARK");
+				LOG_DBG("[UI] EVT: MARK");
 				if (ui_current_state == UI_STATE_REC_WAVE ||
 				    ui_current_state == UI_STATE_REC_DOT) {
 					set_state(UI_STATE_MARKING);
@@ -230,7 +230,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				break;
 
 			case UI_EVT_STATUS_SHOW:
-				LOG_INF("[UI] EVT: STATUS_SHOW");
+				LOG_DBG("[UI] EVT: STATUS_SHOW");
 				if (ui_current_state == UI_STATE_OFF ||
 				    ui_current_state == UI_STATE_PAIRING_GUIDE) {
 					/* Battery already refreshed by button_status_work */
@@ -241,7 +241,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				break;
 
 			case UI_EVT_BONDED:
-				LOG_INF("[UI] EVT: BONDED");
+				LOG_DBG("[UI] EVT: BONDED");
 				if (ui_current_state == UI_STATE_PAIRING_GUIDE) {
 					set_state(UI_STATE_OFF);
 					oled_clear();
@@ -261,7 +261,7 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				/* After 5s, transition to DOT */
 				if (k_uptime_get() - rec_wave_start_ms >=
 				    UI_REC_WAVE_DURATION_MS) {
-					LOG_INF("[UI] REC_WAVE -> REC_DOT");
+					LOG_DBG("[UI] REC_WAVE -> REC_DOT");
 					set_state(UI_STATE_REC_DOT);
 					do_show_recording_dot();
 				}
@@ -274,11 +274,11 @@ void ui_thread_main(void *p1, void *p2, void *p3)
 				if (k_uptime_get() - status_bar_start_ms >=
 				    UI_STATUS_BAR_DURATION_MS) {
 					if (ble_svc_is_bonded()) {
-						LOG_INF("[UI] STATUS_BAR timeout -> OFF");
+						LOG_DBG("[UI] STATUS_BAR timeout -> OFF");
 						set_state(UI_STATE_OFF);
 						oled_clear();
 					} else {
-						LOG_INF("[UI] STATUS_BAR timeout -> PAIRING_GUIDE");
+						LOG_DBG("[UI] STATUS_BAR timeout -> PAIRING_GUIDE");
 						set_state(UI_STATE_PAIRING_GUIDE);
 						display_show_pairing_guide();
 					}
@@ -309,24 +309,23 @@ int display_init(void)
 {
 	int ret;
 
-	LOG_INF("Initializing display controller...");
+	LOG_DBG("Initializing display controller...");
 
 	/* Initialize OLED display hardware */
 	ret = display_init_hw();
 	if (ret) {
 		LOG_WRN("OLED display init failed: %d, using serial logging mode", ret);
 		display_ready = true;
-		LOG_INF("Display controller: Serial logging mode (no OLED device)");
+		LOG_DBG("Display controller: Serial logging mode (no OLED device)");
 	} else {
 		display_ready = true;
 		/* Apply saved contrast from NVS */
 		oled_set_contrast(g_config.oled_contrast);
-		LOG_INF("Display controller: OLED mode active (contrast=%u)", g_config.oled_contrast);
+		LOG_DBG("Display controller: OLED mode (contrast=%u)", g_config.oled_contrast);
 	}
 
 	/* Show welcome message */
-	LOG_INF("DISPLAY: reSpeaker Clip Ready");
-	LOG_INF("DISPLAY (%dx%d)", DISPLAY_WIDTH, DISPLAY_HEIGHT);
+	LOG_INF("Display ready");
 
 	/* Start UI thread */
 	ui_thread_id = k_thread_create(&ui_thread_data,
@@ -340,10 +339,10 @@ int display_init(void)
 		/* Continue anyway, UI is optional */
 	} else {
 		k_thread_name_set(&ui_thread_data, "ui_thread");
-		LOG_INF("UI thread started");
+		LOG_DBG("UI thread started");
 	}
 
-	LOG_INF("Display initialized");
+	LOG_DBG("Display initialized");
 
 	return 0;
 }
@@ -366,7 +365,7 @@ void display_update_status(void)
 void display_show_message(const char *msg)
 {
 	if (msg) {
-		LOG_INF("[UI] MSG: %s", msg);
+		LOG_DBG("[UI] MSG: %s", msg);
 	}
 }
 

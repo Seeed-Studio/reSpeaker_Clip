@@ -18,7 +18,7 @@
 #include "ble_svc.h"
 #include "audio.h"
 
-LOG_MODULE_REGISTER(display, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(display, LOG_LEVEL_DBG);
 
 /* Forward declaration */
 void display_show_pairing_guide(void);
@@ -238,9 +238,6 @@ static void fast_anim_init(void)
 		return;
 	}
 
-	LOG_INF("[DISPLAY] fast_anim_init: re-init detected, last_type=%d, current_type=%d",
-		last_anim_type, g_current_anim_type);
-
 	g_fast_anim_inited = true;
 	g_fast_anim_frame = 0;
 	last_anim_type = g_current_anim_type;
@@ -252,8 +249,8 @@ static void fast_anim_init(void)
 	int period = GET_ANIM_PERIOD();
 	int wave_peaks = GET_ANIM_WAVE_PEAKS();
 
-	LOG_INF("[DISPLAY] Anim config: bars=%d, phase_shift=%d, period=%d, wave_peaks=%d, max_height=%d, min_height=%d",
-		bar_count, phase_shift, period, wave_peaks, GET_ANIM_MAX_HEIGHT(), min_height);
+	LOG_DBG("[DISPLAY] Anim: bars=%d, phase=%d, period=%d, peaks=%d",
+		bar_count, phase_shift, period, wave_peaks);
 
 	/* Initialize bars with linear phase offsets for left-to-right wave motion */
 	for (int i = 0; i < bar_count; i++) {
@@ -301,7 +298,7 @@ static void fast_anim_step(void)
 	/* Debug: print frame count every 100 frames to verify animation is running */
 	static int debug_frame_count = 0;
 	if (++debug_frame_count >= 100) {
-		LOG_INF("Wave anim: frame=%u, energy=%d, scaled_max=%d",
+		LOG_DBG("Wave anim: frame=%u, energy=%d, scaled_max=%d",
 			(unsigned int)g_fast_anim_frame, energy, scaled_max);
 		debug_frame_count = 0;
 	}
@@ -404,7 +401,7 @@ void display_show_recording(bool enhanced_mode)
 
 	/* Log when animation type changes (only on actual change) */
 	if (old_type != new_type) {
-		LOG_INF("[DISPLAY] Animation switch: %d -> %d (mode=%s)",
+		LOG_DBG("[DISPLAY] Anim switch: %d -> %d (%s)",
 			old_type, new_type,
 			(new_type == REC_ANIM_FAST) ? "FAST" : "NORMAL");
 	}
@@ -433,7 +430,7 @@ int display_init_hw(void)
 		LOG_WRN("[DISPLAY] OLED device not ready, using log output");
 		display_dev = NULL;
 	} else {
-		LOG_INF("[DISPLAY] Initialized (OLED: %dx%d)", OLED_WIDTH, OLED_HEIGHT);
+		LOG_DBG("[DISPLAY] Initialized: %dx%d", OLED_WIDTH, OLED_HEIGHT);
 	}
 
 	return 0;

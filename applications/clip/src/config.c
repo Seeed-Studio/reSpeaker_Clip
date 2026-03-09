@@ -11,7 +11,7 @@
 #include "config.h"
 #include "clip.h"
 
-LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(config, LOG_LEVEL_DBG);
 
 /* Helper function to convert UTC date/time to Unix timestamp
  * This replaces timegm() which is not available in picolibc

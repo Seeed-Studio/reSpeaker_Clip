@@ -28,7 +28,7 @@
 #include "display_ctrl.h"
 #include "display.h"
 
-LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_DBG);
 
 /* Shared JSON response buffer to reduce stack usage
  * Size configured via CLIP_JSON_BUFFER_SIZE (default 1KB)
@@ -89,7 +89,7 @@ static int save_setting_now(const char *name, const void *value, size_t size)
     if (err != 0) {
         LOG_WRN("Failed to save %s: %d", name, err);
     } else {
-        LOG_INF("Saved %s to NVS", name);
+        LOG_DBG("Saved to NVS: %s", name);
     }
     return err;
 }
@@ -283,9 +283,7 @@ static int cmd_time(const struct at_command *cmd, char **response)
         g_synced_time.base_uptime_ms = k_uptime_get();
         g_synced_time.valid = true;
 
-        LOG_INF("Time synchronized: %04d-%02d-%02d %02d:%02d:%02d (unix: %lld, base uptime: %lld ms)",
-                g_synced_time.year, g_synced_time.month, g_synced_time.day,
-                g_synced_time.hour, g_synced_time.min, g_synced_time.sec,
+        LOG_DBG("Time synced: %lld (base uptime: %lld ms)",
                 (int64_t)unix_time, g_synced_time.base_uptime_ms);
 
         /* Save to NVS for persistence across reboots */
@@ -861,9 +859,6 @@ static int cmd_start(const struct at_command *cmd, char **response)
         return json_create_error("Cannot start recording", response);
     }
 
-    LOG_INF("Recording started in %s mode",
-           rec_mode == MODE_NORMAL ? "normal" : "enhanced");
-
     /* Get session ID from audio module (uses time-based format) */
     const char *session_id = audio_get_session_id();
     if (!session_id) {
@@ -905,9 +900,6 @@ static int cmd_stop(const struct at_command *cmd, char **response)
 
     /* Get audio statistics */
     audio_get_stats(&audio_stats);
-
-    LOG_INF("Recording stopped: %u frames, %u bytes",
-             audio_stats.frames_encoded, audio_stats.total_bytes);
 
     char data[256];
     snprintf(data, sizeof(data),
@@ -1319,7 +1311,7 @@ static int cmd_format(const struct at_command *cmd, char **response)
 {
     int err;
 
-    LOG_INF("FORMAT command received");
+    LOG_DBG("FORMAT command");
 
     /* Only allow EXEC type (no arguments) */
     if (cmd->value) {
@@ -1348,8 +1340,6 @@ static int cmd_format(const struct at_command *cmd, char **response)
         return json_create_error("Cannot format while transferring", response);
     }
 
-    LOG_INF("FORMAT: calling storage_format_card");
-
     /* Format SD card */
     err = storage_format_card();
     if (err != 0) {
@@ -1357,7 +1347,7 @@ static int cmd_format(const struct at_command *cmd, char **response)
         return json_create_error("Failed to format SD card", response);
     }
 
-    LOG_INF("FORMAT: successful");
+    LOG_INF("SD card formatted");
     return json_create_success("{\"formatted\":true}", response);
 }
 

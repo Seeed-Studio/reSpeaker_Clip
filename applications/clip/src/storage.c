@@ -17,7 +17,7 @@
 #include "storage.h"
 #include "json_helper.h"
 
-LOG_MODULE_REGISTER(storage, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(storage, LOG_LEVEL_DBG);
 
 /* SD Card and File System */
 static FATFS fat_fs;
@@ -135,7 +135,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 
 	/* Check and create session directory */
 	snprintf(dir_path, sizeof(dir_path), "/SD:/REC/%s", session_id);
-	LOG_INF("storage_create_session: session_id='%s', dir_path='%s'", session_id, dir_path);
+	LOG_DBG("Creating session: %s", session_id);
 	rc = fs_stat(dir_path, &entry);
 	if (rc != 0 || entry.type != FS_DIR_ENTRY_DIR) {
 		rc = fs_mkdir(dir_path);
@@ -151,7 +151,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 		char marks_path[128];
 		struct fs_file_t marks_file;
 		snprintf(marks_path, sizeof(marks_path), "%s/marks.bin", dir_path);
-		LOG_INF("Creating marks.bin: path='%s'", marks_path);
+		LOG_DBG("Creating marks.bin");
 		fs_file_t_init(&marks_file);
 		rc = fs_open(&marks_file, marks_path, FS_O_CREATE | FS_O_WRITE);
 		if (rc == 0) {
@@ -160,7 +160,6 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 			memset(&header[4], 0, 2);  /* count = 0 */
 			fs_write(&marks_file, header, 6);
 			fs_close(&marks_file);
-			LOG_INF("Created marks.bin successfully");
 		} else {
 			LOG_WRN("Could not create marks.bin: %d", rc);
 		}
@@ -178,7 +177,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 			session_id, channels, sample_rate, mode ? mode : "normal");
 		fs_write(&file, json_buf, len);
 		fs_close(&file);
-		LOG_INF("Created session.json for %s", session_id);
+		LOG_DBG("Created session.json");
 	} else {
 		LOG_WRN("Could not create session.json: %d", rc);
 	}
@@ -187,7 +186,7 @@ int storage_create_session(const char *session_id, uint8_t channels, uint32_t sa
 	strncpy(current_session_dir, dir_path, sizeof(current_session_dir) - 1);
 	current_session_dir[sizeof(current_session_dir) - 1] = '\0';
 
-	LOG_INF("Created session directory: %s", dir_path);
+	LOG_INF("Session ready: %s", session_id);
 	return 0;
 }
 
@@ -260,7 +259,7 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint1
 	/* Mark this file as being written */
 	storage_set_writing_file(session_id, file->filename);
 
-	LOG_INF("Recording file created: %s", file->filename);
+	LOG_DBG("File created: %s", file->filename);
 	return 0;
 }
 
@@ -360,7 +359,7 @@ int storage_close_file(struct storage_file *file)
 
 		rc = fs_unlink(filepath);
 		if (rc == 0) {
-			LOG_INF("Deleted empty file: %s", filepath);
+			LOG_DBG("Deleted empty file: %s", filepath);
 		} else {
 			LOG_WRN("Failed to delete empty file %s: %d", filepath, rc);
 		}
@@ -376,7 +375,7 @@ int storage_close_file(struct storage_file *file)
 
 	update_free_space();
 
-	LOG_INF("File: %s %uKB", file->filename, file->bytes_written/1024);
+	LOG_DBG("File closed: %s (%u KB)", file->filename, file->bytes_written/1024);
 
 	return 0;
 }
@@ -418,7 +417,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 
 	/* If no valid opus files, delete the entire session directory */
 	if (actual_opus_count == 0) {
-		LOG_INF("Session %s has no valid opus files, deleting", session_id);
+		LOG_DBG("Session has no valid opus files, deleting: %s", session_id);
 		storage_delete_session(session_id);
 		memset(current_session_dir, 0, sizeof(current_session_dir));
 		return 0;
@@ -445,7 +444,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 
 	memset(current_session_dir, 0, sizeof(current_session_dir));
 
-	LOG_INF("Session: %s %u files", session_id, actual_opus_count);
+	LOG_DBG("Session closed: %s, %u files", session_id, actual_opus_count);
 	return 0;
 }
 
@@ -537,7 +536,7 @@ int storage_delete_file(const char *filename)
 		return rc;
 	}
 
-	LOG_INF("Deleted file: %s", filename);
+	LOG_DBG("Deleted: %s", filename);
 
 	return 0;
 }
@@ -552,7 +551,7 @@ int storage_format_card(void)
 		return -ENODEV;
 	}
 
-	LOG_INF("Formatting SD card...");
+	LOG_DBG("Formatting SD card...");
 
 	/* Check if any file is open */
 	if (current_file_ptr != NULL) {
@@ -566,7 +565,6 @@ int storage_format_card(void)
 		flush_write_buffer();
 	}
 
-	LOG_INF("Unmounting...");
 	rc = fs_unmount(&mp);
 	if (rc != 0) {
 		LOG_WRN("Unmount failed: %d", rc);
@@ -579,7 +577,6 @@ int storage_format_card(void)
 
 	k_sleep(K_MSEC(200));
 
-	LOG_INF("Re-initializing disk...");
 	rc = disk_access_init("SD");
 	if (rc != 0) {
 		LOG_ERR("Disk re-init failed: %d", rc);
@@ -589,7 +586,6 @@ int storage_format_card(void)
 	k_sleep(K_MSEC(100));
 
 	/* Prepare mkfs options */
-	LOG_INF("Calling f_mkfs with work area...");
 	memset(&opt, 0, sizeof(opt));
 	opt.fmt = FM_ANY | FM_SFD;  /* Auto-detect, default to FAT16 */
 	opt.align = 0;               /* Get sector size via diskio query */
@@ -598,18 +594,16 @@ int storage_format_card(void)
 
 	/* Use work area for formatting */
 	int mkfs_rc = f_mkfs("0:", &opt, work, sizeof(work));
-	LOG_INF("f_mkfs returned: %d", mkfs_rc);
 
 	if (mkfs_rc != 0) {
 		/* Try with FAT32 explicitly */
 		LOG_WRN("f_mkfs failed: %d, trying with FAT32...", mkfs_rc);
 		opt.fmt = FM_FAT32;
 		mkfs_rc = f_mkfs("0:", &opt, work, sizeof(work));
-		LOG_INF("f_mkfs (FAT32) returned: %d", mkfs_rc);
 	}
 
 	if (mkfs_rc == 0) {
-		LOG_INF("Format successful!");
+		LOG_INF("SD card format OK");
 	} else {
 		LOG_ERR("f_mkfs failed after all attempts: %d", mkfs_rc);
 	}
@@ -627,7 +621,6 @@ int storage_format_card(void)
 	total_bytes = 0;
 
 	if (mkfs_rc == 0) {
-		LOG_INF("SD card formatted successfully");
 		return 0;
 	} else {
 		LOG_ERR("SD card format failed (code %d), but card is usable", mkfs_rc);
@@ -772,7 +765,7 @@ static int storage_delete_empty_session(const char *session_id)
 	/* Delete the directory itself */
 	rc = fs_unlink(session_path);
 	if (rc == 0) {
-		LOG_INF("Deleted empty session: %s", session_id);
+		LOG_DBG("Deleted empty session: %s", session_id);
 	}
 
 	return rc;
@@ -1251,7 +1244,7 @@ int storage_delete_session(const char *session_id)
 	}
 
 	snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", session_id);
-	LOG_INF("Deleting session: %s (path: %s)", session_id, session_path);
+	LOG_DBG("Deleting session: %s", session_id);
 
 	/* First, delete all files in the session directory */
 	fs_dir_t_init(&dirp);
@@ -1275,7 +1268,7 @@ int storage_delete_session(const char *session_id)
 			}
 		}
 		fs_closedir(&dirp);
-		LOG_INF("Deleted %d file(s) from session %s", deleted_count, session_id);
+		LOG_DBG("Deleted %d files", deleted_count);
 	} else {
 		LOG_ERR("Failed to open session directory: %d", rc);
 		return rc;
@@ -1288,7 +1281,7 @@ int storage_delete_session(const char *session_id)
 		return rc;
 	}
 
-	LOG_INF("Deleted session: %s", session_id);
+	LOG_DBG("Deleted session: %s", session_id);
 
 	return 0;
 }
@@ -1321,12 +1314,12 @@ void storage_set_writing_file(const char *session_id, const char *filename)
 		writing_session[sizeof(writing_session) - 1] = '\0';
 		strncpy(writing_filename, filename, sizeof(writing_filename) - 1);
 		writing_filename[sizeof(writing_filename) - 1] = '\0';
-		LOG_INF("Writing file set: %s/%s", writing_session, writing_filename);
+		LOG_DBG("Writing: %s/%s", writing_session, writing_filename);
 	} else {
 		/* Clear writing file info */
 		writing_session[0] = '\0';
 		writing_filename[0] = '\0';
-		LOG_INF("Writing file cleared");
+		LOG_DBG("Writing cleared");
 	}
 }
 
@@ -1453,7 +1446,7 @@ int storage_set_synced_files(const char *session_id, uint32_t count)
 						if (rc == 0) {
 							fs_write(&file, new_json, json_len);
 							fs_close(&file);
-							LOG_INF("Updated synced files: %s -> %u", session_id, count);
+							LOG_DBG("Synced: %s -> %u", session_id, count);
 							return 0;
 						}
 					} else if (end) {
@@ -1473,7 +1466,7 @@ int storage_set_synced_files(const char *session_id, uint32_t count)
 						if (rc == 0) {
 							fs_write(&file, new_json, json_len);
 							fs_close(&file);
-							LOG_INF("Updated synced files: %s -> %u", session_id, count);
+							LOG_DBG("Synced: %s -> %u", session_id, count);
 							return 0;
 						}
 					}
@@ -1627,7 +1620,7 @@ static int cleanup_invalid_sessions(void)
 		}
 
 		if (!is_current_session && (file_count == 0 || !has_opus)) {
-			LOG_INF("Cleaning up invalid session: %s (files=%d, has_opus=%d)",
+			LOG_DBG("Cleanup: %s (files=%d, has_opus=%d)",
 				entry.name, file_count, has_opus);
 
 			/* Delete the session directory */
@@ -1639,7 +1632,7 @@ static int cleanup_invalid_sessions(void)
 	fs_closedir(&dirp);
 
 	if (cleaned_count > 0) {
-		LOG_INF("Cleaned up %d invalid session(s)", cleaned_count);
+		LOG_DBG("Cleaned %d invalid sessions", cleaned_count);
 	}
 
 	return 0;

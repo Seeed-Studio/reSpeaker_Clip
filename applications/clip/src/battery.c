@@ -18,7 +18,7 @@
 #include "battery.h"
 #include "clip.h"
 
-LOG_MODULE_REGISTER(battery, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(battery, LOG_LEVEL_DBG);
 
 /* npm1300 charger sensor device */
 static const struct device *charger_dev = DEVICE_DT_GET(DT_NODELABEL(npm1300_charger));
