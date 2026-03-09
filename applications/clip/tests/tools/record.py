@@ -474,14 +474,13 @@ async def record_and_sync(
 
     # Helper to get device name for directory organization
     def get_device_name():
-        if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
-            name = device._client._ble_device.name
-            if name:
-                # Sanitize device name for filesystem use
-                # Replace spaces with underscores and remove invalid chars
-                name = name.replace(' ', '_')
-                name = ''.join(c for c in name if c.isalnum() or c in '_.-')
-                return name
+        name = device.device_name
+        if name:
+            # Sanitize device name for filesystem use
+            # Replace spaces with underscores and remove invalid chars
+            name = name.replace(' ', '_')
+            name = ''.join(c for c in name if c.isalnum() or c in '_.-')
+            return name
         return "Unknown_Device"
 
     recording = False
@@ -520,8 +519,8 @@ async def record_and_sync(
         # Set up audio visualization callback
         device.set_audio_vis_callback(audio_vis_callback)
 
-        if hasattr(device, '_client') and hasattr(device._client, '_ble_device'):
-            device_name = device._client._ble_device.name
+        device_name = device.device_name
+        if device_name:
             print(f"Device: {device_name}")
 
         # Get device name for directory organization

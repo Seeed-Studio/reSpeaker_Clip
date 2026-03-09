@@ -59,6 +59,7 @@ class ClipDevice:
         self.client: Optional[BleakClient] = None
         self._connected = False
         self._debug = debug  # Enable/disable debug logging
+        self._device_name = None  # Store device name when discovered
 
         # Message queue for receiving notifications
         self._response_queue: Optional[asyncio.Queue] = None
@@ -109,6 +110,7 @@ class ClipDevice:
             if device is None:
                 raise ConnectionError(f"Device '{self.name_filter}' not found")
             self.address = device.address
+            self._device_name = device.name
 
         self.client = BleakClient(self.address, timeout=timeout)
 
@@ -161,6 +163,11 @@ class ClipDevice:
     @property
     def is_connected(self) -> bool:
         return self._connected and self.client is not None and self.client.is_connected
+
+    @property
+    def device_name(self) -> Optional[str]:
+        """Get the device name (if discovered)."""
+        return self._device_name
 
     async def send_command(self, command: str, timeout: float = COMMAND_TIMEOUT) -> dict:
         """
