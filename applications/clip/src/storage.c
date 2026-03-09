@@ -443,29 +443,6 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 		fs_close(&file);
 	}
 
-	/* Create files.lst */
-	snprintf(filepath, sizeof(filepath), "/SD:/REC/%s/files.lst", session_id);
-	fs_file_t_init(&file);
-	rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
-	if (rc == 0) {
-		fs_dir_t_init(&dirp);
-
-		if (fs_opendir(&dirp, session_path) == 0) {
-			while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != 0) {
-				if (entry.type == FS_DIR_ENTRY_FILE &&
-				    strstr(entry.name, ".opus") != NULL) {
-					char line[64];
-					int len = snprintf(line, sizeof(line), "%s %u\n",
-						entry.name, (uint32_t)entry.size);
-					fs_write(&file, line, len);
-				}
-			}
-			fs_closedir(&dirp);
-		}
-		fs_sync(&file);  /* Ensure file list is flushed to SD card */
-		fs_close(&file);
-	}
-
 	/* Sync the entire filesystem to ensure all metadata is flushed */
 	rc = fs_sync(&mp);
 	if (rc != 0 && rc != -134) {
@@ -1136,14 +1113,13 @@ int storage_delete_session(const char *session_id)
 				rc = fs_unlink(filepath);
 				if (rc == 0) {
 					deleted_count++;
-					LOG_INF("Deleted file: %s", entry.name);
 				} else {
-					LOG_WRN("Failed to delete file %s: %d", entry.name, rc);
+					LOG_WRN("Failed to delete %s: %d", entry.name, rc);
 				}
 			}
 		}
 		fs_closedir(&dirp);
-		LOG_INF("Deleted %d files from session %s", deleted_count, session_id);
+		LOG_INF("Deleted %d file(s) from session %s", deleted_count, session_id);
 	} else {
 		LOG_ERR("Failed to open session directory: %d", rc);
 		return rc;
