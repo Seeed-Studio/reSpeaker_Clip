@@ -18,6 +18,7 @@ target_sources(app PRIVATE
 	src/mic.c
 	src/oled.c
 	src/pmic.c
+	src/motor.c
 )
 
 

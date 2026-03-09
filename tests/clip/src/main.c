@@ -16,6 +16,7 @@
 #include "mic.h"
 #include "oled.h"
 #include "pmic.h"
+#include "motor.h"
 
 LOG_MODULE_REGISTER(Lesson3_Exercise2, LOG_LEVEL_INF);
 
@@ -64,6 +65,13 @@ int main(void)
 		/* Continue anyway, PMIC is optional for testing */
 	}
 
+	/* Initialize Motor */
+	ret = motor_init();
+	if (ret != 0) {
+		LOG_ERR("Motor initialization failed: %d", ret);
+		/* Continue anyway, Motor is optional for testing */
+	}
+
 	/* Initialize BLE - starts advertising automatically */
 	ret = ble_init();
 	if (ret != 0) {
@@ -86,6 +94,7 @@ int main(void)
 	printk("MIC: Use 'mic capture [time_sec]' to capture audio\n");
 	printk("OLED: Use 'oled test' to run display tests, 'oled help' for more\n");
 	printk("PMIC: Use 'pmic status' to check battery, 'pmic ship' to power off\n");
+	printk("Motor: Use 'motor pulse' or 'motor pattern' to test vibration\n");
 
 	return 0;
 }
