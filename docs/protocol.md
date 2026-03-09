@@ -448,7 +448,7 @@ AT+MARK
 
 ##### AT+LIST - List Sessions/Files
 
-List all sessions or get session details including audio format.
+List all sessions, get session details, or list files with pagination.
 
 **Request (All Sessions):**
 ```
@@ -458,6 +458,11 @@ AT+LIST
 **Request (Session Details):**
 ```
 AT+LIST=20240203100000
+```
+
+**Request (Paginated File List):**
+```
+AT+LIST=20240203100000?1&20
 ```
 
 **Response (All Sessions):**
@@ -486,6 +491,23 @@ AT+LIST=20240203100000
 }
 ```
 
+**Response (Paginated File List):**
+```json
+{
+  "ok": true,
+  "data": {
+    "total": 200,
+    "page": 1,
+    "per_page": 10,
+    "files": [
+      "0001.opus",
+      "0002.opus",
+      "0003.opus"
+    ]
+  }
+}
+```
+
 **Fields:**
 - `id`: Session ID
 - `files`: Total number of audio files in session
@@ -494,6 +516,9 @@ AT+LIST=20240203100000
 - `channels`: Audio channels - 1=mono, 2=stereo (only in session details)
 - `sample_rate`: Sample rate in Hz, e.g., 16000 (only in session details)
 - `mode`: Recording mode - "normal" (stereo) or "enhanced" (mono with DSP) (only in session details)
+- `total`: Total number of files (paginated response)
+- `page`: Current page number (paginated response)
+- `per_page`: Items per page (paginated response, default 10, max 50)
 
 **Usage Examples:**
 ```
@@ -504,6 +529,10 @@ AT+LIST
 # Get session details (including synced count and audio format)
 AT+LIST=20240203100000
 # → Returns files, size, synced, channels, sample_rate for specific session
+
+# List files with pagination (page 1, 10 items per page)
+AT+LIST=20240203100000?1&10
+# → Returns first 10 files
 
 # Resume transfer from next file after synced count
 # If synced=15, resume from file 0016.opus
@@ -528,7 +557,7 @@ AT+DELETE=20240203100000
 ```json
 {
   "ok": true,
-  "deleted": ["001.opus", "002.opus", "003.opus"],
+  "deleted": ["0001.opus", "0002.opus", "0003.opus"],
   "freed": 2160000
 }
 ```
@@ -556,35 +585,20 @@ Retrieve bookmarks for a session. Supports summary and paginated formats.
 AT+MARKS=20240203100000
 ```
 
-**Response (Summary, >20 bookmarks):**
+**Response (Summary):**
 ```json
 {
   "ok": true,
   "data": {
-    "count": 50,
+    "total": 50,
     "marks_file": "marks.bin"
   }
 }
 ```
 
-**Response (Summary, ≤20 bookmarks):**
-```json
-{
-  "ok": true,
-  "data": {
-    "total": 5,
-    "bookmarks": [
-      {"offset": 30, "note": "Important point"},
-      {"offset": 60, "note": ""},
-      {"offset": 90, "note": "End"}
-    ]
-  }
-}
+**Request (Paginated, page 1):**
 ```
-
-**Request (Paginated, from start):**
-```
-AT+MARKS=20240203100000?0
+AT+MARKS=20240203100000?1&10
 ```
 
 **Response (Paginated):**
@@ -593,7 +607,8 @@ AT+MARKS=20240203100000?0
   "ok": true,
   "data": {
     "total": 50,
-    "start": 0,
+    "page": 1,
+    "per_page": 10,
     "bookmarks": [
       {"offset": 30, "note": "Important point"},
       {"offset": 60, "note": ""}
@@ -602,15 +617,15 @@ AT+MARKS=20240203100000?0
 }
 ```
 
-**Request (Next page):**
+**Request (Page 2):**
 ```
-AT+MARKS=20240203100000?10
+AT+MARKS=20240203100000?2&10
 ```
 
 **Fields:**
-- `count`: Total number of bookmarks (summary only)
-- `total`: Total number of bookmarks (paginated)
-- `start`: Starting index for this page (paginated)
+- `total`: Total number of bookmarks
+- `page`: Current page number (1-based)
+- `per_page`: Items per page (default 10, max 50)
 - `bookmarks`: Array of bookmark entries
 - `marks_file`: Filename for full bookmark data (summary only)
   - Per bookmark:
@@ -618,10 +633,11 @@ AT+MARKS=20240203100000?10
     - `note`: Optional note text (omitted if empty)
 
 **Pagination Logic:**
-- Without `?`: Returns summary if >20 bookmarks, otherwise returns all
-- With `?N`: Returns bookmarks starting from index N
-- Each response returns as many bookmarks as fit in buffer
-- Client increments `start` by the number of received bookmarks
+- Without `?`: Returns summary with total count
+- With `?page&per_page`: Returns specific page
+  - Default: page=1, per_page=10
+  - Maximum per_page: 50
+- Client increments `page` to get next page
 
 **Error Cases:**
 - `3001`: Session not found
@@ -684,7 +700,7 @@ File Ready Event:
 {
   "ok": true,
   "event": "file_ready",
-  "filename": "001.opus",
+  "filename": "0001.opus",
   "size": 52598
 }
 ```
@@ -694,7 +710,7 @@ File Complete Event:
 {
   "ok": true,
   "event": "file_complete",
-  "filename": "001.opus"
+  "filename": "0001.opus"
 }
 ```
 
@@ -1429,7 +1445,7 @@ Progress notifications are sent periodically:
 ```
 App                          Device
  │                              │
- │─ AT+DOWNLOAD=2024/001.opus ─>│
+ │─ AT+DOWNLOAD=2024/0001.opus ─>│
  │                              │  Open file
  │                              │  Get size
  │<─ {"ok":true} ────────────────│
@@ -1454,18 +1470,18 @@ App                          Device
  │<─ ["20240203100000"] ────────│
  │                              │
  │─ AT+LIST=20240203100000 ───>│
- │<─ ["001.opus","002.opus"] ────│
+ │<─ ["0001.opus","0002.opus"] ────│
  │                              │
  │─ AT+MARKS=20240203100000 ──>│
  │<─ [{offset:10,note:"..."}] ───│
  │                              │
- │─ AT+DOWNLOAD=20240203/001.opus>│
+ │─ AT+DOWNLOAD=20240203/0001.opus>│
  │<─ {"ok":true} ────────────────│
  │<════ [Opus data...] ═════════│
  ...                            │
  │<─ {"ok":true,"done":true} ────│
  │                              │
- │─ AT+DOWNLOAD=20240203/002.opus>│
+ │─ AT+DOWNLOAD=20240203/0002.opus>│
  │<─ {"ok":true} ────────────────│
  │<════ [Opus data...] ═════════│
  ...                            │
@@ -1680,9 +1696,9 @@ AT+DOWNLOAD=20240203100000:0016.opus
 Plain text file with one filename per line (append-only).
 
 ```
-001.opus
-002.opus
-003.opus
+0001.opus
+0002.opus
+0003.opus
 ```
 
 Used for efficient session file listing.
@@ -1812,7 +1828,7 @@ The device sends unsolicited notifications via the Response characteristic for i
   "event": "bookmark_added",
   "timestamp": 1706918430,
   "offset": 123,
-  "file": "002.opus",
+  "file": "0002.opus",
   "note": "Important point"
 }
 ```
