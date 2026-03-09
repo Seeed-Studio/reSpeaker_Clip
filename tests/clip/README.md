@@ -56,7 +56,7 @@ wifi scan 0          # Scan all bands (default)
 wifi scan 1          # Scan 2.4GHz only
 wifi scan 2          # Scan 5GHz only
 wifi connect <SSID> [password]  # Connect to network
-wifi ip              # Show assigned IP address
+wifi status          # Show status and IP address
 wifi disconnect      # Disconnect from network
 ```
 
@@ -85,8 +85,8 @@ wifi disconnect      # Disconnect from network
 **Step 1: Find device IP address**
 ```bash
 # On device
-wifi ip
-# Example output: 192.168.1.100
+wifi status
+# Example output: IP: 192.168.1.100
 ```
 
 **Step 2: Start iperf2 server on PC**

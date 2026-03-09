@@ -80,7 +80,7 @@ _________________________________________________________
 | Enable | `wifi on` | "WiFi ready" | ______ | [ ] [ ] |
 | Scan | `wifi scan` | Networks listed | ______ | [ ] [ ] |
 | Connect | `wifi connect <SSID>` | Connected | ______ | [ ] [ ] |
-| IP | `wifi ip` | IP address shown | ______ | [ ] [ ] |
+| IP/Status | `wifi status` | IP address shown | ______ | [ ] [ ] |
 | Throughput | `zperf download <PC_IP>` | 5-15 Mbps | ______ | [ ] [ ] |
 
 **Networks Found**: ______

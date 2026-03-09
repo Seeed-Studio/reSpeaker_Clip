@@ -47,7 +47,7 @@ wifi scan           # Scan for WiFi networks (2.4G + 5G)
 wifi scan 1         # Scan 2.4GHz only
 wifi scan 2         # Scan 5GHz only
 wifi connect <SSID> [password]  # Connect to WiFi
-wifi ip             # Check IP address
+wifi status         # Show status and IP address
 wifi disconnect      # Disconnect from WiFi
 ```
 
@@ -62,7 +62,7 @@ wifi disconnect      # Disconnect from WiFi
 iperf -s -u -p 5001
 
 # Step 3: Run test from device
-wifi ip              # Get device IP first
+wifi status          # Get device IP first (shows IP address)
 iperf <PC_IP>        # UDP test (10s, 100Mbps default)
 iperf <PC_IP> 30      # 30 second test
 iperf <PC_IP> 10 50000 # 10 second test at 50 Mbps
