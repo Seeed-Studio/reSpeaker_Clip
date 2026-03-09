@@ -46,22 +46,26 @@ wifi on             # Enable WiFi
 wifi scan           # Scan for WiFi networks
 wifi connect <SSID> [password]  # Connect to WiFi
 wifi ip             # Check IP address
+wifi disconnect      # Disconnect from WiFi
 ```
 
-### WiFi Throughput Test (requires iperf3 on PC)
+### WiFi Throughput Test (requires iperf on PC)
 ```
-# Step 1: Install iperf3 on PC
-# Linux: sudo apt-get install iperf3
-# macOS: brew install iperf3
-# Windows: Download from iperf.fr
+# Step 1: Install iperf (iperf2) on PC
+# Linux: sudo apt-get install iperf
+# macOS: brew install iperf
+# Windows: Download iperf.exe from https://iperf.fr
 
-# Step 2: Start iperf3 server on PC
-iperf3 -s
+# Step 2: Start iperf server on PC (UDP mode)
+iperf -s -u -p 5001
 
-# Step 3: Run test from device (get device IP from 'wifi ip')
-zperf -v4 download <PC_IP> 5001
+# Step 3: Run test from device
+wifi ip              # Get device IP first
+iperf <PC_IP>        # UDP test (10s, 100Mbps default)
+iperf <PC_IP> 30      # 30 second test
+iperf <PC_IP> 10 50000 # 10 second test at 50 Mbps
 
-# Expected: 5-15 Mbps TCP, 10-20 Mbps UDP
+# Expected: 5-15 Mbps UDP upload, <1% packet loss
 ```
 
 ### Storage Test

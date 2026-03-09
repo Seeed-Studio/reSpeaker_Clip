@@ -65,24 +65,17 @@ wifi disconnect      # Disconnect from network
 
 ---
 
-#### WiFi Throughput Testing (with iperf3)
+#### WiFi Throughput Testing (with iperf2)
 
-**Prerequisites - PC Setup**:
+**Overview**: Device uses `iperf` command which is **iperf2 compatible** for UDP throughput testing.
 
-1. Install iperf3 on PC:
-```bash
-# Linux (Ubuntu/Debian)
-sudo apt-get install iperf3
+**Test Type**: UDP upload from device to PC (device sends, PC receives)
 
-# macOS
-brew install iperf3
-
-# Windows
-# Download from https://iperf.fr/iperf-download.php#windows
-# Or use WSL: wsl sudo apt-get install iperf3
-```
-
-2. Connect PC to same WiFi network as device
+**Default Parameters**:
+- Server IP: 192.168.1.100
+- Port: 5001
+- Duration: 10 seconds
+- Rate: 100 Mbps (100000 kbps)
 
 **Test Procedure**:
 
@@ -90,40 +83,66 @@ brew install iperf3
 ```bash
 # On device
 wifi ip
-# Note the IP address, e.g., 192.168.1.100
+# Example output: 192.168.1.100
 ```
 
-**Step 2: Start iperf3 server on PC**
+**Step 2: Start iperf2 server on PC**
 ```bash
-# On PC
-iperf3 -s
+# On PC - Start iperf2 server (UDP mode)
+iperf -s -u -p 5001
 
-# Optional: Specify port
-iperf3 -s -p 5201
+# Or with verbose output
+iperf -s -u -p 5001 -i 1
+
+# Note: Most systems have 'iperf' which is iperf2
+# Windows: Download iperf.exe from https://iperf.fr
 ```
 
-**Step 3: Run iperf3 client on device**
+**Step 3: Run iperf test on device**
 ```bash
-# On device - TCP download test
-zperf -v4 download <PC_IP> 5001
-
-# Or use shell command (if available)
-# This tests UDP throughput from device to PC
+# On device - Run UDP throughput test
+iperf                       # Use defaults (192.168.1.100, 10s, 100Mbps)
+iperf 192.168.1.100         # Specify PC IP
+iperf 192.168.1.100 30      # 30 second test
+iperf 192.168.1.100 10 50000 # 10 second test at 50 Mbps
 ```
 
-**Step 4: Reverse test (PC → Device)**
-```bash
-# On device - Start receiver
-zperf -v4 upload 5001
+**Expected Device Output**:
+```
+Test completed!
+  Packets sent: 7300
+  Packets lost: 25
+  Packets received: 7275
+  Bytes sent: 10220000
+  Time: 10000 ms
+  Throughput: 8100 kbps (8.100 Mbps)
+```
 
-# On PC - Send data
-iperf3 -c <DEVICE_IP> -t 10
+**Expected PC Output**:
+```
+------------------------------------------------------------
+Server listening on UDP port 5001
+Receiving 1470 byte datagrams
+UDP buffer size: 208 KByte (default)
+------------------------------------------------------------
+[  5] local 192.168.1.100 port 5001 connected with 192.168.1.100 port 49153
+[ ID] Interval       Transfer     Bitrate
+[  5]   0.00-10.00  sec  10.2 MBytes  8.10 Mbits/sec
+[  5]  -  -  -  -  -  -  -  -  -  -  -  -
+[  5]   0.00-10.00  sec  1 datagram  0.00 bits/sec
+------------------------------------------------------------
 ```
 
 **Expected Throughput**:
-- TCP: 5-15 Mbps (typical for 2.4GHz WiFi with nRF7002)
-- UDP: 10-20 Mbps (depending on packet loss)
-- Latency: 10-50ms (local network)
+- UDP Upload: 5-15 Mbps (typical for 2.4GHz WiFi)
+- Packet loss: <1% in good conditions
+
+**Command Parameters**:
+| Parameter | Description | Range | Default |
+|-----------|-------------|-------|---------|
+| server_ip | PC IP address | Any valid IP | 192.168.1.100 |
+| duration_sec | Test duration | 1-3600 seconds | 10 |
+| rate_kbps | Send rate | 100-1000000 kbps | 100000 |
 
 **Troubleshooting WiFi Issues**:
 
@@ -132,30 +151,11 @@ iperf3 -c <DEVICE_IP> -t 10
 | No networks found | Check antenna connection, verify 2.4GHz router |
 | Connection fails | Verify SSID/password, check router security type |
 | No IP address | Check DHCP on router, try static IP |
-| Low throughput | Check interference, distance from router |
-| Intermittent drops | Check power supply, antenna orientation |
+| Low throughput | Check interference, distance from router, reduce rate |
+| "WiFi not connected" | Run `wifi connect` first |
+| High packet loss | Reduce rate (try 50000 or lower), check WiFi signal |
 
 ---
-
-#### Advanced WiFi Testing
-
-**Packet Capture**:
-```bash
-# Requires hostapd with monitoring mode
-# Not typically available in embedded test setup
-```
-
-**Channel Testing**:
-```bash
-# Scan shows channels 1-13 for 2.4GHz
-# Check which channels have least interference (lower RSSI = cleaner)
-```
-
-**WiFi Module Information**:
-```bash
-# Check module status via shell
-wifi              # Shows connection status
-```
 
 ### 3. SD Card Test
 
