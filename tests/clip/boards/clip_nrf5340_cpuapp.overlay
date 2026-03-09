@@ -1,0 +1,16 @@
+/*
+ * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Device tree overlay for reSpeaker Clip application */
+
+/ {
+    /* Reserved for future use - can add aliases or properties here */
+};
+
+
+&uart0 {
+	current-speed = <921600>;
+};
