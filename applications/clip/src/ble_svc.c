@@ -17,6 +17,7 @@
 #include <zephyr/settings/settings.h>
 #include "ble_svc.h"
 #include "at_cmd.h"
+#include "json_helper.h"
 #include "clip.h"
 #include "transfer.h"
 #include "display.h"

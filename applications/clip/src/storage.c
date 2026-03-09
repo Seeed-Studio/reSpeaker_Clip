@@ -443,15 +443,6 @@ int storage_close_session(const char *session_id, uint32_t duration_sec, uint16_
 		fs_close(&file);
 	}
 
-	/* Sync the entire filesystem to ensure all metadata is flushed */
-	rc = fs_sync(&mp);
-	if (rc != 0 && rc != -134) {
-		/* Only log if it's not a common SD card transient error (-134 = FR_DISK_ERR) */
-		LOG_WRN("Filesystem sync failed: %d", rc);
-	} else if (rc == -134) {
-		LOG_DBG("Filesystem sync transient error (data already written)");
-	}
-
 	memset(current_session_dir, 0, sizeof(current_session_dir));
 
 	LOG_INF("Session: %s %u files", session_id, actual_opus_count);
@@ -1564,7 +1555,7 @@ static int cleanup_invalid_sessions(void)
 {
 	struct fs_dir_t dirp;
 	struct fs_dirent entry;
-	char session_path[128];
+	char session_path[280];  /* /SD:/REC/ + 255 char filename + null */
 	int rc;
 	int cleaned_count = 0;
 

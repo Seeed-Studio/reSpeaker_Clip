@@ -56,11 +56,11 @@ static void send_transfer_complete_once(const char *session_id, int file_count);
  * Files are numbered sequentially: 0001.opus, 0002.opus, etc.
  *
  * @param file_num File number (1-based)
- * @param filename Output buffer (must be at least 12 bytes)
+ * @param filename Output buffer (must be at least 16 bytes)
  */
 static void generate_filename(uint32_t file_num, char *filename)
 {
-	snprintf(filename, 12, "%04u.opus", file_num);
+	snprintf(filename, 16, "%04u.opus", file_num);
 }
 
 int transfer_init(void)
@@ -553,7 +553,7 @@ process_next_file:
 							}
 
 							for (uint32_t i = last_num + 1; i <= session_info.file_count; i++) {
-								char test_filename[12];
+								char test_filename[16];
 								generate_filename(i, test_filename);
 								if (last_transferred_file[0] == '\0' ||
 								    strcmp(test_filename, last_transferred_file) > 0) {

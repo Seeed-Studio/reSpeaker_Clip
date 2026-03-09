@@ -214,7 +214,7 @@ int config_init(void)
      * callback (bt/hash) that, when NVS is empty, calls sc_indicate() which
      * schedules gatt_sc.work BEFORE bt_gatt_init() sets its handler - causing
      * a NULL function pointer crash 10 ms later in the work queue.
-     * BT settings (bt/*) are loaded in ble_svc_init() after bt_enable().
+     * BT settings are loaded in ble_svc_init() after bt_enable().
      */
     err = settings_load_subtree("config");
     if (err) {
