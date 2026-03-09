@@ -1,0 +1,7 @@
+/*
+ * UART configuration for 921600 baud rate
+ */
+
+&uart0 {
+	current-speed = <921600>;
+};
