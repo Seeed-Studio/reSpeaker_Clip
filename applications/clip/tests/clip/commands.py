@@ -85,23 +85,20 @@ class SessionInfo:
 
 @dataclass
 class BookmarkInfo:
-    """Bookmark information - simplified."""
+    """Bookmark information - simplified (only offset in seconds)."""
     offset: int         # Seconds from session start
-    note: str           # Optional note
 
     @classmethod
     def from_response(cls, response: dict) -> 'BookmarkInfo':
         data = response.get('data', {})
         return cls(
             offset=data.get('offset', 0),
-            note=data.get('note', ''),
         )
 
     @classmethod
     def from_dict(cls, data: dict) -> 'BookmarkInfo':
         return cls(
             offset=data.get('offset', 0),
-            note=data.get('note', ''),
         )
 
 
@@ -518,23 +515,17 @@ class ClipCommands:
         await self._send_and_check("AT+RESUME")
         return True
 
-    async def add_bookmark(self, note: str = "") -> BookmarkInfo:
+    async def add_bookmark(self) -> BookmarkInfo:
         """
         Add a bookmark during recording.
 
-        Args:
-            note: Optional bookmark note/description
-
         Returns:
-            BookmarkInfo with offset, file, and note
+            BookmarkInfo with offset in seconds
 
         Raises:
             StateError: If not recording
         """
-        if note:
-            response = await self._send_and_check(f"AT+MARK={note}")
-        else:
-            response = await self._send_and_check("AT+MARK")
+        response = await self._send_and_check("AT+MARK")
         return BookmarkInfo.from_response(response)
 
     async def get_bookmarks(self, session_id: str, fetch_all: bool = True) -> List[BookmarkInfo]:
@@ -553,42 +544,45 @@ class ClipCommands:
             CommandError: If session not found or request fails
         """
         all_bookmarks = []
-        start = 0
+        page = 1
+        per_page = 10  # Default items per page
 
         while True:
-            if start == 0:
+            # First request gets summary without query string
+            if page == 1 and not fetch_all:
                 response = await self._send_and_check(f"AT+MARKS={session_id}")
-            else:
-                response = await self._send_and_check(f"AT+MARKS={session_id}?{start}")
+                data = response.get('data', {})
+                # If no bookmarks array, this is just a count summary
+                if 'bookmarks' not in data:
+                    return []
+                # If bookmarks exist but empty, return empty list
+                bookmarks = data.get('bookmarks', [])
+                return [BookmarkInfo.from_dict(b) for b in bookmarks]
 
+            # Paginated request: AT+MARKS=<session_id>?<page>&<per_page>
+            response = await self._send_and_check(f"AT+MARKS={session_id}?{page}&{per_page}")
             data = response.get('data', {})
 
-            # Check if response has bookmarks array (detailed response)
+            # Check if response has bookmarks array
             if 'bookmarks' in data:
                 bookmarks = data.get('bookmarks', [])
                 all_bookmarks.extend([BookmarkInfo.from_dict(b) for b in bookmarks])
 
                 total = data.get('total', len(all_bookmarks))
-                returned_start = data.get('start', 0)
 
                 # Check if we got all bookmarks
-                if len(all_bookmarks) >= total or not fetch_all:
+                if len(all_bookmarks) >= total or len(bookmarks) == 0:
                     break
 
-                # Next page starts after the last bookmark we got
-                start = returned_start + len(bookmarks)
+                # Next page
+                page += 1
 
                 # Safety check to prevent infinite loop
-                if start >= total or len(bookmarks) == 0:
+                if (page - 1) * per_page >= total:
                     break
             else:
-                # Summary response only (no bookmarks array)
-                # This means there are many bookmarks, use fetch_all=True to paginate
-                if fetch_all and start == 0:
-                    start = 0  # Will request with ?0 next
-                    continue
-                else:
-                    break
+                # No bookmarks array, return what we have
+                break
 
         return all_bookmarks
 
@@ -607,26 +601,8 @@ class ClipCommands:
         """
         response = await self._send_and_check(f"AT+MARKS={session_id}")
         data = response.get('data', {})
-        return data.get('count', 0)
-
-    # ==================== Session Management ====================
-        """
-        Add a bookmark during recording.
-
-        Args:
-            note: Optional bookmark note/description
-
-        Returns:
-            BookmarkInfo with offset, file, and note
-
-        Raises:
-            StateError: If not recording
-        """
-        if note:
-            response = await self._send_and_check(f"AT+MARK={note}")
-        else:
-            response = await self._send_and_check("AT+MARK")
-        return BookmarkInfo.from_response(response)
+        # New API returns 'total' field instead of 'count'
+        return data.get('total', 0)
 
     # ==================== Session Management ====================
 
@@ -666,16 +642,45 @@ class ClipCommands:
 
     async def list_session_files(self, session_id: str) -> List[str]:
         """
-        List files in a session.
+        List files in a session (with pagination).
 
         Args:
             session_id: Session ID
 
         Returns:
-            List of filenames
+            List of filenames (all files in session)
         """
-        response = await self._send_and_check(f"AT+LIST={session_id}")
-        return response.get('data', [])
+        all_files = []
+        page = 1
+        per_page = 10  # Default items per page (consistent with AT+MARKS)
+
+        while True:
+            # Paginated request: AT+LIST=<session_id>?<page>&<per_page>
+            response = await self._send_and_check(f"AT+LIST={session_id}?{page}&{per_page}")
+            data = response.get('data', {})
+
+            # Check if response has files array
+            if 'files' in data:
+                files = data.get('files', [])
+                all_files.extend(files)
+
+                total = data.get('total', len(all_files))
+
+                # Check if we got all files
+                if len(all_files) >= total or len(files) == 0:
+                    break
+
+                # Next page
+                page += 1
+
+                # Safety check to prevent infinite loop
+                if (page - 1) * per_page >= total:
+                    break
+            else:
+                # No files array, return what we have
+                break
+
+        return all_files
 
     async def delete_session(self, session_id: str) -> bool:
         """

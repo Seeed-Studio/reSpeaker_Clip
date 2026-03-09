@@ -376,9 +376,9 @@ class FileTransfer:
             pass
 
         # Always create bookmarks.json (empty if no bookmarks)
-        # Simplified format: only offset and note
+        # Simplified format: only offset in seconds
         bookmarks_data = [
-            {"offset": b.offset, "note": b.note}
+            {"offset": b.offset}
             for b in bookmarks
         ]
         bookmarks_path.write_text(json.dumps(bookmarks_data, indent=2))
@@ -400,7 +400,7 @@ class FileTransfer:
             files: List of file dicts with 'path' key
             output_path: Output file path
         """
-        # Sort by filename (should be 001.opus, 002.opus, etc.)
+        # Sort by filename (should be 0001.opus, 0002.opus, etc.)
         sorted_files = sorted(files, key=lambda f: f["name"])
 
         with open(output_path, "wb") as outfile:

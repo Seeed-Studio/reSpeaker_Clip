@@ -183,7 +183,7 @@ class TestDataClasses:
             'ok': True,
             'data': {
                 'offset': 10.5,
-                'file': '001.opus',
+                'file': '00001.opus',
                 'note': 'Test bookmark',
             }
         }
@@ -191,7 +191,7 @@ class TestDataClasses:
         bookmark = BookmarkInfo.from_response(response)
 
         assert bookmark.offset == 10.5
-        assert bookmark.file == '001.opus'
+        assert bookmark.file == '00001.opus'
         assert bookmark.note == 'Test bookmark'
 
     def test_battery_status_from_response(self):
@@ -262,7 +262,7 @@ class TestMergeOpusFiles:
     def test_merge_opus_files(self, temp_dir):
         """Should merge multiple Opus files."""
         # Create test files
-        file1 = temp_dir / "001.opus"
+        file1 = temp_dir / "0001.opus"
         file2 = temp_dir / "002.opus"
         output = temp_dir / "merged.opus"
 
@@ -280,7 +280,7 @@ class TestMergeOpusFiles:
         """Should merge files in sorted order."""
         # Create test files in non-sorted order
         file3 = temp_dir / "003.opus"
-        file1 = temp_dir / "001.opus"
+        file1 = temp_dir / "0001.opus"
         file2 = temp_dir / "002.opus"
         output = temp_dir / "merged.opus"
 
@@ -300,7 +300,7 @@ class TestMergeOpusFiles:
         output = temp_dir / "merged.opus"
 
         # Create one existing, one nonexistent
-        file1 = temp_dir / "001.opus"
+        file1 = temp_dir / "0001.opus"
         file1.write_bytes(b"DATA")
 
         result = merge_opus_files([file1, temp_dir / "nonexistent.opus"], output)

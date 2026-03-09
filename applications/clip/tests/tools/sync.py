@@ -717,8 +717,7 @@ Examples:
         if bookmarks:
             print(f"  Bookmarks: {len(bookmarks)}")
             for bm in bookmarks[:3]:  # Show first 3
-                note = f" - {bm.note}" if bm.note else ""
-                print(f"    {bm.offset}s{note}")
+                print(f"    {bm.offset}s")
             if len(bookmarks) > 3:
                 print(f"    ... and {len(bookmarks) - 3} more")
             print(f"  Saved: {result.get('bookmarks_path', 'bookmarks.json')}")

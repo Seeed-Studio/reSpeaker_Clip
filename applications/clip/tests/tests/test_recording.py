@@ -119,29 +119,11 @@ class TestBookmarks:
         await asyncio.sleep(1)
 
         # Add bookmark
-        bookmark = await commands.add_bookmark("Test bookmark")
-
-        assert bookmark.offset > 0
-        assert len(bookmark.file) > 0
-        assert bookmark.note == "Test bookmark"
-
-        # Cleanup
-        await commands.stop_recording()
-        await commands.wait_for_recording_to_stop(timeout=5.0)
-
-    async def test_add_bookmark_without_note(self, commands: ClipCommands):
-        """Should add bookmark without note."""
-        await commands.ensure_idle()
-
-        await commands.start_recording("normal")
-        await commands.wait_for_recording_to_start(timeout=5.0)
-        await asyncio.sleep(1)
-
         bookmark = await commands.add_bookmark()
 
         assert bookmark.offset > 0
-        assert bookmark.note == ""
 
+        # Cleanup
         await commands.stop_recording()
         await commands.wait_for_recording_to_stop(timeout=5.0)
 
@@ -155,7 +137,7 @@ class TestBookmarks:
         bookmarks = []
         for i in range(3):
             await asyncio.sleep(0.5)
-            bm = await commands.add_bookmark(f"Mark {i+1}")
+            bm = await commands.add_bookmark()
             bookmarks.append(bm)
 
         assert len(bookmarks) == 3
@@ -170,7 +152,7 @@ class TestBookmarks:
         await commands.ensure_idle()
 
         with pytest.raises((StateError, CommandError)):
-            await commands.add_bookmark("Test")
+            await commands.add_bookmark()
 
 
 @pytest.mark.asyncio

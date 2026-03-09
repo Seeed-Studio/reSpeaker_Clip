@@ -171,8 +171,8 @@ class TestTransferErrors:
         with pytest.raises(TransferError):
             await transfer.download_file(
                 "00000000_000000",
-                "0000.opus",
-                output_dir / "0000.opus",
+                "0001.opus",
+                output_dir / "0001.opus",
             )
 
     async def test_timeout_on_slow_transfer(self, commands: ClipCommands, output_dir):
