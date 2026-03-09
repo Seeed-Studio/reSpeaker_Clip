@@ -268,8 +268,8 @@ static int cmd_wifi_scan(const struct shell *sh, size_t argc, char **argv)
 
 	struct wifi_scan_params params = {
 		.scan_type = WIFI_SCAN_TYPE_ACTIVE,
-		.bands = (band == 0) ? (WIFI_FREQ_BAND_2_4_GHZ | WIFI_FREQ_BAND_5_GHZ) :
-			(band == 1) ? WIFI_FREQ_BAND_2_4_GHZ : WIFI_FREQ_BAND_5_GHZ,
+		.bands = (band == 0) ? ((1 << WIFI_FREQ_BAND_2_4_GHZ) | (1 << WIFI_FREQ_BAND_5_GHZ)) :
+			(band == 1) ? (1 << WIFI_FREQ_BAND_2_4_GHZ) : (1 << WIFI_FREQ_BAND_5_GHZ),
 		.max_bss_cnt = 10,
 	};
 

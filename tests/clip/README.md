@@ -46,12 +46,15 @@ ble scan             # Scan for BLE devices
 
 **Device Configuration**:
 - MAC Address: 14:5A:FC:5E:37:9C (fixed in prj.conf)
-- Supports: 2.4GHz only (802.11 b/g/n)
+- Supports: 2.4GHz + 5GHz dual-band (802.11 b/g/n/ac)
 
 **Basic Commands**:
 ```bash
 wifi on              # Enable WiFi module
-wifi scan            # Scan for networks (shows SSID, RSSI, Channel)
+wifi scan            # Scan for networks (shows SSID, RSSI, Channel, BAND)
+wifi scan 0          # Scan all bands (default)
+wifi scan 1          # Scan 2.4GHz only
+wifi scan 2          # Scan 5GHz only
 wifi connect <SSID> [password]  # Connect to network
 wifi ip              # Show assigned IP address
 wifi disconnect      # Disconnect from network
@@ -148,12 +151,21 @@ UDP buffer size: 208 KByte (default)
 
 | Problem | Solution |
 |---------|----------|
-| No networks found | Check antenna connection, verify 2.4GHz router |
+| No networks found | Check antenna connection, verify router is powered on |
+| Only 2.4G networks, no 5G | Verify router has 5GHz enabled, check signal strength, try `wifi scan 2` |
 | Connection fails | Verify SSID/password, check router security type |
 | No IP address | Check DHCP on router, try static IP |
 | Low throughput | Check interference, distance from router, reduce rate |
 | "WiFi not connected" | Run `wifi connect` first |
 | High packet loss | Reduce rate (try 50000 or lower), check WiFi signal |
+
+**Note on 5GHz Support**:
+The nRF7002 supports both 2.4GHz and 5GHz bands. If you only see 2.4G networks in scan results:
+1. Verify your router has 5GHz enabled (many "dual-band" routers have separate 2.4G and 5G SSIDs)
+2. Try `wifi scan 2` to scan 5GHz networks only
+3. Check distance - 5GHz has shorter range than 2.4GHz
+4. Some 5GHz channels may not be available in your region
+
 
 ---
 

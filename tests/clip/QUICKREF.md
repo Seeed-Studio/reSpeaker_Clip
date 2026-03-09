@@ -43,7 +43,9 @@ motor pulse 200     # 200ms pulse
 ```
 ble scan            # Scan for BLE devices
 wifi on             # Enable WiFi
-wifi scan           # Scan for WiFi networks
+wifi scan           # Scan for WiFi networks (2.4G + 5G)
+wifi scan 1         # Scan 2.4GHz only
+wifi scan 2         # Scan 5GHz only
 wifi connect <SSID> [password]  # Connect to WiFi
 wifi ip             # Check IP address
 wifi disconnect      # Disconnect from WiFi
