@@ -580,9 +580,10 @@ Examples:
         # Update progress callback to use tqdm
         last_total = 0
         callback_count = 0
+        last_shown_pbar = 0.0  # Track last time we updated tqdm
 
         def update_progress(filename: str, file_count: int, total_size: int):
-            nonlocal last_total, callback_count
+            nonlocal last_total, callback_count, last_shown_pbar
             callback_count += 1
             sync_stats['last_filename'] = filename
             sync_stats['file_count'] = file_count
@@ -602,6 +603,7 @@ Examples:
                     if delta > 0:
                         pbar.update(delta)
                         last_total = total_size
+                        last_shown_pbar = time.time()  # Mark last update time
                 except Exception as e:
                     # If tqdm fails, fallback to print
                     print(f"  [{file_count:3d}] {filename}: {format_bytes(total_size)} (tqdm error: {e})")
@@ -624,6 +626,7 @@ Examples:
         last_count = 0
         last_shown = 0.0
         no_progress_count = 0
+        last_pbar_update = 0  # Track last tqdm update for real-time progress
 
         while not sync_task.done():
             try:
@@ -638,6 +641,28 @@ Examples:
                 pass
 
             elapsed = time.time() - sync_start
+
+            # Real-time progress update: poll device for current transfer progress
+            if pbar is not None:
+                progress = device.get_transfer_progress()
+                current_total = progress["completed_bytes"] + progress["current_file_bytes"]
+
+                # Update tqdm if there's new data (updates every 0.5s for smoother display)
+                if current_total > last_pbar_update and time.time() - last_shown_pbar > 0.5:
+                    delta = current_total - last_total
+                    if delta > 0:
+                        # Update description with current file being received
+                        current_filename = progress["current_filename"] or "waiting"
+                        desc = f"{current_filename[:10]:<10} [{progress['total_files']:3d}]"
+                        try:
+                            pbar.set_description(desc, refresh=True)
+                            pbar.update(delta)
+                            last_total = current_total
+                            last_shown_pbar = time.time()
+                        except Exception as e:
+                            # tqdm update failed, skip
+                            pass
+                    last_pbar_update = current_total
 
             # Fallback: show progress without tqdm every 3 seconds
             if not HAS_TQDM and elapsed - last_shown > 3.0 and sync_stats['file_count'] > 0:

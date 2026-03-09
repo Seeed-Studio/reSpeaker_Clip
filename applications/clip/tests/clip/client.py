@@ -79,6 +79,7 @@ class ClipDevice:
         self._session_files = {}  # {filename: bytes}
         self._current_file_data = bytearray()
         self._current_filename = None
+        self._current_file_total = 0  # Total size of current file (from file_ready event)
         self._transfer_complete = False
         self._canceled = False
         self._file_lock = threading.Lock()
@@ -312,6 +313,7 @@ class ClipDevice:
                     with self._file_lock:
                         if self._current_filename is None or self._current_filename == filename:
                             self._current_filename = filename
+                            self._current_file_total = size  # Store total size for progress tracking
                     # Continue - don't queue file_ready events as responses
                     self._response_buffer.clear()
                     return
@@ -483,8 +485,30 @@ class ClipDevice:
             self._session_files.clear()
             self._current_file_data.clear()
             self._current_filename = None
+            self._current_file_total = 0
             self._transfer_complete = False
             self._canceled = False
+
+    def get_transfer_progress(self) -> dict:
+        """
+        Get current file transfer progress.
+
+        Returns a dict with:
+            - current_filename: Name of file being received (or None)
+            - current_file_bytes: Bytes received for current file
+            - current_file_total: Total size of current file (0 if unknown)
+            - completed_bytes: Total bytes of all completed files
+            - total_files: Number of completed files
+        """
+        with self._file_lock:
+            completed_bytes = sum(len(data) for data in self._session_files.values())
+            return {
+                "current_filename": self._current_filename,
+                "current_file_bytes": len(self._current_file_data),
+                "current_file_total": self._current_file_total,
+                "completed_bytes": completed_bytes,
+                "total_files": len(self._session_files),
+            }
 
     async def cancel(self):
         """Cancel the current transfer."""
