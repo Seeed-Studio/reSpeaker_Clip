@@ -721,9 +721,6 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Measure encode time */
-		int64_t encode_start = k_uptime_get();
-
 		/* Process PCM data according to mode */
 		int16_t *pcm_data = process_pcm_frame((int16_t *)buffer, AUDIO_OPUS_FRAME_SIZE);
 
@@ -769,6 +766,9 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 			}
 		}
 #endif
+
+		/* Measure encode time (only Opus encoding, not DSP) */
+		int64_t encode_start = k_uptime_get();
 
 		/* Encode audio */
 		opus_int32 encoded_bytes = opus_encode(
