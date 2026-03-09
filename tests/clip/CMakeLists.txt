@@ -17,6 +17,7 @@ target_sources(app PRIVATE
 	src/sdcard.c
 	src/mic.c
 	src/oled.c
+	src/pmic.c
 )
 
 

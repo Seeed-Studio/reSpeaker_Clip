@@ -15,6 +15,7 @@
 #include "sdcard.h"
 #include "mic.h"
 #include "oled.h"
+#include "pmic.h"
 
 LOG_MODULE_REGISTER(Lesson3_Exercise2, LOG_LEVEL_INF);
 
@@ -56,6 +57,13 @@ int main(void)
 		/* Continue anyway, OLED is optional */
 	}
 
+	/* Initialize PMIC (NPM1300) */
+	ret = pmic_init();
+	if (ret != 0) {
+		LOG_ERR("PMIC initialization failed: %d", ret);
+		/* Continue anyway, PMIC is optional for testing */
+	}
+
 	/* Initialize BLE - starts advertising automatically */
 	ret = ble_init();
 	if (ret != 0) {
@@ -77,6 +85,7 @@ int main(void)
 	printk("Flash: Use 'flash' commands for SPI flash operations\n");
 	printk("MIC: Use 'mic capture [time_sec]' to capture audio\n");
 	printk("OLED: Use 'oled test' to run display tests, 'oled help' for more\n");
+	printk("PMIC: Use 'pmic status' to check battery, 'pmic ship' to power off\n");
 
 	return 0;
 }
