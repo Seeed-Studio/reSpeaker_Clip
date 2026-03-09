@@ -4,13 +4,10 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/sensor.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/logging/log.h>
 #include "imu.h"
