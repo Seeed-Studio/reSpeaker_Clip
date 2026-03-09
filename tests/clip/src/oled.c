@@ -7,6 +7,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/shell/shell.h>
 #include <zephyr/logging/log.h>
 #include "oled.h"
 
@@ -22,9 +23,6 @@ static const struct device *display_dev = NULL;
 
 /* Display buffer */
 static uint8_t display_buffer[OLED_BUF_SIZE];
-
-/* Test frame counter for animations */
-static int test_frame = 0;
 
 /* Write buffer to display */
 static void oled_write_buffer(void)
@@ -234,3 +232,96 @@ void oled_run_all_tests(void)
 
 	LOG_INF("All OLED tests completed!");
 }
+
+/* ============================================================================
+ * Shell Commands
+ * ============================================================================ */
+
+/* Shell command: oled clear */
+static int cmd_oled_clear(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	oled_test_clear();
+	shell_print(sh, "Display cleared");
+
+	return 0;
+}
+
+/* Shell command: oled fill */
+static int cmd_oled_fill(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	oled_test_fill();
+	shell_print(sh, "Display filled");
+
+	return 0;
+}
+
+/* Shell command: oled pattern */
+static int cmd_oled_pattern(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	oled_test_pattern();
+	shell_print(sh, "Test pattern displayed");
+
+	return 0;
+}
+
+/* Shell command: oled circle */
+static int cmd_oled_circle(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	oled_test_circle_anim();
+	shell_print(sh, "Circle animation completed");
+
+	return 0;
+}
+
+/* Shell command: oled pixels */
+static int cmd_oled_pixels(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	oled_test_pixels();
+	shell_print(sh, "Pixel test completed");
+
+	return 0;
+}
+
+/* Shell command: oled test (run all tests) */
+static int cmd_oled_test(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Running all OLED tests...");
+	oled_run_all_tests();
+	shell_print(sh, "All tests completed!");
+
+	return 0;
+}
+
+/* Shell command table */
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_oled,
+	/* Basic operations */
+	SHELL_CMD(clear, NULL, "Clear display", cmd_oled_clear),
+	SHELL_CMD(fill, NULL, "Fill display (all on)", cmd_oled_fill),
+	SHELL_CMD(pattern, NULL, "Show test pattern", cmd_oled_pattern),
+	SHELL_CMD(circle, NULL, "Circle animation", cmd_oled_circle),
+	SHELL_CMD(pixels, NULL, "Pixel test (checkerboard)", cmd_oled_pixels),
+	/* Run all tests */
+	SHELL_CMD(test, NULL, "Run all tests", cmd_oled_test),
+	SHELL_SUBCMD_SET_END
+);
+
+/* Root command: oled */
+SHELL_CMD_REGISTER(oled, &sub_oled, "OLED display commands", NULL);

@@ -51,13 +51,7 @@ int main(void)
 
 	/* Initialize OLED display */
 	ret = oled_init();
-	if (ret == 0) {
-		/* Run automatic tests on startup */
-		LOG_INF("Running OLED display tests...");
-		oled_test_pattern();
-		k_sleep(K_SECONDS(2));
-		oled_test_clear();
-	} else {
+	if (ret != 0) {
 		LOG_ERR("OLED display initialization failed: %d", ret);
 		/* Continue anyway, OLED is optional */
 	}
@@ -82,7 +76,7 @@ int main(void)
 	printk("SD card: Use 'sd mount' to mount, 'fs ls /SD:' to list files\n");
 	printk("Flash: Use 'flash' commands for SPI flash operations\n");
 	printk("MIC: Use 'mic capture [time_sec]' to capture audio\n");
-	printk("OLED: Display initialized - showing test patterns\n");
+	printk("OLED: Use 'oled test' to run display tests, 'oled help' for more\n");
 
 	return 0;
 }
