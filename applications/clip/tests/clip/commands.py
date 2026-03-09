@@ -609,16 +609,27 @@ class ClipCommands:
 
     # ==================== Session Management ====================
 
-    async def list_sessions(self) -> List[SessionInfo]:
+    async def list_sessions(self, page: int = 1, per_page: int = 10) -> List[SessionInfo]:
         """
-        List all recording sessions.
+        List recording sessions with pagination.
+
+        Args:
+            page: Page number (default 1)
+            per_page: Items per page (default 10, max 50)
 
         Returns:
             List of SessionInfo objects
         """
-        response = await self._send_and_check("AT+LIST")
-        data = response.get('data', [])
-        return [SessionInfo.from_dict(s) for s in data]
+        if page == 1 and per_page == 10:
+            # Default first page - no parameters needed
+            response = await self._send_and_check("AT+LIST")
+        else:
+            # Paginated request
+            response = await self._send_and_check(f"AT+LIST?{page}&{per_page}")
+
+        data = response.get('data', {})
+        sessions = data.get('sessions', [])
+        return [SessionInfo.from_dict(s) for s in sessions]
 
     async def get_session_info(self, session_id: str) -> 'SessionInfo':
         """

@@ -448,11 +448,16 @@ AT+MARK
 
 ##### AT+LIST - List Sessions/Files
 
-List all sessions, get session details, or list files with pagination.
+List all sessions with pagination, get session details, or list files with pagination.
 
-**Request (All Sessions):**
+**Request (All Sessions - First Page):**
 ```
 AT+LIST
+```
+
+**Request (Paginated Sessions):**
+```
+AT+LIST?2&10
 ```
 
 **Request (Session Details):**
@@ -465,14 +470,19 @@ AT+LIST=20240203100000
 AT+LIST=20240203100000?1&20
 ```
 
-**Response (All Sessions):**
+**Response (All Sessions - Paginated):**
 ```json
 {
   "ok": true,
-  "data": [
-    {"id": "20240203100000", "files": 30, "size": 5242880, "bookmarks": 5},
-    {"id": "20240203_120000", "files": 15, "size": 2621440, "bookmarks": 0}
-  ]
+  "data": {
+    "total": 50,
+    "page": 1,
+    "per_page": 10,
+    "sessions": [
+      {"id": "20240203100000", "files": 30, "size": 5242880, "bookmarks": 5},
+      {"id": "20240203_120000", "files": 15, "size": 2621440, "bookmarks": 0}
+    ]
+  }
 }
 ```
 
@@ -510,27 +520,34 @@ AT+LIST=20240203100000?1&20
 ```
 
 **Fields:**
-- `id`: Session ID
-- `files`: Total number of audio files in session
-- `size`: Total bytes of all files
+- `total`: Total number of items (sessions or files)
+- `page`: Current page number (default 1)
+- `per_page`: Items per page (default 10, max 50)
+- `sessions`: Array of session objects (session list pagination)
+  - `id`: Session ID
+  - `files`: Total number of audio files in session
+  - `size`: Total bytes of all files
+  - `bookmarks`: Number of bookmarks in session
+- `files`: Array of file names (file list pagination)
+- `id`: Session ID (non-paginated response, deprecated)
 - `synced`: Number of files successfully transferred (only in session details)
-- `bookmarks`: Number of bookmarks in session
 - `channels`: Audio channels - 1=mono, 2=stereo (only in session details)
 - `sample_rate`: Sample rate in Hz, e.g., 16000 (only in session details)
 - `mode`: Recording mode - "normal" (stereo) or "enhanced" (mono with DSP) (only in session details)
-- `total`: Total number of files (paginated response)
-- `page`: Current page number (paginated response)
-- `per_page`: Items per page (paginated response, default 10, max 50)
 
 **Usage Examples:**
 ```
-# List all sessions
+# List sessions (default: first page, 10 items per page)
 AT+LIST
-# → Returns list with id, files, size for each session
+# → Returns {"total":50,"page":1,"per_page":10,"sessions":[...]}
+
+# Get second page of sessions
+AT+LIST?2&10
+# → Returns sessions 11-20
 
 # Get session details (including synced count and audio format)
 AT+LIST=20240203100000
-# → Returns files, size, synced, channels, sample_rate for specific session
+# → Returns files, size, synced, bookmarks, channels, sample_rate for specific session
 
 # List files with pagination (page 1, 10 items per page)
 AT+LIST=20240203100000?1&10
