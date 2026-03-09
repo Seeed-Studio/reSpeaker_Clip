@@ -17,6 +17,7 @@
 #include "oled.h"
 #include "pmic.h"
 #include "motor.h"
+#include "imu.h"
 
 LOG_MODULE_REGISTER(Lesson3_Exercise2, LOG_LEVEL_INF);
 
@@ -72,6 +73,13 @@ int main(void)
 		/* Continue anyway, Motor is optional for testing */
 	}
 
+	/* Initialize IMU (software I2C) */
+	ret = imu_init();
+	if (ret != 0) {
+		LOG_WRN("IMU initialization failed: %d (optional)", ret);
+		/* Continue anyway, IMU is optional for testing */
+	}
+
 	/* Initialize BLE - starts advertising automatically */
 	ret = ble_init();
 	if (ret != 0) {
@@ -95,6 +103,7 @@ int main(void)
 	printk("OLED: Use 'oled test' to run display tests, 'oled help' for more\n");
 	printk("PMIC: Use 'pmic status' to check battery, 'pmic ship' to power off\n");
 	printk("Motor: Use 'motor pulse' or 'motor pattern' to test vibration\n");
+	printk("IMU: Use 'imu init' to initialize, 'imu read' for sensor data\n");
 
 	return 0;
 }

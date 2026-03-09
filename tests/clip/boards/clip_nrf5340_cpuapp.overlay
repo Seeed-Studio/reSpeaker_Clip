@@ -1,16 +1,10 @@
 /*
- * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ * Copyright (c) 2023 Nordic Semiconductor ASA
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-/* Device tree overlay for reSpeaker Clip application */
-
-/ {
-    /* Reserved for future use - can add aliases or properties here */
-};
-
-
+/* UART configuration for 921600 baud rate */
 &uart0 {
 	current-speed = <921600>;
 };
