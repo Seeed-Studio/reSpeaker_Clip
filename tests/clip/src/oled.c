@@ -310,6 +310,33 @@ static int cmd_oled_test(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* Shell command: oled brightness */
+static int cmd_oled_brightness(const struct shell *sh, size_t argc, char **argv)
+{
+	int brightness;
+
+	if (argc < 2) {
+		shell_print(sh, "Usage: oled brightness <0-255>");
+		return -EINVAL;
+	}
+
+	brightness = strtol(argv[1], NULL, 10);
+	if (brightness < 0 || brightness > 255) {
+		shell_print(sh, "Error: brightness must be between 0 and 255");
+		return -EINVAL;
+	}
+
+	if (display_dev) {
+		display_set_contrast(display_dev, (uint8_t)brightness);
+		shell_print(sh, "Brightness set to %d", brightness);
+	} else {
+		shell_print(sh, "Error: display not initialized");
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 /* Shell command table */
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_oled,
 	/* Basic operations */
@@ -318,6 +345,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_oled,
 	SHELL_CMD(pattern, NULL, "Show test pattern", cmd_oled_pattern),
 	SHELL_CMD(circle, NULL, "Circle animation", cmd_oled_circle),
 	SHELL_CMD(pixels, NULL, "Pixel test (checkerboard)", cmd_oled_pixels),
+	/* Brightness control */
+	SHELL_CMD_ARG(brightness, NULL, "Set brightness (0-255)", cmd_oled_brightness, 1, 1),
 	/* Run all tests */
 	SHELL_CMD(test, NULL, "Run all tests", cmd_oled_test),
 	SHELL_SUBCMD_SET_END
