@@ -1117,9 +1117,11 @@ static int cmd_list(const struct at_command *cmd, char **response)
 
         /* If no pagination requested, return summary only */
         if (!query) {
-            /* Skip bookmarks_count call during active recording to avoid stack issues
-             * Bookmarks require file operations that may conflict with recording */
-            int bookmark_count = 0;  /* Default to 0 for active sessions */
+            /* Get bookmark count for this session */
+            int bookmark_count = bookmarks_count(session_id);
+            if (bookmark_count < 0) {
+                bookmark_count = 0;
+            }
 
             /* Ensure mode string is null-terminated for safety */
             session.mode[sizeof(session.mode) - 1] = '\0';

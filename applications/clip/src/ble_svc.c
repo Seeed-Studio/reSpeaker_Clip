@@ -199,6 +199,7 @@ static void at_thread_main(void *p1, void *p2, void *p3)
             json_create_error("Parse error", &response);
             if (response) {
                 ble_svc_send_response(response);
+                /* json_create_error uses dynamic allocation, so free it */
                 k_free(response);
                 response = NULL;
             }
@@ -215,7 +216,8 @@ static void at_thread_main(void *p1, void *p2, void *p3)
         /* Send response if available */
         if (response) {
             ble_svc_send_response(response);
-            k_free(response);
+            /* Do NOT free response - AT commands use static json_buffer
+             * Only error responses (from json_create_error) are dynamically allocated */
             response = NULL;
         }
 
