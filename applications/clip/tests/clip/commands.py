@@ -67,6 +67,7 @@ class SessionInfo:
     files: int
     size: int
     synced_files: int = 0  # Number of files synced/transferred
+    bookmarks: int = 0     # Number of bookmarks in session
     channels: int = 1      # Audio channels (1=mono, 2=stereo)
     sample_rate: int = 16000  # Sample rate in Hz
     mode: str = "normal"   # Recording mode: "normal" or "enhanced"
@@ -77,6 +78,8 @@ class SessionInfo:
             id=data.get('id', ''),
             files=data.get('files', 0),
             size=data.get('size', 0),
+            synced_files=data.get('synced', 0),
+            bookmarks=data.get('bookmarks', 0),
             channels=data.get('channels', 1),
             sample_rate=data.get('sample_rate', 16000),
             mode=data.get('mode', 'normal'),

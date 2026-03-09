@@ -470,8 +470,8 @@ AT+LIST=20240203100000?1&20
 {
   "ok": true,
   "data": [
-    {"id": "20240203100000", "files": 30, "size": 5242880},
-    {"id": "20240203_120000", "files": 15, "size": 2621440}
+    {"id": "20240203100000", "files": 30, "size": 5242880, "bookmarks": 5},
+    {"id": "20240203_120000", "files": 15, "size": 2621440, "bookmarks": 0}
   ]
 }
 ```
@@ -484,6 +484,7 @@ AT+LIST=20240203100000?1&20
     "files": 30,
     "size": 5242880,
     "synced": 15,
+    "bookmarks": 5,
     "channels": 2,
     "sample_rate": 16000,
     "mode": "normal"
@@ -513,6 +514,7 @@ AT+LIST=20240203100000?1&20
 - `files`: Total number of audio files in session
 - `size`: Total bytes of all files
 - `synced`: Number of files successfully transferred (only in session details)
+- `bookmarks`: Number of bookmarks in session
 - `channels`: Audio channels - 1=mono, 2=stereo (only in session details)
 - `sample_rate`: Sample rate in Hz, e.g., 16000 (only in session details)
 - `mode`: Recording mode - "normal" (stereo) or "enhanced" (mono with DSP) (only in session details)

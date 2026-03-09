@@ -1001,11 +1001,17 @@ static int cmd_list(const struct at_command *cmd, char **response)
 
         /* If no pagination requested, return summary only */
         if (!query) {
+            /* Get bookmark count for this session */
+            int bookmark_count = bookmarks_count(session_id);
+            if (bookmark_count < 0) {
+                bookmark_count = 0;
+            }
+
             int len = snprintf(json_buffer, sizeof(json_buffer),
                     "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u,"
-                    "\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
+                    "\"bookmarks\":%d,\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
                     session.file_count, (uint32_t)session.total_bytes, session.synced_files,
-                    session.channels, session.sample_rate_khz * 1000, session.mode);
+                    bookmark_count, session.channels, session.sample_rate_khz * 1000, session.mode);
 
             /* Check for buffer overflow */
             if (len < 0 || len >= sizeof(json_buffer)) {
@@ -1111,13 +1117,20 @@ static int cmd_list(const struct at_command *cmd, char **response)
     ptr += len;
     remaining -= len;
 
-    for (int i = 0; i < count && remaining > 150; i++) {
+    for (int i = 0; i < count && remaining > 200; i++) {
+        /* Get bookmark count for this session */
+        int bookmark_count = bookmarks_count(sessions[i].session_id);
+        if (bookmark_count < 0) {
+            bookmark_count = 0;
+        }
+
         len = snprintf(ptr, remaining,
-                      "%s{\"id\":\"%s\",\"files\":%u,\"size\":%llu}",
+                      "%s{\"id\":\"%s\",\"files\":%u,\"size\":%llu,\"bookmarks\":%d}",
                       i > 0 ? "," : "",
                       sessions[i].session_id,
                       sessions[i].file_count,
-                      sessions[i].total_bytes);
+                      sessions[i].total_bytes,
+                      bookmark_count);
 
         /* Check if snprintf was truncated */
         if (len < 0 || len >= remaining) {
