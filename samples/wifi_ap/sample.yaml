@@ -1,0 +1,21 @@
+sample:
+  description: WiFi AP (Access Point) sample for ReSpeaker Clip
+    Creates a WiFi hotspot with DHCP server
+  name: wifi_ap
+common:
+  min_ram: 64
+  min_flash: 256
+  tags: wifi network
+  integration_platforms:
+    - clip/nrf5340/cpuapp
+tests:
+  sample.wifi_ap:
+    tags: wifi
+    platform_allow: clip/nrf5340/cpuapp
+    harness: console
+    harness_config:
+      type: multi_line
+      regex:
+        - "ReSpeaker Clip WiFi AP Sample"
+        - "AP enabled successfully"
+        - "WiFi AP is running"
