@@ -1075,6 +1075,9 @@ static int cmd_list(const struct at_command *cmd, char **response)
         int per_page = 10;  /* Default 10 items per page */
         int start_index, end_index;
 
+        /* Initialize session structure to ensure clean state */
+        memset(&session, 0, sizeof(session));
+
         /* Extract session_id (part before ? if present) */
         if (query) {
             size_t len = query - cmd->value;
@@ -1120,6 +1123,9 @@ static int cmd_list(const struct at_command *cmd, char **response)
                 bookmark_count = 0;
             }
 
+            /* Ensure mode string is null-terminated for safety */
+            session.mode[sizeof(session.mode) - 1] = '\0';
+
             int len = snprintf(json_buffer, sizeof(json_buffer),
                     "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u,"
                     "\"bookmarks\":%d,\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
@@ -1131,9 +1137,7 @@ static int cmd_list(const struct at_command *cmd, char **response)
                 return json_create_error("Response too large", response);
             }
 
-            /* Allocate and copy response */
-            *response = k_malloc(len + 1);
-            
+            /* Return response (using static buffer) */
             *response = json_buffer;
             return 0;
         }

@@ -159,7 +159,7 @@ void clip_main_loop(void);
 #endif
 
 #ifndef CONFIG_AT_CMD_STACK_SIZE
-#define CLIP_AT_CMD_STACK_SIZE            8192
+#define CLIP_AT_CMD_STACK_SIZE            16384  /* Increased from 8192 to prevent stack overflow */
 #else
 #define CLIP_AT_CMD_STACK_SIZE            CONFIG_AT_CMD_STACK_SIZE
 #endif

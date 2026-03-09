@@ -930,6 +930,7 @@ int storage_count_sessions(void)
 	}
 
 	fs_closedir(&dirp);
+
 	return count;
 }
 
@@ -1049,6 +1050,7 @@ int storage_list_sessions_paginated(struct storage_session_info *sessions,
 	}
 
 	fs_closedir(&dirp);
+
 	return result_count;
 }
 
