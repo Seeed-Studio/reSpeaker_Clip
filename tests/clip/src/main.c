@@ -14,6 +14,7 @@
 #include "button.h"
 #include "sdcard.h"
 #include "mic.h"
+#include "oled.h"
 
 LOG_MODULE_REGISTER(Lesson3_Exercise2, LOG_LEVEL_INF);
 
@@ -48,6 +49,19 @@ int main(void)
 		/* Continue anyway, MIC is optional */
 	}
 
+	/* Initialize OLED display */
+	ret = oled_init();
+	if (ret == 0) {
+		/* Run automatic tests on startup */
+		LOG_INF("Running OLED display tests...");
+		oled_test_pattern();
+		k_sleep(K_SECONDS(2));
+		oled_test_clear();
+	} else {
+		LOG_ERR("OLED display initialization failed: %d", ret);
+		/* Continue anyway, OLED is optional */
+	}
+
 	/* Initialize BLE - starts advertising automatically */
 	ret = ble_init();
 	if (ret != 0) {
@@ -68,6 +82,7 @@ int main(void)
 	printk("SD card: Use 'sd mount' to mount, 'fs ls /SD:' to list files\n");
 	printk("Flash: Use 'flash' commands for SPI flash operations\n");
 	printk("MIC: Use 'mic capture [time_sec]' to capture audio\n");
+	printk("OLED: Display initialized - showing test patterns\n");
 
 	return 0;
 }
