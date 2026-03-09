@@ -210,6 +210,25 @@ void clip_main_loop(void);
 #define BATTERY_POLL_INTERVAL_S           CONFIG_BATTERY_POLL_INTERVAL_S
 #endif
 
+/* AT command and JSON response configuration */
+#ifndef CONFIG_JSON_BUFFER_SIZE
+#define CLIP_JSON_BUFFER_SIZE             1024  /* 1KB JSON response buffer */
+#else
+#define CLIP_JSON_BUFFER_SIZE             CONFIG_JSON_BUFFER_SIZE
+#endif
+
+#ifndef CONFIG_AT_CMD_DEFAULT_PER_PAGE
+#define CLIP_AT_CMD_DEFAULT_PER_PAGE      10    /* Default items per page */
+#else
+#define CLIP_AT_CMD_DEFAULT_PER_PAGE      CONFIG_AT_CMD_DEFAULT_PER_PAGE
+#endif
+
+#ifndef CONFIG_AT_CMD_MAX_PER_PAGE
+#define CLIP_AT_CMD_MAX_PER_PAGE          15    /* Max items per page (fits in 1KB JSON) */
+#else
+#define CLIP_AT_CMD_MAX_PER_PAGE          CONFIG_AT_CMD_MAX_PER_PAGE
+#endif
+
 /* Default OLED contrast (0-255) */
 #define OLED_CONTRAST_DEFAULT  128
 

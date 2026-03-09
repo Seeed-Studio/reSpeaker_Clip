@@ -615,7 +615,7 @@ class ClipCommands:
 
         Args:
             page: Page number (default 1)
-            per_page: Items per page (default 10, max 50)
+            per_page: Items per page (default 10, max 15)
 
         Returns:
             List of SessionInfo objects
@@ -628,7 +628,15 @@ class ClipCommands:
             response = await self._send_and_check(f"AT+LIST?{page}&{per_page}")
 
         data = response.get('data', {})
-        sessions = data.get('sessions', [])
+
+        # Handle both old format (data is list) and new format (data is dict with 'sessions')
+        if isinstance(data, list):
+            # Old format: {"ok":true,"data":[{...},{...}]}
+            sessions = data
+        else:
+            # New format: {"ok":true,"data":{"sessions":[{...},{...}]}}
+            sessions = data.get('sessions', [])
+
         return [SessionInfo.from_dict(s) for s in sessions]
 
     async def get_session_info(self, session_id: str) -> 'SessionInfo':

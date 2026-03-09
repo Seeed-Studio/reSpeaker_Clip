@@ -483,26 +483,9 @@ class SessionSync(FileTransfer):
             else:
                 total_files = 0
 
-        # Determine start file based on synced_files from device
-        start_file = None
-        if synced_files > 0 and synced_files < total_files:
-            # Start from the file after the last synced file
-            next_num = synced_files + 1
-            start_file = f"{next_num:04d}.opus"
-        elif existing_files:
-            # Fallback: check local files if device doesn't have synced info
-            # Only accept NNNN.opus format (4-digit sequential files)
-            import re
-            for f in reversed(existing_files):
-                match = re.match(r'^(\d{4})$', f.stem)
-                if match:
-                    last_num = int(match.group(1))
-                    next_num = last_num + 1
-                    start_file = f"{next_num:04d}.opus"
-                    break
-
         # Check if already synced (all files exist locally)
         # Skip this check in continuous mode - always check for new files
+        # Do this check BEFORE calculating start_file to avoid incorrect resumption
         if not continuous and total_files > 0 and synced_files >= total_files:
             merged_path = output_dir / f"{session_id}.opus"
             result = {
@@ -521,6 +504,28 @@ class SessionSync(FileTransfer):
                 if merged_path.exists():
                     result["merged_file"] = str(merged_path)
             return result
+
+        # Determine start file based on synced_files from device
+        start_file = None
+        if synced_files > 0 and synced_files < total_files:
+            # Start from the file after the last synced file
+            next_num = synced_files + 1
+            start_file = f"{next_num:04d}.opus"
+        elif existing_files:
+            # Fallback: check local files if device doesn't have synced info
+            # Only accept NNNN.opus format (4-digit sequential files)
+            import re
+            for f in reversed(existing_files):
+                match = re.match(r'^(\d{4})$', f.stem)
+                if match:
+                    last_num = int(match.group(1))
+                    next_num = last_num + 1
+                    # Validate against total_files to prevent requesting non-existent files
+                    if total_files > 0 and next_num > total_files:
+                        # All files already synced, skip this session
+                        break
+                    start_file = f"{next_num:04d}.opus"
+                    break
 
         # Log sync info (use logging to avoid interfering with progress bar)
         import logging

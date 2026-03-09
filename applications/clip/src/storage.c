@@ -898,6 +898,169 @@ int storage_list_sessions(struct storage_session_info *sessions, int max_session
 	return count;
 }
 
+int storage_count_sessions(void)
+{
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+	int count = 0;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, "/SD:/REC");
+	if (rc != 0) {
+		/* REC directory doesn't exist yet - no sessions */
+		return 0;
+	}
+
+	/* Count session directories (fast, don't read contents) */
+	while (1) {
+		rc = fs_readdir(&dirp, &entry);
+		if (rc != 0 || entry.name[0] == 0) {
+			break;
+		}
+
+		/* Only count directories */
+		if (entry.type != FS_DIR_ENTRY_DIR) {
+			continue;
+		}
+
+		/* Check if directory name matches session format */
+		size_t len = strlen(entry.name);
+		bool is_timestamp = (len == 14);
+		bool is_rec_prefix = (len >= 7 && strncmp(entry.name, "REC_", 4) == 0);
+
+		if (is_timestamp || is_rec_prefix) {
+			count++;
+		}
+	}
+
+	fs_closedir(&dirp);
+	return count;
+}
+
+int storage_list_sessions_paginated(struct storage_session_info *sessions,
+                                   int offset, int limit)
+{
+	struct fs_dir_t dirp;
+	struct fs_dirent entry;
+	int rc;
+	int skip_count = 0;
+	int result_count = 0;
+
+	if (!sd_mounted) {
+		return -ENODEV;
+	}
+
+	if (!sessions || limit <= 0) {
+		return -EINVAL;
+	}
+
+	if (offset < 0) {
+		offset = 0;
+	}
+
+	fs_dir_t_init(&dirp);
+	rc = fs_opendir(&dirp, "/SD:/REC");
+	if (rc != 0) {
+		/* REC directory doesn't exist yet - no sessions */
+		return 0;
+	}
+
+	/* Scan for session directories with pagination */
+	while (result_count < limit) {
+		rc = fs_readdir(&dirp, &entry);
+		if (rc != 0 || entry.name[0] == 0) {
+			break;
+		}
+
+		/* Only look for directories */
+		if (entry.type != FS_DIR_ENTRY_DIR) {
+			continue;
+		}
+
+		/* Check if directory name matches session format */
+		size_t len = strlen(entry.name);
+		bool is_timestamp = (len == 14);
+		bool is_rec_prefix = (len >= 7 && strncmp(entry.name, "REC_", 4) == 0);
+
+		if (!is_timestamp && !is_rec_prefix) {
+			continue;
+		}
+
+		/* Skip sessions before offset */
+		if (skip_count < offset) {
+			skip_count++;
+			continue;
+		}
+
+		/* Count files and calculate size in this session */
+		char session_path[280];
+		struct fs_dir_t session_dir;
+		struct fs_dirent file_entry;
+		uint16_t file_count = 0;
+		uint64_t total_bytes = 0;
+
+		snprintf(session_path, sizeof(session_path), "/SD:/REC/%s", entry.name);
+		fs_dir_t_init(&session_dir);
+
+		rc = fs_opendir(&session_dir, session_path);
+		if (rc == 0) {
+			while (1) {
+				rc = fs_readdir(&session_dir, &file_entry);
+				if (rc != 0 || file_entry.name[0] == 0) {
+					break;
+				}
+
+				if (file_entry.type == FS_DIR_ENTRY_FILE &&
+				    strstr(file_entry.name, ".opus") != NULL) {
+					file_count++;
+					total_bytes += file_entry.size;
+				}
+			}
+
+			fs_closedir(&session_dir);
+		}
+
+		/* Skip empty sessions (unless it's the current recording session) */
+		if (file_count == 0 || total_bytes == 0) {
+			if (current_session_dir[0] != '\0') {
+				const char *session_start = strrchr(current_session_dir, '/');
+				if (session_start) {
+					session_start++;
+				} else {
+					session_start = current_session_dir;
+				}
+				if (strcmp(session_start, entry.name) == 0) {
+					/* Include empty current session */
+				} else {
+					storage_delete_empty_session(entry.name);
+					continue;
+				}
+			} else {
+				storage_delete_empty_session(entry.name);
+				continue;
+			}
+		}
+
+		/* Copy session info to output array */
+		strncpy(sessions[result_count].session_id, entry.name,
+		       sizeof(sessions[result_count].session_id) - 1);
+		sessions[result_count].session_id[sizeof(sessions[result_count].session_id) - 1] = '\0';
+		sessions[result_count].file_count = file_count;
+		sessions[result_count].total_bytes = total_bytes;
+		sessions[result_count].duration_sec = total_bytes / 3000;
+
+		result_count++;
+	}
+
+	fs_closedir(&dirp);
+	return result_count;
+}
+
 /* Simple string comparison for sorting */
 static int compare_filenames(const void *a, const void *b)
 {

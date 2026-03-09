@@ -174,6 +174,24 @@ struct storage_session_info {
 int storage_list_sessions(struct storage_session_info *sessions, int max_sessions);
 
 /**
+ * @brief Count total number of sessions (fast, doesn't read session details)
+ *
+ * @return Total session count, or negative error code
+ */
+int storage_count_sessions(void);
+
+/**
+ * @brief List sessions with pagination support
+ *
+ * @param sessions Output array for session info
+ * @param offset Starting offset (0-based)
+ * @param limit Maximum number of sessions to return
+ * @return Number of sessions returned, or negative error code
+ */
+int storage_list_sessions_paginated(struct storage_session_info *sessions,
+                                   int offset, int limit);
+
+/**
  * @brief Get session file list
  *
  * @param session_id Session ID
