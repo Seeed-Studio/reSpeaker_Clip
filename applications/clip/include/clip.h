@@ -147,7 +147,7 @@ void clip_main_loop(void);
 
 /* Thread stack sizes */
 #ifndef CONFIG_AUDIO_STACK_SIZE
-#define CLIP_AUDIO_STACK_SIZE             65536
+#define CLIP_AUDIO_STACK_SIZE             32768  /* Reduced from 65536 for memory optimization */
 #else
 #define CLIP_AUDIO_STACK_SIZE             CONFIG_AUDIO_STACK_SIZE
 #endif
@@ -165,7 +165,7 @@ void clip_main_loop(void);
 #endif
 
 #ifndef CONFIG_BUTTON_WORK_STACK_SIZE
-#define CLIP_BUTTON_WORK_STACK_SIZE       16384
+#define CLIP_BUTTON_WORK_STACK_SIZE       4096
 #else
 #define CLIP_BUTTON_WORK_STACK_SIZE       CONFIG_BUTTON_WORK_STACK_SIZE
 #endif
