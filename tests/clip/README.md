@@ -42,20 +42,120 @@ ble scan             # Scan for BLE devices
 
 ### 2. WiFi Test
 
-**Purpose**: Test nRF7002 WiFi module connectivity
+**Purpose**: Test nRF7002 WiFi module connectivity and throughput
 
-**Commands**:
+**Device Configuration**:
+- MAC Address: 14:5A:FC:5E:37:9C (fixed in prj.conf)
+- Supports: 2.4GHz only (802.11 b/g/n)
+
+**Basic Commands**:
 ```bash
-wifi on              # Enable WiFi
-wifi scan            # Scan for networks
+wifi on              # Enable WiFi module
+wifi scan            # Scan for networks (shows SSID, RSSI, Channel)
 wifi connect <SSID> [password]  # Connect to network
-wifi ip              # Show IP address
+wifi ip              # Show assigned IP address
+wifi disconnect      # Disconnect from network
 ```
 
 **Expected Results**:
-- WiFi powers on successfully
-- Scan finds available networks
+- WiFi powers on successfully (no error messages)
+- Scan finds available networks with RSSI values
 - Connection establishes with valid credentials
+- DHCP assigns IP address (usually 192.168.x.x)
+
+---
+
+#### WiFi Throughput Testing (with iperf3)
+
+**Prerequisites - PC Setup**:
+
+1. Install iperf3 on PC:
+```bash
+# Linux (Ubuntu/Debian)
+sudo apt-get install iperf3
+
+# macOS
+brew install iperf3
+
+# Windows
+# Download from https://iperf.fr/iperf-download.php#windows
+# Or use WSL: wsl sudo apt-get install iperf3
+```
+
+2. Connect PC to same WiFi network as device
+
+**Test Procedure**:
+
+**Step 1: Find device IP address**
+```bash
+# On device
+wifi ip
+# Note the IP address, e.g., 192.168.1.100
+```
+
+**Step 2: Start iperf3 server on PC**
+```bash
+# On PC
+iperf3 -s
+
+# Optional: Specify port
+iperf3 -s -p 5201
+```
+
+**Step 3: Run iperf3 client on device**
+```bash
+# On device - TCP download test
+zperf -v4 download <PC_IP> 5001
+
+# Or use shell command (if available)
+# This tests UDP throughput from device to PC
+```
+
+**Step 4: Reverse test (PC → Device)**
+```bash
+# On device - Start receiver
+zperf -v4 upload 5001
+
+# On PC - Send data
+iperf3 -c <DEVICE_IP> -t 10
+```
+
+**Expected Throughput**:
+- TCP: 5-15 Mbps (typical for 2.4GHz WiFi with nRF7002)
+- UDP: 10-20 Mbps (depending on packet loss)
+- Latency: 10-50ms (local network)
+
+**Troubleshooting WiFi Issues**:
+
+| Problem | Solution |
+|---------|----------|
+| No networks found | Check antenna connection, verify 2.4GHz router |
+| Connection fails | Verify SSID/password, check router security type |
+| No IP address | Check DHCP on router, try static IP |
+| Low throughput | Check interference, distance from router |
+| Intermittent drops | Check power supply, antenna orientation |
+
+---
+
+#### Advanced WiFi Testing
+
+**Packet Capture**:
+```bash
+# Requires hostapd with monitoring mode
+# Not typically available in embedded test setup
+```
+
+**Channel Testing**:
+```bash
+# Scan shows channels 1-13 for 2.4GHz
+# Check which channels have least interference (lower RSSI = cleaner)
+```
+
+**WiFi Module Information**:
+```bash
+# Check module status via shell
+wifi              # Shows connection status
+```
 
 ### 3. SD Card Test
 

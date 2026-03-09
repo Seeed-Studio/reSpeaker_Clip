@@ -81,11 +81,16 @@ _________________________________________________________
 | Scan | `wifi scan` | Networks listed | ______ | [ ] [ ] |
 | Connect | `wifi connect <SSID>` | Connected | ______ | [ ] [ ] |
 | IP | `wifi ip` | IP address shown | ______ | [ ] [ ] |
+| Throughput | `zperf download <PC_IP>` | 5-15 Mbps | ______ | [ ] [ ] |
 
 **Networks Found**: ______
 **Connected to**: ______
 **IP Address**: ______
+**TCP Throughput**: ______ Mbps
+**UDP Throughput**: ______ Mbps
+**iperf3 installed on PC**: [ ] Yes [ ] No [ ] N/A
 **Notes**: _________________________________________________
+_________________________________________________________
 
 ### 7. Bluetooth
 | Test | Command | Expected | Actual | Result |

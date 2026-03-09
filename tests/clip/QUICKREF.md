@@ -44,6 +44,24 @@ motor pulse 200     # 200ms pulse
 ble scan            # Scan for BLE devices
 wifi on             # Enable WiFi
 wifi scan           # Scan for WiFi networks
+wifi connect <SSID> [password]  # Connect to WiFi
+wifi ip             # Check IP address
+```
+
+### WiFi Throughput Test (requires iperf3 on PC)
+```
+# Step 1: Install iperf3 on PC
+# Linux: sudo apt-get install iperf3
+# macOS: brew install iperf3
+# Windows: Download from iperf.fr
+
+# Step 2: Start iperf3 server on PC
+iperf3 -s
+
+# Step 3: Run test from device (get device IP from 'wifi ip')
+zperf -v4 download <PC_IP> 5001
+
+# Expected: 5-15 Mbps TCP, 10-20 Mbps UDP
 ```
 
 ### Storage Test
