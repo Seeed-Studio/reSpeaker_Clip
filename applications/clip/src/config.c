@@ -227,13 +227,6 @@ int config_init(void)
                 g_config.bitrate, g_config.complexity);
     }
 
-    /* TEMPORARY: Force enhanced mode and 24kbps */
-    g_config.mode = MODE_ENHANCED;
-    g_config.bitrate = 24000;
-    g_config.noise_suppress = 0;
-    g_config.dereverb_enabled = false;
-    LOG_INF("Config forced: enhanced mode, 24kbps, DSP disabled");
-
     /* Load time settings separately (ignore errors - time is optional) */
     settings_load_subtree("time");
 #else
