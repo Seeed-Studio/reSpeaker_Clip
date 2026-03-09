@@ -31,10 +31,11 @@
 LOG_MODULE_REGISTER(at_cmd, LOG_LEVEL_INF);
 
 /* Shared JSON response buffer to reduce stack usage
- * Increased size to support many bookmarks (up to BOOKMARKS_MAX_COUNT)
- * Each bookmark ~100 bytes in JSON, so 100 bookmarks = ~10KB
+ * Reduced to 1KB for paginated responses (max 10-20 items per page)
+ * Each item is ~50-100 bytes, so 1KB is sufficient for paginated responses
  */
-static char json_buffer[16384];
+#define JSON_BUFFER_SIZE 1024
+static char json_buffer[JSON_BUFFER_SIZE];
 
 /* Helper function to trim whitespace */
 static void trim_whitespace(char *str)
@@ -72,55 +73,6 @@ static int extract_int(const char *str, int *value)
 
     *value = (int)val;
     return 0;
-}
-
-/* JSON string escaping - escapes special characters for valid JSON */
-static void json_escape_string(char *dest, const char *src, size_t dest_size)
-{
-    size_t j = 0;
-
-    if (!dest || dest_size == 0) {
-        return;
-    }
-
-    for (size_t i = 0; src[i] != '\0' && j < dest_size - 1; i++) {
-        switch (src[i]) {
-        case '"':
-        case '\\':
-            /* Escape quote and backslash */
-            if (j + 1 < dest_size - 1) {
-                dest[j++] = '\\';
-                dest[j++] = src[i];
-            }
-            break;
-        case '\n':
-            /* Escape newline */
-            if (j + 1 < dest_size - 1) {
-                dest[j++] = '\\';
-                dest[j++] = 'n';
-            }
-            break;
-        case '\r':
-            /* Escape carriage return */
-            if (j + 1 < dest_size - 1) {
-                dest[j++] = '\\';
-                dest[j++] = 'r';
-            }
-            break;
-        case '\t':
-            /* Escape tab */
-            if (j + 1 < dest_size - 1) {
-                dest[j++] = '\\';
-                dest[j++] = 't';
-            }
-            break;
-        default:
-            /* Copy character as-is */
-            dest[j++] = src[i];
-            break;
-        }
-    }
-    dest[j] = '\0';
 }
 
 #ifdef CONFIG_SETTINGS
@@ -969,7 +921,6 @@ static int cmd_stop(const struct at_command *cmd, char **response)
 static int cmd_mark(const struct at_command *cmd, char **response)
 {
     int err;
-    const char *note = cmd->value ? cmd->value : "";
 
     /* Check if recording */
     if (state_get_current() != CLIP_STATE_RECORDING) {
@@ -977,7 +928,7 @@ static int cmd_mark(const struct at_command *cmd, char **response)
     }
 
     /* Add bookmark via audio module */
-    err = audio_add_bookmark(note);
+    err = audio_add_bookmark();
     if (err != 0) {
         return json_create_error("Failed to add bookmark", response);
     }
@@ -985,30 +936,11 @@ static int cmd_mark(const struct at_command *cmd, char **response)
     /* Trigger mark animation on UI */
     ui_post_event(UI_EVT_MARK);
 
-    LOG_INF("Bookmark added at %u seconds: %s", g_recording_time, note);
+    LOG_INF("Bookmark added at %u seconds", g_recording_time);
 
-    char data[256];
-    char escaped_note[128];
-    json_escape_string(escaped_note, note, sizeof(escaped_note));
-
-    /* Get current filename */
-    const char *filename = audio_get_current_filename();
-    char escaped_filename[64];
-    if (filename) {
-        json_escape_string(escaped_filename, filename, sizeof(escaped_filename));
-    } else {
-        escaped_filename[0] = '\0';
-    }
-
-    snprintf(data, sizeof(data),
-             "{\"timestamp\":%u,"
-             "\"offset\":%u,"
-             "\"note\":\"%s\","
-             "\"file\":\"%s\"}",
-             (uint32_t)(k_uptime_get() / 1000),
-             g_recording_time,
-             escaped_note,
-             escaped_filename);
+    /* Return simplified response with just the offset */
+    char data[64];
+    snprintf(data, sizeof(data), "{\"offset\":%u}", g_recording_time);
 
     return json_create_success(data, response);
 }
@@ -1016,25 +948,128 @@ static int cmd_mark(const struct at_command *cmd, char **response)
 static int cmd_list(const struct at_command *cmd, char **response)
 {
     /* If value provided, return session summary (files count, total size, audio format)
-     * File names are sequential (001.opus, 002.opus...), so no need to list them all
+     * File names are sequential (0001.opus, 0002.opus...), so no need to list them all
+     *
+     * Pagination support: AT+LIST=<session_id>?<page>&<per_page>
+     * If query string present, returns paginated file list with names
      */
     if (cmd->value) {
         struct storage_session_info session;
         int ret;
+        char session_id[32] = {0};
+        const char *query = strchr(cmd->value, '?');
+        int page = 1;
+        int per_page = 10;  /* Default 10 items per page */
+        int start_index, end_index;
+
+        /* Extract session_id (part before ? if present) */
+        if (query) {
+            size_t len = query - cmd->value;
+            if (len >= sizeof(session_id)) {
+                len = sizeof(session_id) - 1;
+            }
+            strncpy(session_id, cmd->value, len);
+            session_id[len] = '\0';
+
+            /* Parse pagination: page&per_page */
+            /* Use local buffer for parsing */
+            char query_buf[32];
+            strncpy(query_buf, query + 1, sizeof(query_buf) - 1);
+            query_buf[sizeof(query_buf) - 1] = '\0';
+
+            char *token = strtok(query_buf, "&");
+            if (token) {
+                page = atoi(token);
+                if (page < 1) page = 1;
+            }
+            token = strtok(NULL, "&");
+            if (token) {
+                per_page = atoi(token);
+                if (per_page < 1) per_page = 10;
+                if (per_page > 50) per_page = 50; /* Cap at 50 for safety */
+            }
+        } else {
+            strncpy(session_id, cmd->value, sizeof(session_id) - 1);
+            session_id[sizeof(session_id) - 1] = '\0';
+        }
 
         /* Get session info */
-        ret = storage_get_session_info(cmd->value, &session);
+        ret = storage_get_session_info(session_id, &session);
         if (ret != 0) {
             return json_create_error("Session not found", response);
         }
 
-        /* Return summary with audio format info:
-         * {"ok":true,"data":{"files":N,"size":S,"synced":M,"channels":C,"sample_rate":R,"mode":"X"}} */
-        snprintf(json_buffer, sizeof(json_buffer),
-                "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u,"
-                "\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
-                session.file_count, (uint32_t)session.total_bytes, session.synced_files,
-                session.channels, session.sample_rate_khz * 1000, session.mode);
+        /* If no pagination requested, return summary only */
+        if (!query) {
+            int len = snprintf(json_buffer, sizeof(json_buffer),
+                    "{\"ok\":true,\"data\":{\"files\":%u,\"size\":%u,\"synced\":%u,"
+                    "\"channels\":%u,\"sample_rate\":%u,\"mode\":\"%s\"}}",
+                    session.file_count, (uint32_t)session.total_bytes, session.synced_files,
+                    session.channels, session.sample_rate_khz * 1000, session.mode);
+
+            /* Check for buffer overflow */
+            if (len < 0 || len >= sizeof(json_buffer)) {
+                return json_create_error("Response too large", response);
+            }
+
+            /* Allocate and copy response */
+            *response = k_malloc(len + 1);
+            if (!*response) {
+                return json_create_error("Out of memory", response);
+            }
+            strcpy(*response, json_buffer);
+            return 0;
+        }
+
+        /* Paginated file list - generate file names since they're sequential */
+        start_index = (page - 1) * per_page;
+        if (start_index >= session.file_count) {
+            /* Page beyond available data */
+            int len = snprintf(json_buffer, sizeof(json_buffer),
+                    "{\"ok\":true,\"data\":{\"total\":%u,\"page\":%d,\"per_page\":%d,\"files\":[]}}",
+                    session.file_count, page, per_page);
+            if (len < 0 || len >= sizeof(json_buffer)) {
+                return json_create_error("Response too large", response);
+            }
+        } else {
+            end_index = start_index + per_page;
+            if (end_index > session.file_count) {
+                end_index = session.file_count;
+            }
+
+            /* Build paginated response with file names */
+            char *ptr = json_buffer;
+            int remaining = sizeof(json_buffer);
+            int len;
+
+            len = snprintf(ptr, remaining,
+                         "{\"ok\":true,\"data\":{\"total\":%u,\"page\":%d,\"per_page\":%d,\"files\":[",
+                         session.file_count, page, per_page);
+            if (len < 0 || len >= remaining) {
+                return json_create_error("Response too large", response);
+            }
+            ptr += len;
+            remaining -= len;
+
+            /* Add file names (0001.opus, 0002.opus, etc.) */
+            for (int i = start_index; i < end_index && remaining > 50; i++) {
+                len = snprintf(ptr, remaining,
+                              "%s\"%04u.opus\"",
+                              (i > start_index) ? "," : "",
+                              i + 1);
+                if (len < 0 || len >= remaining) {
+                    break;
+                }
+                ptr += len;
+                remaining -= len;
+            }
+
+            /* Close JSON array - check remaining space */
+            if (remaining < 4) {
+                return json_create_error("Response too large", response);
+            }
+            snprintf(ptr, remaining, "]}}");
+        }
 
         /* Allocate and copy response */
         *response = k_malloc(strlen(json_buffer) + 1);
@@ -1042,7 +1077,6 @@ static int cmd_list(const struct at_command *cmd, char **response)
             return json_create_error("Out of memory", response);
         }
         strcpy(*response, json_buffer);
-
         return 0;
     }
 
@@ -1066,18 +1100,24 @@ static int cmd_list(const struct at_command *cmd, char **response)
     /* Build complete JSON response in shared buffer (no nested allocation) */
     char *ptr = json_buffer;
     int remaining = sizeof(json_buffer);
+    int len;
 
     /* Start with {"ok":true,"data":[ */
-    ptr += snprintf(ptr, remaining, "{\"ok\":true,\"data\":[");
-    remaining = sizeof(json_buffer) - (ptr - json_buffer);
+    len = snprintf(ptr, remaining, "{\"ok\":true,\"data\":[");
+    if (len < 0 || len >= remaining) {
+        k_free(sessions);
+        return json_create_error("Response too large", response);
+    }
+    ptr += len;
+    remaining -= len;
 
     for (int i = 0; i < count && remaining > 150; i++) {
-        int len = snprintf(ptr, remaining,
-                          "%s{\"id\":\"%s\",\"files\":%u,\"size\":%llu}",
-                          i > 0 ? "," : "",
-                          sessions[i].session_id,
-                          sessions[i].file_count,
-                          sessions[i].total_bytes);
+        len = snprintf(ptr, remaining,
+                      "%s{\"id\":\"%s\",\"files\":%u,\"size\":%llu}",
+                      i > 0 ? "," : "",
+                      sessions[i].session_id,
+                      sessions[i].file_count,
+                      sessions[i].total_bytes);
 
         /* Check if snprintf was truncated */
         if (len < 0 || len >= remaining) {
@@ -1089,13 +1129,11 @@ static int cmd_list(const struct at_command *cmd, char **response)
     }
 
     /* Close with ]} - check space first */
-    if (remaining > 10) {
-        snprintf(ptr, remaining, "]}");
-    } else {
-        /* Buffer too small, go back and close properly */
-        ptr[-1] = '\0';  /* Remove trailing comma */
-        snprintf(ptr - 1, remaining + 1, "]}");
+    if (remaining < 4) {
+        k_free(sessions);
+        return json_create_error("Response too large", response);
     }
+    snprintf(ptr, remaining, "]}");
 
     k_free(sessions);
 
@@ -1184,7 +1222,10 @@ static int cmd_marks(const struct at_command *cmd, char **response)
 {
     struct bookmark *bookmarks = NULL;
     int total_count;
+    int page = 1;           /* Default page 1 */
+    int per_page = 10;      /* Default 10 items per page */
     int start_index = 0;
+    int end_index;
     int return_count;
     char *ptr = json_buffer;
     int remaining = sizeof(json_buffer);
@@ -1194,7 +1235,7 @@ static int cmd_marks(const struct at_command *cmd, char **response)
         return json_create_error("Missing session ID", response);
     }
 
-    /* Parse session_id and optional start index (format: "session_id?start" or "session_id") */
+    /* Parse session_id and optional pagination (format: "session_id?page&per_page" or "session_id") */
     const char *query = strchr(cmd->value, '?');
 
     if (query) {
@@ -1205,6 +1246,24 @@ static int cmd_marks(const struct at_command *cmd, char **response)
         }
         strncpy(session_id, cmd->value, len);
         session_id[len] = '\0';
+
+        /* Parse pagination: page&per_page */
+        /* Use local buffer for parsing */
+        char query_buf[32];
+        strncpy(query_buf, query + 1, sizeof(query_buf) - 1);
+        query_buf[sizeof(query_buf) - 1] = '\0';
+
+        char *token = strtok(query_buf, "&");
+        if (token) {
+            page = atoi(token);
+            if (page < 1) page = 1;
+        }
+        token = strtok(NULL, "&");
+        if (token) {
+            per_page = atoi(token);
+            if (per_page < 1) per_page = 10;
+            if (per_page > 50) per_page = 50; /* Cap at 50 for safety */
+        }
     } else {
         strncpy(session_id, cmd->value, sizeof(session_id) - 1);
         session_id[sizeof(session_id) - 1] = '\0';
@@ -1221,80 +1280,85 @@ static int cmd_marks(const struct at_command *cmd, char **response)
         total_count = 0;
     }
 
-    /* Parse start index if present */
-    if (query) {
-        start_index = atoi(query + 1);
-        if (start_index < 0 || start_index >= total_count) {
-            start_index = 0;
-        }
-    }
-
-    /* Check if query requested (has ?) or total is small enough to return all */
-    bool want_detail = (query != NULL) || (total_count <= 20);
-
-    if (!want_detail) {
-        /* Return summary only */
-        snprintf(json_buffer, sizeof(json_buffer),
-                 "{\"count\":%d,\"marks_file\":\"marks.bin\"}",
+    /* If no query string, return summary only */
+    if (!query) {
+        int len = snprintf(json_buffer, sizeof(json_buffer),
+                 "{\"total\":%d,\"marks_file\":\"marks.bin\"}",
                  total_count);
+        if (len < 0 || len >= sizeof(json_buffer)) {
+            return json_create_error("Response too large", response);
+        }
         return json_create_success(json_buffer, response);
     }
 
-    /* Allocate buffer for bookmarks */
-    bookmarks = k_malloc(BOOKMARKS_MAX_COUNT * sizeof(struct bookmark));
+    /* Calculate pagination bounds */
+    start_index = (page - 1) * per_page;
+    if (start_index >= total_count && total_count > 0) {
+        /* Page beyond available data */
+        int len = snprintf(json_buffer, sizeof(json_buffer),
+                 "{\"total\":%d,\"page\":%d,\"per_page\":%d,\"bookmarks\":[]}",
+                 total_count, page, per_page);
+        if (len < 0 || len >= sizeof(json_buffer)) {
+            return json_create_error("Response too large", response);
+        }
+        return json_create_success(json_buffer, response);
+    }
+
+    end_index = start_index + per_page;
+    if (end_index > total_count) {
+        end_index = total_count;
+    }
+
+    /* Only allocate what we need for this page */
+    int alloc_count = end_index - start_index;
+    if (alloc_count > per_page) {
+        alloc_count = per_page;
+    }
+
+    bookmarks = k_malloc(alloc_count * sizeof(struct bookmark));
     if (!bookmarks) {
         return json_create_error("Out of memory", response);
     }
 
-    /* Get bookmarks for session */
-    return_count = bookmarks_get_all(session_id, bookmarks, BOOKMARKS_MAX_COUNT);
+    /* Get bookmarks for this page using new API */
+    return_count = bookmarks_get_page(session_id, page, per_page, bookmarks, alloc_count);
     if (return_count < 0) {
         k_free(bookmarks);
         return json_create_error("Failed to get bookmarks", response);
     }
 
-    /* Clamp start_index */
-    if (start_index >= return_count) {
-        start_index = 0;
+    /* Build paginated JSON response - simplified to only show offset */
+    int len = snprintf(json_buffer, sizeof(json_buffer),
+                     "{\"total\":%d,\"page\":%d,\"per_page\":%d,\"bookmarks\":[",
+                     total_count, page, per_page);
+    if (len < 0 || len >= sizeof(json_buffer)) {
+        k_free(bookmarks);
+        return json_create_error("Response too large", response);
     }
+    ptr = json_buffer + len;
+    remaining = sizeof(json_buffer) - len;
 
-    /* Build JSON response - simplified: only offset and note */
-    if (query) {
-        /* Paginated response */
-        ptr += snprintf(ptr, remaining, "{\"total\":%d,\"start\":%d,\"bookmarks\":[",
-                       total_count, start_index);
-    } else {
-        /* Full response */
-        ptr += snprintf(ptr, remaining, "{\"total\":%d,\"bookmarks\":[", total_count);
-    }
-    remaining = sizeof(json_buffer) - (ptr - json_buffer);
+    /* Add bookmarks for this page - only offset (no note, no timestamp) */
+    int items_added = 0;
+    for (int i = 0; i < return_count && remaining > 50; i++) {
+        len = snprintf(ptr, remaining,
+                      "%s{\"offset\":%u}",
+                      (items_added > 0) ? "," : "",
+                      bookmarks[i].offset_sec);
 
-    /* Add bookmarks (from start_index) - only offset and note */
-    for (int i = start_index; i < return_count && remaining > 50; i++) {
-        char escaped_note[32];
-        json_escape_string(escaped_note, bookmarks[i].note, sizeof(escaped_note));
-
-        /* Format: {"offset":30,"note":"xxx"} or {"offset":30} if no note */
-        const char *fmt;
-        if (bookmarks[i].note[0] != '\0') {
-            fmt = "%s{\"offset\":%u,\"note\":\"%s\"}";
-        } else {
-            fmt = "%s{\"offset\":%u}";
+        if (len < 0 || len >= remaining) {
+            break; /* Buffer full */
         }
-
-        int len = snprintf(ptr, remaining, fmt,
-                          (i > start_index) ? "," : "",
-                          bookmarks[i].offset_sec,
-                          escaped_note);
         ptr += len;
         remaining -= len;
-
-        /* Stop if buffer is getting full */
-        if (remaining < 80) {
-            break;
-        }
+        items_added++;
     }
 
+    /* Close JSON array - check remaining space */
+    if (remaining < 4) {
+        k_free(bookmarks);
+        return json_create_error("Response too large", response);
+    }
     snprintf(ptr, remaining, "]}");
 
     k_free(bookmarks);
@@ -1496,18 +1560,26 @@ static int cmd_purge(const struct at_command *cmd, char **response)
     /* Build deleted list JSON */
     char *ptr = deleted_list;
     int remaining = sizeof(deleted_list);
+    int len;
 
-    ptr += snprintf(ptr, remaining, "{\"deleted\":[");
-    remaining = sizeof(deleted_list) - (ptr - deleted_list);
+    len = snprintf(ptr, remaining, "{\"deleted\":[");
+    if (len < 0 || len >= remaining) {
+        return json_create_error("Response too large", response);
+    }
+    ptr += len;
+    remaining -= len;
 
     /* Delete all sessions */
     for (int i = 0; i < count && remaining > 50; i++) {
         int err = storage_delete_session(sessions[i].session_id);
         if (err == 0) {
-            int len = snprintf(ptr, remaining,
+            len = snprintf(ptr, remaining,
                               "%s\"%s\"",
                               deleted_count > 0 ? "," : "",
                               sessions[i].session_id);
+            if (len < 0 || len >= remaining) {
+                break; /* Buffer full, stop adding */
+            }
             ptr += len;
             remaining -= len;
             total_freed += sessions[i].total_bytes;
@@ -1515,6 +1587,10 @@ static int cmd_purge(const struct at_command *cmd, char **response)
         }
     }
 
+    /* Check remaining space before closing */
+    if (remaining < 30) {
+        return json_create_error("Response too large", response);
+    }
     snprintf(ptr, remaining, "],\"freed\":%llu}", total_freed);
 
     return json_create_success(deleted_list, response);
