@@ -15,21 +15,12 @@
 
 LOG_MODULE_REGISTER(bookmarks, LOG_LEVEL_INF);
 
-/* In-memory bookmark storage */
-static struct bookmark bookmark_cache[BOOKMARKS_MAX_COUNT];
-static int bookmark_cache_count = 0;
-static char current_session_id[32] = {0};
-
 /* File format: binary
  * [Header: 4 bytes magic "BMRK"]
  * [Count: 2 bytes, uint16_t]
- * [Bookmarks: variable]
+ * [Bookmarks: 4 bytes each, uint32_t]
  *   Each bookmark:
- *   [Timestamp: 4 bytes, uint32_t]
- *   [Offset: 4 bytes, uint32_t]
- *   [File index: 2 bytes, uint16_t]
- *   [File offset: 4 bytes, uint32_t]
- *   [Note: 64 bytes, null-terminated string]
+ *   [Offset: 4 bytes, uint32_t - seconds from session start]
  */
 
 #define BOOKMARK_MAGIC "BMRK"
@@ -46,117 +37,10 @@ static int bookmarks_get_filepath(const char *session_id, char *filepath, size_t
 	return 0;
 }
 
-int bookmarks_init(const char *session_id)
+int bookmarks_add(const char *session_id, uint32_t offset_sec)
 {
-	if (!session_id) {
-		return -EINVAL;
-	}
-
-	/* Check if session changed */
-	if (strcmp(current_session_id, session_id) != 0) {
-		/* Save previous session bookmarks */
-		if (current_session_id[0] != '\0' && bookmark_cache_count > 0) {
-			bookmarks_save(current_session_id);
-		}
-
-		/* Clear cache */
-		memset(bookmark_cache, 0, sizeof(bookmark_cache));
-		bookmark_cache_count = 0;
-
-		/* Set new session */
-		strncpy(current_session_id, session_id, sizeof(current_session_id) - 1);
-
-		/* Load bookmarks for new session */
-		bookmarks_load(session_id);
-	}
-
-	return 0;
-}
-
-int bookmarks_add(const char *session_id, const struct bookmark *bookmark)
-{
-	if (!session_id || !bookmark) {
-		return -EINVAL;
-	}
-
-	/* Check if session changed */
-	if (strcmp(current_session_id, session_id) != 0) {
-		bookmarks_init(session_id);
-	}
-
-	/* Check if cache is full */
-	if (bookmark_cache_count >= BOOKMARKS_MAX_COUNT) {
-		LOG_WRN("Bookmark cache full (%d)", BOOKMARKS_MAX_COUNT);
-		return -ENOMEM;
-	}
-
-	/* Add to cache */
-	memcpy(&bookmark_cache[bookmark_cache_count], bookmark, sizeof(*bookmark));
-	bookmark_cache_count++;
-
-	LOG_DBG("Added bookmark %d: offset=%u sec", bookmark_cache_count, bookmark->offset_sec);
-
-	return 0;
-}
-
-int bookmarks_get_all(const char *session_id, struct bookmark *bookmarks, int max_count)
-{
-	if (!session_id || !bookmarks || max_count <= 0) {
-		return -EINVAL;
-	}
-
-	/* Load from file if different session */
-	if (strcmp(current_session_id, session_id) != 0) {
-		bookmarks_init(session_id);
-	}
-
-	/* Copy bookmarks */
-	int count = (bookmark_cache_count < max_count) ? bookmark_cache_count : max_count;
-	memcpy(bookmarks, bookmark_cache, count * sizeof(struct bookmark));
-
-	return count;
-}
-
-int bookmarks_clear(const char *session_id)
-{
-	if (!session_id) {
-		return -EINVAL;
-	}
-
-	/* Check if this is the current session */
-	if (strcmp(current_session_id, session_id) == 0) {
-		memset(bookmark_cache, 0, sizeof(bookmark_cache));
-		bookmark_cache_count = 0;
-	}
-
-	/* Delete the marks.bin file */
-	char filepath[128];
-	bookmarks_get_filepath(session_id, filepath, sizeof(filepath));
-	fs_unlink(filepath);
-
-	LOG_INF("Cleared bookmarks for session: %s", session_id);
-
-	return 0;
-}
-
-int bookmarks_count(const char *session_id)
-{
-	if (!session_id) {
-		return -EINVAL;
-	}
-
-	/* Load from file if different session */
-	if (strcmp(current_session_id, session_id) != 0) {
-		bookmarks_init(session_id);
-	}
-
-	return bookmark_cache_count;
-}
-
-int bookmarks_save(const char *session_id)
-{
-	char filepath[128];
 	struct fs_file_t file;
+	char filepath[128];
 	ssize_t written;
 	int ret;
 
@@ -164,184 +48,192 @@ int bookmarks_save(const char *session_id)
 		return -EINVAL;
 	}
 
-	if (bookmark_cache_count == 0) {
-		LOG_DBG("No bookmarks to save");
-		return 0;
-	}
-
 	/* Get file path */
 	ret = bookmarks_get_filepath(session_id, filepath, sizeof(filepath));
-	if (ret != 0) {
+	if (ret < 0) {
 		return ret;
 	}
 
-	/* Open file for writing */
+	/* Open file in append mode (create if doesn't exist) */
 	fs_file_t_init(&file);
-	ret = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
-	if (ret != 0) {
-		LOG_ERR("Failed to open bookmark file: %d", ret);
+	ret = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND);
+	if (ret < 0) {
+		LOG_ERR("Failed to open bookmarks file: %d", ret);
 		return ret;
 	}
 
-	/* Write header */
-	char header[6] = BOOKMARK_MAGIC;
-	memcpy(&header[4], &bookmark_cache_count, 2);
-
-	written = fs_write(&file, header, 6);
-	if (written < 6) {
-		LOG_ERR("Failed to write header: %zd", written);
+	/* Write bookmark (4 bytes: offset in seconds) */
+	written = fs_write(&file, &offset_sec, sizeof(uint32_t));
+	if (written != sizeof(uint32_t)) {
+		LOG_ERR("Failed to write bookmark: %zd", written);
 		fs_close(&file);
 		return -EIO;
 	}
 
-	/* Write bookmarks */
-	for (int i = 0; i < bookmark_cache_count; i++) {
-		uint8_t buffer[76];  /* 4+4+2+4+64 = 78 bytes, but let's use 76 for alignment */
-		uint8_t *ptr = buffer;
-
-		/* Timestamp */
-		memcpy(ptr, &bookmark_cache[i].timestamp, 4);
-		ptr += 4;
-
-		/* Offset */
-		memcpy(ptr, &bookmark_cache[i].offset_sec, 4);
-		ptr += 4;
-
-		/* File index */
-		memcpy(ptr, &bookmark_cache[i].file_index, 2);
-		ptr += 2;
-
-		/* File offset */
-		memcpy(ptr, &bookmark_cache[i].file_offset, 4);
-		ptr += 4;
-
-		/* Note */
-		memset(ptr, 0, 64);
-		strncpy((char *)ptr, bookmark_cache[i].note, 63);
-		ptr += 64;
-
-		written = fs_write(&file, buffer, 76);
-		if (written < 76) {
-			LOG_ERR("Failed to write bookmark %d: %zd", i, written);
-			fs_close(&file);
-			return -EIO;
-		}
-	}
-
 	fs_close(&file);
 
-	LOG_INF("Saved %d bookmarks for session: %s", bookmark_cache_count, session_id);
+	LOG_DBG("Added bookmark at %u seconds", offset_sec);
 
 	return 0;
 }
 
-int bookmarks_load(const char *session_id)
+int bookmarks_get_page(const char *session_id, int page, int per_page,
+                      struct bookmark *bookmarks, int max_count)
 {
-	char filepath[128];
 	struct fs_file_t file;
-	ssize_t bytes_read;
-	int ret;
+	char filepath[128];
+	uint8_t header[6];
+	ssize_t ret;
+	uint16_t count;
+	int start_index, end_index;
 
-	if (!session_id) {
+	if (!session_id || !bookmarks || max_count <= 0) {
 		return -EINVAL;
 	}
 
-	/* Clear cache */
-	memset(bookmark_cache, 0, sizeof(bookmark_cache));
-	bookmark_cache_count = 0;
+	if (page < 1 || per_page < 1) {
+		return -EINVAL;
+	}
 
 	/* Get file path */
 	ret = bookmarks_get_filepath(session_id, filepath, sizeof(filepath));
-	if (ret != 0) {
+	if (ret < 0) {
 		return ret;
 	}
 
-	/* Open file for reading */
+	/* Open file */
 	fs_file_t_init(&file);
 	ret = fs_open(&file, filepath, FS_O_READ);
-	if (ret != 0) {
-		/* File doesn't exist yet - create empty file */
-		fs_file_t_init(&file);
-		ret = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
-		if (ret != 0) {
-			/* Still can't create, log but don't fail */
-			LOG_DBG("Could not create bookmark file: %d", ret);
-			return 0;
-		}
-
-		/* Write empty header */
-		char header[6] = BOOKMARK_MAGIC;
-		memset(&header[4], 0, 2);  /* count = 0 */
-		ssize_t written = fs_write(&file, header, 6);
-		fs_close(&file);
-
-		if (written < 6) {
-			LOG_WRN("Failed to write empty bookmark header");
-		}
-
-		LOG_DBG("Created empty bookmark file for session: %s", session_id);
+	if (ret < 0) {
+		/* File doesn't exist yet - no bookmarks */
 		return 0;
 	}
 
 	/* Read header */
-	char header[6];
-	bytes_read = fs_read(&file, header, 6);
-	if (bytes_read < 6) {
-		LOG_WRN("Failed to read bookmark header");
+	ret = fs_read(&file, header, sizeof(header));
+	if (ret != sizeof(header)) {
+		LOG_ERR("Invalid bookmark file");
 		fs_close(&file);
 		return -EIO;
 	}
 
 	/* Verify magic */
 	if (memcmp(header, BOOKMARK_MAGIC, 4) != 0) {
-		LOG_WRN("Invalid bookmark file magic");
+		LOG_ERR("Invalid bookmark magic");
 		fs_close(&file);
-		return -EINVAL;
+		return -EIO;
 	}
 
 	/* Get count */
-	memcpy(&bookmark_cache_count, &header[4], 2);
-	if (bookmark_cache_count > BOOKMARKS_MAX_COUNT) {
-		LOG_WRN("Bookmark count exceeds maximum: %d", bookmark_cache_count);
-		bookmark_cache_count = BOOKMARKS_MAX_COUNT;
+	memcpy(&count, &header[4], 2);
+	if (count > 10000) {  /* Sanity check */
+		LOG_WRN("Bookmark count too large: %u", count);
+		count = 0;
+	}
+
+	/* Calculate pagination bounds */
+	start_index = (page - 1) * per_page;
+	if (start_index >= count) {
+		/* Page beyond available data */
+		fs_close(&file);
+		return 0;
+	}
+
+	end_index = start_index + per_page;
+	if (end_index > count) {
+		end_index = count;
+	}
+
+	/* Adjust max_count */
+	if (max_count < (end_index - start_index)) {
+		end_index = start_index + max_count;
+	}
+
+	/* Seek to first bookmark in page */
+	off_t seek_pos = sizeof(header) + (start_index * sizeof(uint32_t));
+	ret = fs_seek(&file, seek_pos, FS_SEEK_SET);
+	if (ret < 0) {
+		LOG_ERR("Failed to seek to bookmark position");
+		fs_close(&file);
+		return ret;
 	}
 
 	/* Read bookmarks */
-	for (int i = 0; i < bookmark_cache_count; i++) {
-		uint8_t buffer[76];
-		uint8_t *ptr = buffer;
-
-		bytes_read = fs_read(&file, buffer, 76);
-		if (bytes_read < 76) {
-			LOG_WRN("Failed to read bookmark %d", i);
+	int read_count = 0;
+	for (int i = start_index; i < end_index; i++) {
+		uint32_t offset_sec;
+		ret = fs_read(&file, (uint8_t *)&offset_sec, sizeof(uint32_t));
+		if (ret != sizeof(uint32_t)) {
 			break;
 		}
-
-		/* Timestamp */
-		memcpy(&bookmark_cache[i].timestamp, ptr, 4);
-		ptr += 4;
-
-		/* Offset */
-		memcpy(&bookmark_cache[i].offset_sec, ptr, 4);
-		ptr += 4;
-
-		/* File index */
-		memcpy(&bookmark_cache[i].file_index, ptr, 2);
-		ptr += 2;
-
-		/* File offset */
-		memcpy(&bookmark_cache[i].file_offset, ptr, 4);
-		ptr += 4;
-
-		/* Note */
-		memset(bookmark_cache[i].note, 0, 64);
-		strncpy(bookmark_cache[i].note, (char *)ptr, 63);
-		ptr += 64;
+		bookmarks[read_count].offset_sec = offset_sec;
+		read_count++;
 	}
 
 	fs_close(&file);
 
-	LOG_INF("Loaded %d bookmarks for session: %s", bookmark_cache_count, session_id);
+	return read_count;
+}
 
-	return 0;
+int bookmarks_count(const char *session_id)
+{
+	struct fs_file_t file;
+	char filepath[128];
+	uint8_t header[6];
+	ssize_t ret;
+	uint16_t count = 0;
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	/* Get file path */
+	ret = bookmarks_get_filepath(session_id, filepath, sizeof(filepath));
+	if (ret < 0) {
+		return ret;
+	}
+
+	/* Open file */
+	fs_file_t_init(&file);
+	ret = fs_open(&file, filepath, FS_O_READ);
+	if (ret < 0) {
+		/* File doesn't exist yet - no bookmarks */
+		return 0;
+	}
+
+	/* Read header */
+	ret = fs_read(&file, header, sizeof(header));
+	if (ret == sizeof(header)) {
+		/* Verify magic */
+		if (memcmp(header, BOOKMARK_MAGIC, 4) == 0) {
+			/* Get count */
+			memcpy(&count, &header[4], 2);
+		}
+	}
+
+	fs_close(&file);
+
+	return count;
+}
+
+int bookmarks_clear(const char *session_id)
+{
+	char filepath[128];
+	int ret;
+
+	if (!session_id) {
+		return -EINVAL;
+	}
+
+	/* Get file path and delete file */
+	ret = bookmarks_get_filepath(session_id, filepath, sizeof(filepath));
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = fs_unlink(filepath);
+
+	LOG_INF("Cleared bookmarks for session: %s", session_id);
+
+	return ret;
 }

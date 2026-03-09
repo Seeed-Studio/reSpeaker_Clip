@@ -33,9 +33,11 @@
 
 LOG_MODULE_REGISTER(audio, LOG_LEVEL_INF);
 
-/* Memory slab for DMIC buffers (increased for stereo mode) */
-/* Stereo mode requires more buffers due to higher data rate */
-K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 32, 4);
+/* Memory slab for DMIC buffers (reduced for memory optimization)
+ * 16 blocks sufficient for audio pipeline with proper queue management
+ * Block size (1,280 bytes) maintained for audio quality
+ */
+K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 16, 4);
 
 /* DMIC device */
 static const struct device *const dmic_dev = DEVICE_DT_GET(DT_ALIAS(dmic0));
@@ -506,9 +508,6 @@ static int audio_start_recording_internal(enum audio_mode mode)
 		if (ret != 0) {
 			LOG_WRN("Failed to create session directory: %d", ret);
 		} else {
-			/* Initialize bookmarks for this session AFTER directory exists */
-			bookmarks_init(current_session_id);
-
 			/* Create first file */
 			ret = storage_create_file(&current_storage_file,
 				current_session_id, current_file_index);
@@ -521,9 +520,6 @@ static int audio_start_recording_internal(enum audio_mode mode)
 					current_storage_file.filename);
 			}
 		}
-	} else {
-		/* Initialize bookmarks even without storage */
-		bookmarks_init(current_session_id);
 	}
 
 	/* Start DMIC */
@@ -590,11 +586,7 @@ static int audio_stop_recording_internal(void)
 	/* Calculate duration */
 	duration_sec = (uint32_t)(k_uptime_get() / 1000) - recording_start_time;
 
-	/* Save bookmarks */
-	ret = bookmarks_save(current_session_id);
-	if (ret != 0) {
-		LOG_WRN("Failed to save bookmarks: %d", ret);
-	}
+	/* Note: Bookmarks are now saved directly as they're added, no need to save here */
 
 	/* Close session and update metadata files */
 	if (storage_is_mounted()) {
@@ -1070,9 +1062,8 @@ static int mic_power_off(void)
 }
 
 /* Public API functions */
-int audio_add_bookmark(const char *note)
+int audio_add_bookmark(void)
 {
-	struct bookmark bm;
 	uint32_t recording_sec;
 
 	if (!recording_active) {
@@ -1082,20 +1073,8 @@ int audio_add_bookmark(const char *note)
 	/* Calculate recording time in seconds */
 	recording_sec = (stats.frames_encoded * AUDIO_FRAME_MS) / 1000;
 
-	/* Fill bookmark structure */
-	memset(&bm, 0, sizeof(bm));
-	bm.timestamp = (uint32_t)(k_uptime_get() / 1000);
-	bm.offset_sec = recording_sec;
-	bm.file_index = current_file_index;
-	bm.file_offset = current_storage_file.bytes_written;
-	if (note) {
-		strncpy(bm.note, note, sizeof(bm.note) - 1);
-	} else {
-		bm.note[0] = '\0';
-	}
-
-	/* Add to bookmarks module */
-	return bookmarks_add(current_session_id, &bm);
+	/* Add bookmark directly to file */
+	return bookmarks_add(current_session_id, recording_sec);
 }
 
 const char *audio_get_session_id(void)

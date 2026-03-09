@@ -135,12 +135,11 @@ int audio_get_stats(struct audio_stats *stats);
 void audio_recording_thread(void *p1, void *p2, void *p3);
 
 /**
- * @brief Add a bookmark during recording
+ * @brief Add a bookmark at current recording position
  *
- * @param note Optional note text (can be NULL)
  * @return 0 on success, negative error code on failure
  */
-int audio_add_bookmark(const char *note);
+int audio_add_bookmark(void);
 
 /**
  * @brief Get current session ID
