@@ -10,6 +10,7 @@
 #include <zephyr/fs/fs.h>
 #include <ff.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/drivers/regulator.h>
 #include <zephyr/shell/shell.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -300,6 +301,16 @@ SHELL_CMD_REGISTER(sd, &sd_cmds, "SD card commands", NULL);
 int sdcard_init(void)
 {
 	LOG_INF("Initializing SD card...");
+
+	/* Enable SD card power via NPM1300 LDO2 */
+	const struct device *ldo2 = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldo2));
+	if (device_is_ready(ldo2)) {
+		regulator_enable(ldo2);
+		k_sleep(K_MSEC(5));
+		LOG_INF("SD card power enabled (LDO2)");
+	} else {
+		LOG_WRN("LDO2 not ready");
+	}
 
 	int rc = sdcard_mount();
 	if (rc != 0) {
