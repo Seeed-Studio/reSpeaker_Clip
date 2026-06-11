@@ -11,13 +11,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ReSpeaker Clip is a Zephyr RTOS firmware project for the Seeed ReSpeaker Clip board, based on the Nordic nRF5340 dual-core MCU. It is a voice recording device with BLE and WiFi AP connectivity, AT command control, and UDP file transfer.
 
-- **RTOS**: Zephyr RTOS v3.2.1 (via Nordic nRF Connect SDK)
+- **RTOS**: Zephyr RTOS v3.2.1 (via Nordic nRF Connect SDK) — `main` branch
+- **RTOS**: Zephyr RTOS v3.3.0 (via Nordic nRF Connect SDK) — `ncs/v3.3.0` branch
 - **Hardware**: nRF5340 (dual-core: Application core + Network core)
 - **Key Features**: PDM microphone array, OLED display (CH1115), SD card, WiFi (nRF7002), external SPI flash, haptic motor, battery monitoring
 
 ## Environment Setup
 
+**main branch (v3.2.1):**
 ```sh
+source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
+export ZEPHYR_EXTRA_MODULES=$(pwd)
+```
+
+**ncs/v3.3.0 branch:**
+```sh
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
+export ZEPHYR_EXTRA_MODULES=$(pwd)
+```
 source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
 export ZEPHYR_EXTRA_MODULES=$(pwd)
 ```
@@ -215,12 +226,12 @@ Binary frame protocol with per-file CRC32 verification:
 
 ## MCUboot Patch Development
 
-MCUboot source is in the NCS tree (`~/ncs/v3.2.1/bootloader/mcuboot`). Patches are stored in `patches/mcuboot/`. The workflow is: **modify source → build → verify → export patches**.
+MCUboot source is in the NCS tree (`~/ncs/<version>/bootloader/mcuboot`). Patches are stored in `patches/mcuboot/`. The workflow is: **modify source → build → verify → export patches**. Patches apply to both v3.2.1 and v3.3.0.
 
 ### Step 1: Modify MCUboot source directly
 
 ```sh
-# Edit files in the NCS tree
+# Edit files in the NCS tree (use ~/ncs/v3.2.1/ or ~/ncs/v3.3.0/)
 vim ~/ncs/v3.2.1/bootloader/mcuboot/boot/zephyr/main.c
 vim ~/ncs/v3.2.1/bootloader/mcuboot/boot/zephyr/io_display.c
 vim ~/ncs/v3.2.1/bootloader/mcuboot/boot/boot_serial/src/boot_serial.c

@@ -41,7 +41,7 @@ config CLIP_ENHANCED_COMPLEXITY
 
 config CLIP_DEFAULT_NOISE
 	int "Default noise suppression level (dB)"
-	default 10
+	default 12
 
 config CLIP_DEFAULT_DEREVERB
 	bool "Default dereverberation enabled"
