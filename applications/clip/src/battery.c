@@ -32,6 +32,9 @@ LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 /* Battery full threshold (SoC %) */
 #define BATTERY_FULL_THRESHOLD  99
 
+/* Low battery auto-shutdown threshold (SoC %) */
+#define BATTERY_SHUTDOWN_THRESHOLD  3
+
 /* SoC smoothing configuration for stable display */
 #define SOC_SMOOTH_ALPHA    0.3f    /* EMA factor: lower = smoother (0.1-0.5) */
 #define SOC_MAX_DELTA       3       /* Max SoC change allowed per poll cycle (%) */
@@ -256,6 +259,12 @@ static void read_and_update(void)
 			if (percent <= 15 && !low_battery_warned) {
 				display_post_event(UI_EVENT_LOW_BATTERY);
 				low_battery_warned = true;
+			}
+
+			/* Auto-shutdown to prevent over-discharge */
+			if (percent <= BATTERY_SHUTDOWN_THRESHOLD) {
+				LOG_WRN("Battery critically low (%u%%), auto shutdown", percent);
+				clip_post_event(CLIP_EVENT_POWER_OFF_EXEC);
 			}
 		}
 	}
