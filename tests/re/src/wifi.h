@@ -34,6 +34,29 @@ int wifi_start_throughput_test(void);
  */
 int wifi_run_test(void);
 
+/**
+ * @brief Enable the continuous UDP broadcast TX discharge load
+ *
+ * The TX thread is auto-started and waits for the AP to come up, then streams
+ * UDP broadcast packets continuously (the discharge load). This call is a
+ * no-op marker.
+ *
+ * @return 0
+ */
+int wifi_discharge_start(void);
+
+/**
+ * @brief Enable or disable the WiFi discharge load (and the AP)
+ *
+ * When enabled, the AP is brought up and the TX thread streams broadcast UDP
+ * (the discharge load). When disabled, the TX thread idles and the AP is
+ * brought down for minimum power (used during the charge phase).
+ *
+ * @param enable true to load (discharge), false to idle + AP down (charge)
+ * @return 0
+ */
+int wifi_discharge_load_enable(bool enable);
+
 bool wifi_ap_is_running(void);
 
 #endif /* WIFI_H__ */

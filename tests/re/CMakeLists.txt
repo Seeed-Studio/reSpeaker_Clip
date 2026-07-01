@@ -22,4 +22,5 @@ target_sources(app PRIVATE
 	src/motor.c
 	src/imu.c
 	src/flash_test.c
+	src/discharge.c
 )

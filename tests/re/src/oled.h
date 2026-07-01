@@ -16,6 +16,21 @@
 int oled_init(void);
 
 /**
+ * @brief Show battery status on the OLED (discharge/charge cycle test)
+ *
+ * Renders three lines: "Bat: NN%", the charge/discharge state with the cycle
+ * count (e.g. "DISCHARGE #5"), and the battery voltage in mV.
+ *
+ * @param pct Battery percentage (0-100)
+ * @param charging True if charging
+ * @param mv Battery voltage in millivolts
+ * @param state State string, e.g. "CHARGE" / "DISCHARGE"
+ * @param cycles Completed charge/discharge cycle count
+ */
+void oled_show_battery(uint8_t pct, bool charging, uint32_t mv,
+		       const char *state, uint32_t cycles);
+
+/**
  * @brief Test 1: Clear display
  */
 void oled_test_clear(void);

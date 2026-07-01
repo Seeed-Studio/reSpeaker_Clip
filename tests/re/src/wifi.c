@@ -491,8 +491,8 @@ static int cmd_udp_test(const struct shell *sh, size_t argc, char **argv)
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(IPERF_PORT);
-	ret = inet_pton(AF_INET, iperf_server_ip, &addr.sin_addr);
-	if (ret != 1) {
+	ret = net_addr_pton(AF_INET, iperf_server_ip, &addr.sin_addr);
+	if (ret < 0) {
 		shell_print(sh, "Invalid IP address");
 		return -EINVAL;
 	}
@@ -572,4 +572,97 @@ int wifi_run_test(void)
 	}
 
 	return do_wifi_ap_start();
+}
+
+/* Continuous UDP broadcast TX = the discharge load. Runs in its own thread
+ * and TXes only while the discharge load is active (DISCHARGE state) and the
+ * AP is up. During CHARGE the load is turned off and the AP brought down for
+ * minimum power (cleaner, faster charge).
+ */
+#define DISCHARGE_PORT		5001
+#define DISCHARGE_PAYLOAD	1024
+#define DISCHARGE_DST_IP	"192.168.4.255"
+
+static volatile bool discharge_load_active;
+
+static void discharge_tx_thread(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	struct net_if *iface = net_if_get_first_wifi();
+	if (iface == NULL) {
+		LOG_ERR("discharge TX: no WiFi iface");
+		return;
+	}
+
+	int sock = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0) {
+		LOG_ERR("discharge TX: socket failed: %d", sock);
+		return;
+	}
+
+	int bcast = 1;
+	(void)zsock_setsockopt(sock, ZSOCK_SOL_SOCKET, ZSOCK_SO_BROADCAST,
+			       &bcast, sizeof(bcast));
+
+	struct sockaddr_in dst = { 0 };
+	dst.sin_family = AF_INET;
+	dst.sin_port = htons(DISCHARGE_PORT);
+	if (net_addr_pton(AF_INET, DISCHARGE_DST_IP, &dst.sin_addr) < 0) {
+		LOG_ERR("discharge TX: bad addr %s", DISCHARGE_DST_IP);
+		zsock_close(sock);
+		return;
+	}
+
+	static uint8_t payload[DISCHARGE_PAYLOAD];
+	memset(payload, 0xA5, sizeof(payload));
+
+	for (;;) {
+		if (discharge_load_active && net_if_is_up(iface)) {
+			int sent = zsock_sendto(sock, payload, sizeof(payload), 0,
+						(struct sockaddr *)&dst,
+						sizeof(dst));
+			if (sent < 0) {
+				/* transient (TX queue / no buffer) — brief backoff */
+				k_msleep(2);
+			}
+		} else {
+			/* Load off (charging) or AP down: idle, no TX. */
+			k_sleep(K_SECONDS(1));
+		}
+	}
+}
+
+K_THREAD_DEFINE(discharge_tx_tid, 2048, discharge_tx_thread,
+		NULL, NULL, NULL, 7, 0, 0);
+
+int wifi_discharge_start(void)
+{
+	/* TX thread is auto-started (K_THREAD_DEFINE). The load itself is gated
+	 * by wifi_discharge_load_enable(). This call is a no-op marker. */
+	LOG_INF("WiFi discharge TX thread ready");
+	return 0;
+}
+
+/* Enable/disable the discharge load. When disabled, the TX thread idles and
+ * the WiFi AP is brought down for minimum power draw during charging. */
+int wifi_discharge_load_enable(bool enable)
+{
+	if (enable) {
+		if (!wifi_ap_is_running()) {
+			LOG_INF("discharge load: AP up");
+			(void)do_wifi_ap_start();
+		}
+		discharge_load_active = true;
+		LOG_INF("discharge load: ON");
+	} else {
+		discharge_load_active = false;
+		if (wifi_ap_is_running()) {
+			LOG_INF("discharge load: AP down (low power)");
+			(void)do_wifi_ap_stop();
+		}
+	}
+	return 0;
 }

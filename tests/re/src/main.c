@@ -16,6 +16,7 @@
 #include "wifi.h"
 #include "ble.h"
 #include "re_test.h"
+#include "discharge.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -63,6 +64,9 @@ int main(void)
 		LOG_WRN("WiFi init failed: %d", ret);
 	}
 
+	/* Start the continuous UDP TX discharge load (auto-starts, waits for AP) */
+	wifi_discharge_start();
+
 	/* Start BLE advertising */
 	ret = ble_init();
 	if (ret != 0) {
@@ -70,10 +74,10 @@ int main(void)
 	}
 
 	printk("All peripherals initialized\n");
-	printk("Starting test loop...\n\n");
+	printk("Starting battery discharge/charge cycle test...\n\n");
 
-	/* Enter infinite test loop */
-	re_test_loop();
+	/* Run the battery discharge/charge cycle test (never returns) */
+	discharge_run();
 
 	return 0;
 }
