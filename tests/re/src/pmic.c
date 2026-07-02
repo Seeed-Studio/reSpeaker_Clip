@@ -13,7 +13,6 @@
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/logging/log.h>
-#include <nrf_fuel_gauge.h>
 #include "pmic.h"
 
 LOG_MODULE_REGISTER(pmic, LOG_LEVEL_INF);
@@ -77,38 +76,11 @@ static uint8_t voltage_to_soc(uint32_t mv)
 }
 
 /* ----------------------------------------------------------------------------
- * nRF Fuel Gauge — accurate SoC from the "240" cell model (ported from the
- * clip app's battery.c). Replaces the crude voltage->SoC table so the
- * discharge test's 1% threshold is accurate even under the WiFi TX load.
+ * The cycle's charge/discharge switching and the displayed % are both driven
+ * by cell voltage (see voltage_to_soc() above and discharge.c). The nRF Fuel
+ * Gauge was removed: its SoC was unreliable under the pulsed WiFi TX load of
+ * the discharge test.
  * ------------------------------------------------------------------------- */
-
-static const struct battery_model battery_model = {
-#include "battery_model.inc"
-};
-
-static bool fg_initialized;
-static int64_t fg_ref_time;
-
-/* Inform the fuel gauge of the current charger phase (trickle/CC/CV/...). */
-static void charge_status_inform(int32_t chg_status)
-{
-	union nrf_fuel_gauge_ext_state_info_data state_info;
-
-	if (chg_status & CHG_STATUS_COMPLETE_MASK) {
-		state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_COMPLETE;
-	} else if (chg_status & CHG_STATUS_TRICKLE_MASK) {
-		state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_TRICKLE;
-	} else if (chg_status & CHG_STATUS_CC_MASK) {
-		state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_CC;
-	} else if (chg_status & CHG_STATUS_CV_MASK) {
-		state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_CV;
-	} else {
-		state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_IDLE;
-	}
-
-	(void)nrf_fuel_gauge_ext_state_update(
-		NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_STATE_CHANGE, &state_info);
-}
 
 /* Initialize PMIC */
 int pmic_init(void)
@@ -145,71 +117,15 @@ int pmic_init(void)
 		LOG_INF("PMIC initialized successfully");
 	}
 
-	/* Initialize the fuel gauge with the "240" cell model. */
+	/* Initial battery reading (voltage-derived %; for the log). */
 	if (device_is_ready(charger_dev)) {
-		struct nrf_fuel_gauge_init_parameters init_params = {
-			.model = &battery_model,
-			.opt_params = NULL,
-			.state = NULL,
-		};
-		float max_charge_current = 0.0f;
-		float term_charge_current = 0.0f;
-		int32_t chg_status = 0;
-		struct sensor_value val;
+		uint32_t mv = 0;
+		uint8_t pct = 0;
+		bool charging = false;
 
-		if (sensor_sample_fetch(charger_dev) == 0) {
-			sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_VOLTAGE, &val);
-			init_params.v0 = (float)val.val1 + ((float)val.val2 / 1000000.0f);
-			sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_TEMP, &val);
-			init_params.t0 = (float)val.val1 + ((float)val.val2 / 1000000.0f);
-			sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_AVG_CURRENT, &val);
-			init_params.i0 = (float)val.val1 + ((float)val.val2 / 1000000.0f);
-			sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_STATUS, &val);
-			chg_status = val.val1;
-			sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_DESIRED_CHARGING_CURRENT, &val);
-			max_charge_current = (float)val.val1 + ((float)val.val2 / 1000000.0f);
-		} else {
-			init_params.v0 = 3.8f;
-			init_params.i0 = 0.0f;
-			init_params.t0 = 25.0f;
-			chg_status = 0;
-		}
-		term_charge_current = max_charge_current / 10.0f;
-
-		int fg_ret = nrf_fuel_gauge_init(&init_params, NULL);
-		if (fg_ret < 0) {
-			LOG_WRN("Fuel gauge init failed: %d (using voltage SoC)", fg_ret);
-		} else {
-			fg_initialized = true;
-			fg_ref_time = k_uptime_get();
-			LOG_INF("Fuel gauge init: V=%dmV I=%dmA T=%dC imax=%dmA (%s)",
-				(int)(init_params.v0 * 1000.0f),
-				(int)(init_params.i0 * 1000.0f),
-				(int)init_params.t0,
-				(int)(max_charge_current * 1000.0f),
-				nrf_fuel_gauge_version);
-
-			/* Charge-current limits (needed for CC/CV coulomb tracking). */
-			nrf_fuel_gauge_ext_state_update(
-				NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_CURRENT_LIMIT,
-				&(union nrf_fuel_gauge_ext_state_info_data){
-					.charge_current_limit = max_charge_current});
-			nrf_fuel_gauge_ext_state_update(
-				NRF_FUEL_GAUGE_EXT_STATE_INFO_TERM_CURRENT,
-				&(union nrf_fuel_gauge_ext_state_info_data){
-					.charge_term_current = term_charge_current});
-
-			/* Initial charge phase + VBUS state. */
-			charge_status_inform(chg_status);
-			if (sensor_sample_fetch(charger_dev) == 0) {
-				sensor_channel_get(charger_dev,
-					SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS, &val);
-				nrf_fuel_gauge_ext_state_update(
-					(val.val1 != 0) ?
-					NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_CONNECTED :
-					NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_DISCONNECTED,
-					NULL);
-			}
+		if (pmic_get_battery_status(&mv, &pct, &charging) == 0) {
+			LOG_INF("Battery: %u mV, %u%%, %s", mv, pct,
+				charging ? "charging" : "discharging");
 		}
 	}
 
@@ -220,7 +136,6 @@ int pmic_init(void)
 int pmic_get_battery_status(uint32_t *voltage_mv, uint8_t *percent, bool *charging)
 {
 	struct sensor_value val;
-	float voltage, current, temp;
 	int32_t chg_status = 0;
 	int ret;
 
@@ -240,15 +155,7 @@ int pmic_get_battery_status(uint32_t *voltage_mv, uint8_t *percent, bool *chargi
 		LOG_WRN("GAUGE_VOLTAGE read failed: %d", ret);
 		return ret;
 	}
-	voltage = (float)val.val1 + ((float)val.val2 / 1000000.0f);
 	*voltage_mv = (uint32_t)(val.val1 * 1000 + val.val2 / 1000);
-
-	/* Read current + temperature for the fuel gauge */
-	sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_AVG_CURRENT, &val);
-	current = (float)val.val1 + ((float)val.val2 / 1000000.0f);
-
-	sensor_channel_get(charger_dev, SENSOR_CHAN_GAUGE_TEMP, &val);
-	temp = (float)val.val1 + ((float)val.val2 / 1000000.0f);
 
 	/* Read charging status */
 	ret = sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_STATUS, &val);
@@ -261,15 +168,9 @@ int pmic_get_battery_status(uint32_t *voltage_mv, uint8_t *percent, bool *chargi
 		LOG_WRN("CHARGER_STATUS read failed: %d", ret);
 	}
 
-	/* SoC: fuel gauge if available, else voltage-based fallback. */
-	if (fg_initialized) {
-		charge_status_inform(chg_status);
-		float delta = (float)k_uptime_delta(&fg_ref_time) / 1000.0f;
-		float soc = nrf_fuel_gauge_process(voltage, current, temp, delta, NULL);
-		*percent = (uint8_t)soc;
-	} else {
-		*percent = voltage_to_soc(*voltage_mv);
-	}
+	/* SoC: voltage-derived (fuel gauge removed — unreliable under the
+	 * pulsed WiFi TX load; the cycle control is voltage-based too). */
+	*percent = voltage_to_soc(*voltage_mv);
 
 	return 0;
 }

@@ -583,6 +583,16 @@ int wifi_run_test(void)
 #define DISCHARGE_PAYLOAD	1024
 #define DISCHARGE_DST_IP	"192.168.4.255"
 
+/* Inter-packet pacing for the discharge TX load.
+ *
+ * A tight sendto() loop with no yield on the success path saturates the
+ * CPU at the thread's priority: the serial shell (and the net stack's
+ * TX-completion bottom half on the system workqueue) never get a slot,
+ * so the console goes dead while the load runs. Sleeping one tick between
+ * packets lets the shell and stack run between sends. Lower this for a
+ * heavier discharge current, raise it for more shell responsiveness. */
+#define DISCHARGE_TX_PACE_MS		1
+
 static volatile bool discharge_load_active;
 
 static void discharge_tx_thread(void *a, void *b, void *c)
@@ -627,6 +637,10 @@ static void discharge_tx_thread(void *a, void *b, void *c)
 			if (sent < 0) {
 				/* transient (TX queue / no buffer) — brief backoff */
 				k_msleep(2);
+			} else {
+				/* Pace: yield to the shell + net stack so they
+				 * stay responsive while the discharge load runs. */
+				k_msleep(DISCHARGE_TX_PACE_MS);
 			}
 		} else {
 			/* Load off (charging) or AP down: idle, no TX. */
@@ -635,8 +649,11 @@ static void discharge_tx_thread(void *a, void *b, void *c)
 	}
 }
 
+/* Lowest application priority: the shell, system workqueue, and net stack
+ * must all preempt the discharge TX so the console stays usable while the
+ * load runs. */
 K_THREAD_DEFINE(discharge_tx_tid, 2048, discharge_tx_thread,
-		NULL, NULL, NULL, 7, 0, 0);
+		NULL, NULL, NULL, K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
 
 int wifi_discharge_start(void)
 {

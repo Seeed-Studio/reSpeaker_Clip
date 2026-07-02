@@ -6,7 +6,9 @@
  * Battery discharge/charge cycle test state machine. Polls the NPM1300
  * charger every few seconds, drives the charger enable to alternate between
  * discharging (WiFi TX load drains the cell) and charging, and keeps the
- * OLED updated with % / state / voltage.
+ * OLED updated with % / state / voltage. The cycle is driven purely by cell
+ * voltage (the nRF Fuel Gauge SoC was unreliable under the pulsed WiFi TX
+ * load).
  */
 
 #include <zephyr/kernel.h>
@@ -19,7 +21,12 @@
 
 LOG_MODULE_REGISTER(discharge, LOG_LEVEL_INF);
 
-#define DISCHARGE_THRESHOLD_PCT		1U	/* start charging at/below 1% */
+/* Voltage-hysteresis thresholds (cell voltage, not fuel-gauge SoC):
+ *  - DISCHARGE -> CHARGE when the cell sinks to 3.3 V,
+ *  - CHARGE    -> DISCHARGE when the cell rises to 4.12 V.
+ * The 0.82 V gap prevents oscillation around the switching point. */
+#define DISCHARGE_VOLTAGE_MV		3350U	/* start charging at/below */
+#define CHARGE_VOLTAGE_MV		4120U	/* start discharging at/above */
 #define POLL_INTERVAL_MS		5000U
 
 enum cycle_state {
@@ -36,8 +43,8 @@ void discharge_run(void)
 	bool charging = false;
 
 	printk("\n=== Battery discharge/charge cycle test ===\n");
-	printk("Discharging to %u%%, then charging to full, repeat.\n\n",
-	       DISCHARGE_THRESHOLD_PCT);
+	printk("Discharging to %u mV, then charging to %u mV, repeat.\n\n",
+	       DISCHARGE_VOLTAGE_MV, CHARGE_VOLTAGE_MV);
 
 	/* Start in DISCHARGE: charger off, WiFi AP + TX load on. */
 	pmic_charger_set(false);
@@ -52,9 +59,9 @@ void discharge_run(void)
 			oled_show_battery(pct, charging, mv, label, cycles);
 
 			if (state == STATE_DISCHARGE) {
-				if (pct <= DISCHARGE_THRESHOLD_PCT) {
-					LOG_INF("cycle %u: %u%% reached -> CHARGE",
-						cycles, pct);
+				if (mv <= DISCHARGE_VOLTAGE_MV) {
+					LOG_INF("cycle %u: %u mV reached -> CHARGE",
+						cycles, mv);
 					state = STATE_CHARGE;
 					/* Charge with minimal load: WiFi off
 					 * (AP down + TX idle) for low power. */
@@ -62,10 +69,10 @@ void discharge_run(void)
 					pmic_charger_set(true);
 				}
 			} else { /* STATE_CHARGE */
-				if (pmic_is_charge_complete()) {
+				if (mv >= CHARGE_VOLTAGE_MV) {
 					cycles++;
-					LOG_INF("cycle %u: charge complete -> DISCHARGE",
-						cycles);
+					LOG_INF("cycle %u: %u mV reached -> DISCHARGE",
+						cycles, mv);
 					state = STATE_DISCHARGE;
 					pmic_charger_set(false);
 					wifi_discharge_load_enable(true);

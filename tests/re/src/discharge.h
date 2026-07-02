@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  *
  * Battery discharge/charge cycle test. Discharges the cell via the WiFi TX
- * load to 1%, then charges to full, then repeats. The OLED always shows the
- * current %, voltage, and charge/discharge state.
+ * load down to 3.35 V, then charges to 4.12 V, then repeats. The OLED always
+ * shows the current %, voltage, and charge/discharge state.
  */
 
 #ifndef DISCHARGE_H
