@@ -30,4 +30,5 @@ target_sources(app PRIVATE
     src/transport_udp.c
     src/battery.c
     src/usb_cdc.c
+    src/throughput_test.c
 )

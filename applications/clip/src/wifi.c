@@ -513,3 +513,58 @@ bool wifi_is_sta_connected(void)
 {
 	return sta_connected;
 }
+
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+#include <zephyr/net/socket.h>
+#include <errno.h>
+
+int wifi_run_throughput(const char *ip, uint16_t port, uint32_t dur_sec, uint32_t *out_kbps)
+{
+	if (!wifi_ap_is_running() || !wifi_is_sta_connected()) {
+		return -ENETDOWN;
+	}
+
+	int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0) {
+		LOG_ERR("throughput socket: %d (errno %d)", sock, errno);
+		return -errno;
+	}
+
+	struct sockaddr_in dst = { 0 };
+	dst.sin_family = AF_INET;
+	dst.sin_port = htons(port);
+	if (net_addr_pton(AF_INET, ip, &dst.sin_addr) < 0) {
+		LOG_ERR("invalid ip: %s", ip);
+		close(sock);
+		return -EINVAL;
+	}
+
+	static uint8_t buf[1024];
+	memset(buf, 0xA5, sizeof(buf));
+
+	int64_t start = k_uptime_get();
+	int64_t deadline = start + (int64_t)dur_sec * 1000;
+	uint32_t bytes = 0;
+
+	while (k_uptime_get() < deadline) {
+		int sent = sendto(sock, buf, sizeof(buf), 0,
+				  (struct sockaddr *)&dst, sizeof(dst));
+		if (sent > 0) {
+			bytes += sent;
+		} else if (errno == ENOMEM || errno == EAGAIN) {
+			k_yield();
+		} else {
+			LOG_WRN("throughput sendto err: %d (errno %d)", sent, errno);
+			break;
+		}
+	}
+
+	close(sock);
+
+	uint32_t elapsed_ms = (uint32_t)(k_uptime_get() - start);
+	*out_kbps = (elapsed_ms > 0) ? (uint32_t)((uint64_t)bytes * 8U / elapsed_ms) : 0;
+	LOG_INF("WiFi throughput: %u kbps (%u B in %u ms) -> %s:%u",
+		*out_kbps, bytes, elapsed_ms, ip, port);
+	return 0;
+}
+#endif

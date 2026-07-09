@@ -31,6 +31,9 @@ static struct ble_context ble_ctx = {
     .file_data_notify_enabled = false,
     .audio_vis_notify_enabled = false,
     .device_name = "Clip",
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+    .throughput_notify_enabled = false,
+#endif
 };
 
 /* Command callback */
@@ -57,6 +60,12 @@ static const struct bt_uuid_128 file_data_uuid = BT_UUID_INIT_128(
 /* Audio Visualization UUID: 6E400005-B5A3-F393-E0A9-E50E24DCCA9E */
 static const struct bt_uuid_128 audio_vis_uuid = BT_UUID_INIT_128(
     BT_UUID_128_ENCODE(0x6E400005, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
+
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+/* Throughput Test UUID: 6E400006-B5A3-F393-E0A9-E50E24DCCA9E */
+static const struct bt_uuid_128 throughput_uuid = BT_UUID_INIT_128(
+    BT_UUID_128_ENCODE(0x6E400006, 0xB5A3, 0xF393, 0xE0A9, 0xE50E24DCCA9E));
+#endif
 
 /* Advertising data - dynamically built */
 static struct bt_data ad[2];
@@ -233,6 +242,9 @@ static ssize_t cmd_recv_write(struct bt_conn *conn,
 static void resp_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static void file_data_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static void audio_vis_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+static void throughput_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
+#endif
 
 /* GATT service definition */
 BT_GATT_SERVICE_DEFINE(clip_svc,
@@ -268,6 +280,15 @@ BT_GATT_SERVICE_DEFINE(clip_svc,
                            NULL, NULL, NULL),
     BT_GATT_CCC(audio_vis_ccc_cfg_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+    /* Throughput Test Characteristic (Notify) — value at attrs[13] */
+    BT_GATT_CHARACTERISTIC(&throughput_uuid.uuid,
+                           BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ,
+                           NULL, NULL, NULL),
+    BT_GATT_CCC(throughput_ccc_cfg_changed,
+                BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
+#endif
 );
 
 /* CCC callback */
@@ -299,6 +320,14 @@ static void audio_vis_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t 
     ble_ctx.audio_vis_notify_enabled = (value & BT_GATT_CCC_NOTIFY);
     LOG_DBG("Audio vis notify: %d", ble_ctx.audio_vis_notify_enabled);
 }
+
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+static void throughput_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    ble_ctx.throughput_notify_enabled = (value & BT_GATT_CCC_NOTIFY);
+    LOG_DBG("Throughput notify: %d", ble_ctx.throughput_notify_enabled);
+}
+#endif
 
 /* Generate device name from FICR device ID */
 static void generate_device_name(void)
@@ -924,6 +953,85 @@ bool ble_is_audio_vis_subscribed(void)
 {
     return ble_ctx.audio_vis_notify_enabled;
 }
+
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+bool ble_is_throughput_subscribed(void)
+{
+    return ble_ctx.throughput_notify_enabled;
+}
+
+int ble_run_throughput(uint32_t dur_sec, uint32_t *out_kbps)
+{
+    static uint8_t payload[512];
+
+    if (!ble_ctx.conn || !ble_ctx.throughput_notify_enabled) {
+        return -ENOTCONN;
+    }
+
+    /* Notify payload = ATT_MTU - 3 (1 opcode + 2 handle) */
+    uint16_t mtu = bt_gatt_get_mtu(ble_ctx.conn);
+    uint16_t len = (mtu > 3) ? (mtu - 3) : 20;
+    if (len > sizeof(payload)) {
+        len = sizeof(payload);
+    }
+    memset(payload, 0xA5, sizeof(payload));
+
+    ble_activity_refresh();
+    int64_t start = k_uptime_get();
+    int64_t deadline = start + (int64_t)dur_sec * 1000;
+    uint32_t bytes = 0;
+
+    while (k_uptime_get() < deadline) {
+        /* Throughput characteristic value is at attrs[13] */
+        int err = bt_gatt_notify(ble_ctx.conn, &clip_svc.attrs[13], payload, len);
+        if (err == 0) {
+            bytes += len;
+        } else if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY) {
+            /* TX buffers full: sleep briefly so the BLE host thread can
+             * drain (k_yield busy-loops and can starve the BLE thread,
+             * risking a supervision-timeout disconnect). */
+            k_msleep(1);
+        } else {
+            LOG_WRN("throughput notify err: %d", err);
+            return err;
+        }
+        ble_activity_refresh();
+    }
+
+    uint32_t elapsed_ms = (uint32_t)(k_uptime_get() - start);
+    *out_kbps = (elapsed_ms > 0) ? (uint32_t)((uint64_t)bytes * 8U / elapsed_ms) : 0;
+    LOG_INF("BLE throughput: %u kbps (%u B in %u ms)", *out_kbps, bytes, elapsed_ms);
+    return 0;
+}
+
+int ble_send_throughput(const char *data, uint16_t len)
+{
+    if (!ble_ctx.conn || !ble_ctx.throughput_notify_enabled) {
+        return -ENOTCONN;
+    }
+
+    int err;
+    int retries = 0;
+
+    do {
+        /* Throughput characteristic value is at attrs[13] */
+        err = bt_gatt_notify(ble_ctx.conn, &clip_svc.attrs[13], data, len);
+        if (err == 0) {
+            return 0;
+        }
+        if (err == -ENOMEM || err == -EAGAIN || err == -EBUSY) {
+            if (retries++ < 10) {
+                k_msleep(5);
+                continue;
+            }
+        }
+        LOG_WRN("throughput result notify err: %d", err);
+        return err;
+    } while (retries < 10);
+
+    return err;
+}
+#endif
 
 static void get_bond_addr_cb(const struct bt_bond_info *info, void *user_data)
 {

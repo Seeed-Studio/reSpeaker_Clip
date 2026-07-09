@@ -340,4 +340,13 @@ config CLIP_DEBUG_STATS
 	help
 	  Print thread stack usage and heap stats every 10 seconds.
 
+config CLIP_THROUGHPUT_TEST
+	bool "BLE/WiFi throughput test feature (AT+BLETHRU / AT+WIFITHRU)"
+	default n
+	help
+	  Adds a temporary BLE notify-throughput characteristic and a UDP TX
+	  throughput test, each started by an AT command and reporting the
+	  measured rate through a BLE event ("blethru" / "wifithru"). Enable in
+	  debug builds only; leave off for production.
+
 endif # CLIP

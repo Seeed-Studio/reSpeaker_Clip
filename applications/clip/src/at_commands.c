@@ -32,6 +32,9 @@
 #include "display.h"
 #include "haptic.h"
 #include "usb_cdc.h"
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+#include "throughput_test.h"
+#endif
 
 LOG_MODULE_REGISTER(at_commands, CONFIG_CLIP_LOG_LEVEL);
 
@@ -1669,6 +1672,64 @@ static int cmd_usb_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     }
 }
 
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+/* BLETHRU - BLE notify throughput test (AT+BLETHRU=<dur_sec>) */
+static int cmd_blethru_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
+{
+    if (ctx->type != AT_CMD_TYPE_SET && ctx->type != AT_CMD_TYPE_EXEC) {
+        return create_json_response(false, "Use AT+BLETHRU=<dur_sec>", NULL, response, len);
+    }
+    if (!ble_is_connected() || !ble_is_throughput_subscribed()) {
+        return create_json_response(false,
+            "Subscribe to the throughput characteristic first", NULL, response, len);
+    }
+    uint32_t dur = 0;
+    if (ctx->args && strlen(ctx->args) > 0) {
+        dur = (uint32_t)strtoul(ctx->args, NULL, 10);
+    }
+    int ret = throughput_ble_start(dur);
+    if (ret) {
+        return create_json_response(false, "Test busy", NULL, response, len);
+    }
+    return create_json_response(true, "BLE throughput started (result via event)", NULL, response, len);
+}
+
+/* WIFITHRU - WiFi UDP TX throughput (AT+WIFITHRU=<ip>[,<port>][,<dur_sec>]) */
+static int cmd_wifithru_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
+{
+    if (ctx->type != AT_CMD_TYPE_SET && ctx->type != AT_CMD_TYPE_EXEC) {
+        return create_json_response(false,
+            "Use AT+WIFITHRU=<ip>[,<port>][,<dur_sec>]", NULL, response, len);
+    }
+    if (!ctx->args || strlen(ctx->args) == 0) {
+        return create_json_response(false, "Missing argument (ip)", NULL, response, len);
+    }
+
+    char args[64];
+    char ip[32] = {0};
+    uint32_t port = 0, dur = 0;
+
+    strncpy(args, ctx->args, sizeof(args) - 1);
+    args[sizeof(args) - 1] = '\0';
+
+    char *tok = strtok(args, ",");
+    if (tok) { strncpy(ip, tok, sizeof(ip) - 1); }
+    tok = strtok(NULL, ",");
+    if (tok) { port = (uint32_t)strtoul(tok, NULL, 10); }
+    tok = strtok(NULL, ",");
+    if (tok) { dur = (uint32_t)strtoul(tok, NULL, 10); }
+
+    if (strlen(ip) == 0) {
+        return create_json_response(false, "Invalid ip", NULL, response, len);
+    }
+    int ret = throughput_wifi_start(ip, (uint16_t)port, dur);
+    if (ret) {
+        return create_json_response(false, "Test busy or WiFi not ready", NULL, response, len);
+    }
+    return create_json_response(true, "WiFi throughput started (result via event)", NULL, response, len);
+}
+#endif
+
 /* Register all AT commands */
 int at_commands_register(void)
 {
@@ -1936,6 +1997,26 @@ int at_commands_register(void)
     };
     err = at_server_register_cmd(&log_cmd);
     if (err) return err;
+
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+    /* BLETHRU - BLE notify throughput test */
+    static const struct at_command blethru_cmd = {
+        .name = "BLETHRU",
+        .flags = AT_CMD_SET | AT_CMD_EXEC,
+        .handler = cmd_blethru_handler,
+    };
+    err = at_server_register_cmd(&blethru_cmd);
+    if (err) return err;
+
+    /* WIFITHRU - WiFi UDP TX throughput test */
+    static const struct at_command wifithru_cmd = {
+        .name = "WIFITHRU",
+        .flags = AT_CMD_SET | AT_CMD_EXEC,
+        .handler = cmd_wifithru_handler,
+    };
+    err = at_server_register_cmd(&wifithru_cmd);
+    if (err) return err;
+#endif
 
     LOG_INF("AT commands registered");
     return 0;

@@ -93,4 +93,20 @@ const char *wifi_get_ip_address(void);
  */
 bool wifi_is_sta_connected(void);
 
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+/**
+ * @brief Run a UDP TX throughput test
+ *
+ * Sends UDP packets to ip:port for dur_sec seconds and returns the measured
+ * TX rate. Requires the WiFi AP to be up with a station connected.
+ *
+ * @param ip Destination IP (host receiver)
+ * @param port Destination UDP port
+ * @param dur_sec Duration in seconds
+ * @param out_kbps Output: measured throughput in kbit/s
+ * @return 0 on success, negative errno on failure
+ */
+int wifi_run_throughput(const char *ip, uint16_t port, uint32_t dur_sec, uint32_t *out_kbps);
+#endif
+
 #endif /* CLIP_WIFI_H */

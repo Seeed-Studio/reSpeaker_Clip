@@ -41,6 +41,9 @@ struct ble_context {
     bool file_data_notify_enabled;
     bool audio_vis_notify_enabled;
     char device_name[16];
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+    bool throughput_notify_enabled;
+#endif
 };
 
 /**
@@ -119,6 +122,38 @@ bool ble_is_bonded(void);
  * @return true if a BLE client has subscribed to audio_vis characteristic
  */
 bool ble_is_audio_vis_subscribed(void);
+
+#ifdef CONFIG_CLIP_THROUGHPUT_TEST
+/**
+ * @brief Check if the throughput characteristic is subscribed
+ */
+bool ble_is_throughput_subscribed(void);
+
+/**
+ * @brief Run a BLE notify throughput test for @a dur_sec seconds.
+ *
+ * Streams max-size notifications on the throughput characteristic (the client
+ * must have subscribed first) and returns the measured TX rate. Blocks for
+ * the duration; call from a non-BLE thread.
+ *
+ * @param dur_sec Duration in seconds
+ * @param out_kbps Output: measured throughput in kbit/s
+ * @return 0 on success, negative errno on failure
+ */
+int ble_run_throughput(uint32_t dur_sec, uint32_t *out_kbps);
+
+/**
+ * @brief Send a result string on the throughput characteristic (6E400006).
+ *
+ * Only delivers if a client is subscribed to it. Used to push the throughput
+ * test result on the same characteristic the client streamed on.
+ *
+ * @param data Result string (e.g. JSON)
+ * @param len Length of data
+ * @return 0 on success, negative errno on failure
+ */
+int ble_send_throughput(const char *data, uint16_t len);
+#endif
 
 /**
  * @brief Get address of first bonded device
