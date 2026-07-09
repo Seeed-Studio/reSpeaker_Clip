@@ -370,8 +370,9 @@ int wifi_on(void)
 
 #ifdef CONFIG_NRF70_SR_COEX
 	/* Configure coexistence AFTER AP is enabled. Do NOT configure before
-	 * AP enable — if nRF70 is in a bad state, coex config hangs forever. */
-	wifi_coex_configure(is_5ghz);
+	 * AP enable — if nRF70 is in a bad state, coex config hangs forever.
+	 * The band follows the channel (>=36 is 5GHz), same as wifi_enable_ap(). */
+	wifi_coex_configure(config_get_wifi_channel() >= 36);
 #endif
 
 	/* Configure static IP from Kconfig macros */
@@ -535,7 +536,7 @@ int wifi_run_throughput(const char *ip, uint16_t port, uint32_t dur_sec, uint32_
 	dst.sin_port = htons(port);
 	if (net_addr_pton(AF_INET, ip, &dst.sin_addr) < 0) {
 		LOG_ERR("invalid ip: %s", ip);
-		close(sock);
+		zsock_close(sock);
 		return -EINVAL;
 	}
 
@@ -559,7 +560,7 @@ int wifi_run_throughput(const char *ip, uint16_t port, uint32_t dur_sec, uint32_
 		}
 	}
 
-	close(sock);
+	zsock_close(sock);
 
 	uint32_t elapsed_ms = (uint32_t)(k_uptime_get() - start);
 	*out_kbps = (elapsed_ms > 0) ? (uint32_t)((uint64_t)bytes * 8U / elapsed_ms) : 0;

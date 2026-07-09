@@ -12,6 +12,19 @@ choice BOOTLOADER
 	default BOOTLOADER_MCUBOOT
 endchoice
 
+# nRF70 WiFi is a core feature of this board (nRF7002 via QSPI). NCS gates the
+# application's CONFIG_WIFI_NRF70 behind the sysbuild SB_CONFIG_WIFI_NRF70
+# (nrf/sysbuild/Kconfig.wifi), which defaults to n. Without this default, an
+# app's CONFIG_WIFI_NRF70=y in prj.conf is silently overridden to n by the
+# generated .config.sysbuild, the nRF70 driver is never compiled, and
+# net_if_get_first_wifi() returns NULL at runtime ("No WiFi interface").
+# Default it y here so every app on this board builds the driver; the app's
+# prj.conf still controls the rest (AP/STA mode, wpa_supplicant, etc.). A test
+# image that must not include WiFi sets SB_CONFIG_WIFI_NRF70=n in its own
+# sysbuild.conf.
+config WIFI_NRF70
+	default y
+
 # Overwrite-only mode (no rollback / no scratch swap).
 choice MCUBOOT_MODE
 	default MCUBOOT_MODE_OVERWRITE_ONLY
