@@ -1,0 +1,32 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+/sdk/flutter/pubspec.lock
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Flutter example build artifacts
+sdk/flutter/example/android/.gradle/
+sdk/flutter/example/android/app/build/
+sdk/flutter/example/ios/Pods/
+sdk/flutter/example/ios/.symlinks/
+sdk/flutter/example/build/
+
+# Native SDK build artifacts
+sdk/android/.gradle/
+sdk/android/local.properties
+sdk/android/**/build/
+sdk/ios/.build/
+sdk/ios/.swiftpm/
+sdk/ios/**/xcuserdata/
+
+# OS
+.DS_Store

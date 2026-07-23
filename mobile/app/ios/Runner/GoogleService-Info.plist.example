@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template only. Copy this file to GoogleService-Info.plist and fill in the
+  values from your own Firebase / Google Cloud project. The real file is
+  git-ignored and must not be committed.
+-->
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>YOUR_IOS_CLIENT_ID.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.YOUR_IOS_CLIENT_ID</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>YOUR_ANDROID_CLIENT_ID.apps.googleusercontent.com</string>
+	<key>BUNDLE_ID</key>
+	<string>com.example.yourapp</string>
+</dict>
+</plist>

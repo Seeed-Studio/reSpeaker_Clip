@@ -1,0 +1,6 @@
+/* Privacy - Usage Descriptions */
+"NSCameraUsageDescription" = "Used for scanning QR codes or taking photos when using related features.";
+"NSBluetoothAlwaysUsageDescription" = "Used to connect SenseCraft Voice devices and sync recording files.";
+"NSBluetoothPeripheralUsageDescription" = "Used to connect SenseCraft Voice devices and sync recording files.";
+"NSMicrophoneUsageDescription" = "Used for direct recording on the device and saving to local files.";
+"NSPhotoLibraryUsageDescription" = "Used to select or save images to the photo library when using related features.";

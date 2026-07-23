@@ -1,0 +1,6 @@
+/* Privacy - Usage Descriptions */
+"NSCameraUsageDescription" = "用于扫描二维码或拍摄照片（若使用相关功能）。";
+"NSBluetoothAlwaysUsageDescription" = "用于连接 SenseCraft Voice 设备并同步录音文件。";
+"NSBluetoothPeripheralUsageDescription" = "用于连接 SenseCraft Voice 设备并同步录音文件。";
+"NSMicrophoneUsageDescription" = "用于在手机端直接录音并保存到本地文件。";
+"NSPhotoLibraryUsageDescription" = "用于选择或保存图片到相册（若使用相关功能）。";

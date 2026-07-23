@@ -1,0 +1,379 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		26DD1CD2C0025484D1684065 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97620A0C850212CB7363EAB9 /* ContentView.swift */; };
+		50E93EB7AD6941B29A9537E4 /* VerifyViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BB85F51E8D15CA5136899EE /* VerifyViewModel.swift */; };
+		BF7D9FB05C1E433BEABBD135 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1E864B3A98D1863E2521BB4B /* Foundation.framework */; };
+		D63F6FD3E33D77B6C1E8785C /* SenseCraftVoiceVerifyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9754787CEC02C194B86B648 /* SenseCraftVoiceVerifyApp.swift */; };
+		D99D34C4405501B6DACBB06A /* SenseCraftVoiceIOS in Frameworks */ = {isa = PBXBuildFile; productRef = B64680D77203E0F07D73BE2B /* SenseCraftVoiceIOS */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		031C65A2847F37B55D2E332E /* SenseCraft Voice Verify.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "SenseCraft Voice Verify.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		1E864B3A98D1863E2521BB4B /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
+		2FE1BB827643C581F8C0A202 /* SenseCraftVoiceVerifyApp.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; name = SenseCraftVoiceVerifyApp.entitlements; path = Entitlements/SenseCraftVoiceVerifyApp.entitlements; sourceTree = "<group>"; };
+		6BB85F51E8D15CA5136899EE /* VerifyViewModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VerifyViewModel.swift; sourceTree = "<group>"; };
+		75950D98CF2AB1030089A1D7 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		97620A0C850212CB7363EAB9 /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		E9754787CEC02C194B86B648 /* SenseCraftVoiceVerifyApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SenseCraftVoiceVerifyApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2AB8EE0B5FC47068F56AA649 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BF7D9FB05C1E433BEABBD135 /* Foundation.framework in Frameworks */,
+				D99D34C4405501B6DACBB06A /* SenseCraftVoiceIOS in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		346A9BCF5FBA2E51830CB2CF /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				031C65A2847F37B55D2E332E /* SenseCraft Voice Verify.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		34ECEE4CBBE15187F2B2D703 = {
+			isa = PBXGroup;
+			children = (
+				346A9BCF5FBA2E51830CB2CF /* Products */,
+				6D36F69F720B099E34BF03B5 /* Frameworks */,
+				F391DD95E1E2A5CF761D58A6 /* Sources */,
+				824050C02332A870843DACBC /* Configuration */,
+			);
+			sourceTree = "<group>";
+		};
+		6D36F69F720B099E34BF03B5 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				B57EE9A4EF19815996294423 /* iOS */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		824050C02332A870843DACBC /* Configuration */ = {
+			isa = PBXGroup;
+			children = (
+				75950D98CF2AB1030089A1D7 /* Info.plist */,
+				2FE1BB827643C581F8C0A202 /* SenseCraftVoiceVerifyApp.entitlements */,
+			);
+			name = Configuration;
+			sourceTree = "<group>";
+		};
+		B57EE9A4EF19815996294423 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				1E864B3A98D1863E2521BB4B /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
+		F391DD95E1E2A5CF761D58A6 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				97620A0C850212CB7363EAB9 /* ContentView.swift */,
+				E9754787CEC02C194B86B648 /* SenseCraftVoiceVerifyApp.swift */,
+				6BB85F51E8D15CA5136899EE /* VerifyViewModel.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		20DB60FCE3FEB649222EE87C /* SenseCraftVoiceVerifyApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 166B939756060B9B292AD3D5 /* Build configuration list for PBXNativeTarget "SenseCraftVoiceVerifyApp" */;
+			buildPhases = (
+				46AD5FA3882159671AC7F994 /* Sources */,
+				2AB8EE0B5FC47068F56AA649 /* Frameworks */,
+				07B3EDC7F47853770BFC3BB2 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SenseCraftVoiceVerifyApp;
+			packageProductDependencies = (
+				B64680D77203E0F07D73BE2B /* SenseCraftVoiceIOS */,
+			);
+			productName = "SenseCraft Voice Verify";
+			productReference = 031C65A2847F37B55D2E332E /* SenseCraft Voice Verify.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		75220AAF1D76263481901818 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = 31C0C7A83D8AD3608A15EC35 /* Build configuration list for PBXProject "SenseCraftVoiceVerifyApp" */;
+			compatibilityVersion = "Xcode 3.2";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 34ECEE4CBBE15187F2B2D703;
+			packageReferences = (
+				72C064E70745C630DC915BA9 /* XCLocalSwiftPackageReference "../.." */,
+			);
+			productRefGroup = 346A9BCF5FBA2E51830CB2CF /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				20DB60FCE3FEB649222EE87C /* SenseCraftVoiceVerifyApp */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		07B3EDC7F47853770BFC3BB2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		46AD5FA3882159671AC7F994 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				26DD1CD2C0025484D1684065 /* ContentView.swift in Sources */,
+				D63F6FD3E33D77B6C1E8785C /* SenseCraftVoiceVerifyApp.swift in Sources */,
+				50E93EB7AD6941B29A9537E4 /* VerifyViewModel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		7C03213450980CF7862CDFD2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		9899BE8482CB35923458B2F4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = Entitlements/SenseCraftVoiceVerifyApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.seeed.sensecraftvoice.verify;
+				PRODUCT_NAME = "SenseCraft Voice Verify";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		CB4FCDCBA80A52CC440D5596 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_ENTITLEMENTS = Entitlements/SenseCraftVoiceVerifyApp.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.seeed.sensecraftvoice.verify;
+				PRODUCT_NAME = "SenseCraft Voice Verify";
+				SDKROOT = iphoneos;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		E9AD35D7ECB0B35CD7F888AC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		166B939756060B9B292AD3D5 /* Build configuration list for PBXNativeTarget "SenseCraftVoiceVerifyApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9899BE8482CB35923458B2F4 /* Release */,
+				CB4FCDCBA80A52CC440D5596 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		31C0C7A83D8AD3608A15EC35 /* Build configuration list for PBXProject "SenseCraftVoiceVerifyApp" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E9AD35D7ECB0B35CD7F888AC /* Debug */,
+				7C03213450980CF7862CDFD2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		72C064E70745C630DC915BA9 /* XCLocalSwiftPackageReference "../.." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B64680D77203E0F07D73BE2B /* SenseCraftVoiceIOS */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 72C064E70745C630DC915BA9 /* XCLocalSwiftPackageReference "../.." */;
+			productName = SenseCraftVoiceIOS;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 75220AAF1D76263481901818 /* Project object */;
+}

@@ -1,0 +1,24 @@
+## Android release signing (DO NOT COMMIT your real key.properties)
+#
+# When this file (or CI env vars) is present, **debug** builds also use this
+# keystore (see `app/build.gradle.kts` → `buildTypes.debug`). Google Sign-In /
+# OAuth then need only **one** SHA-1 for package `cc.seeed.voice`. Remove
+# `key.properties` to fall back to the default debug keystore for local runs.
+#
+# 1) Generate a keystore (example):
+#    keytool -genkeypair -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+#
+# 2) Copy this file to `android/key.properties` and fill values.
+# 3) Put your keystore file somewhere safe (recommended: outside repo or a secure path).
+#
+# This project also supports CI env vars:
+# - ANDROID_KEYSTORE_FILE
+# - ANDROID_KEYSTORE_PASSWORD
+# - ANDROID_KEY_ALIAS
+# - ANDROID_KEY_PASSWORD
+#
+storeFile=/absolute/path/to/upload-keystore.jks
+storePassword=YOUR_STORE_PASSWORD
+keyAlias=YOUR_KEY_ALIAS
+keyPassword=YOUR_KEY_PASSWORD
+

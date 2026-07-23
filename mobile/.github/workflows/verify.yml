@@ -1,0 +1,87 @@
+name: verify
+
+# Clean-checkout build & test for all three SDKs (no hardware required).
+# Full BLE / Wi-Fi / OTA validation still needs a phone + Clip device;
+# see docs/native-sdk-verification.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter:
+    name: Flutter SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: SDK — pub get / analyze / test
+        working-directory: sdk/flutter
+        run: |
+          flutter --version
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: Example — build debug APK
+        working-directory: sdk/flutter/example
+        run: |
+          flutter pub get
+          flutter build apk --debug
+
+  android:
+    name: Android SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Library unit tests
+        working-directory: sdk/android
+        run: ./gradlew test --no-daemon
+
+      - name: Build sample (assembleDebug)
+        working-directory: sdk/android
+        run: ./gradlew :sample:assembleDebug --no-daemon
+
+  ios:
+    name: iOS SDK (Swift)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Swift package
+        working-directory: sdk/ios
+        run: swift build
+
+      - name: Run Swift package tests
+        working-directory: sdk/ios
+        run: swift test
+
+      - name: No-hardware verification smoke
+        working-directory: sdk/ios
+        run: swift run SenseCraftVoiceVerifyCLI smoke
