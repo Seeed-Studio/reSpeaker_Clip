@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // The app keeps its own copies of these session helpers under core/audio/;
 // hide the SDK's identically-named exports so both can coexist.
@@ -17,6 +18,8 @@ import 'package:sensecraft_voice/sensecraft_voice.dart'
         mergeSessionOpusPartsInDirectory,
         sumCompleteSessionOpusSliceBytes,
         sumSessionOpusPartBytes;
+
+import 'package:wifi_iot/wifi_iot.dart';
 
 import '../../../core/db/account_db_key.dart';
 import '../../../core/storage/account_storage_paths.dart';
@@ -271,6 +274,19 @@ class WifiTransferController extends Notifier<WifiTransferState> {
   // reason) to avoid flooding the log file at this frequency.
   static const Duration _forceWifiKeepAliveInterval = Duration(seconds: 3);
 
+  // --- Wi‑Fi link diagnostics ---------------------------------------------
+  String? _lastLoggedWifiSsid;
+  int _wifiKeepAliveTicks = 0;
+  static const int _wifiSsidLogEveryTicks = 5; // ~15s
+
+  // --- Event-driven re-bind (Android) -------------------------------------
+  static const MethodChannel _wifiMonitorChannel =
+      MethodChannel('cc.seeed.voice/wifi_monitor');
+  static const EventChannel _wifiEventsChannel =
+      EventChannel('cc.seeed.voice/wifi_events');
+  StreamSubscription<dynamic>? _wifiEventSub;
+  bool _eventRebindInFlight = false;
+
   /// Mid-download stall flag. Set when [onOverallProgress] stops updating for
   /// [_wifiProgressStallTimeout] — does **not** ping the shared UDP socket
   /// (that would race the download recv loop). Read by [shouldCancel].
@@ -294,6 +310,57 @@ class WifiTransferController extends Notifier<WifiTransferState> {
   void _stopForceWifiKeepAlive() {
     _forceWifiKeepAlive?.cancel();
     _forceWifiKeepAlive = null;
+    _stopWifiNetworkEventMonitor();
+  }
+
+  /// Subscribe to native Wi‑Fi onAvailable/onLost events (Android only) and
+  /// re-bind to the device AP the moment one fires. No-op on iOS, which has no
+  /// equivalent callback and where the channel is not registered.
+  void _startWifiNetworkEventMonitor() {
+    if (!Platform.isAndroid) return;
+    _stopWifiNetworkEventMonitor();
+    try {
+      unawaited(
+        _wifiMonitorChannel.invokeMethod<String>('start').then(
+          (r) => AppLog.i('[WiFi] wifi_monitor started — wifiLock=$r'),
+          onError: (Object e) =>
+              AppLog.w('[WiFi] wifi_monitor start failed (non-fatal): $e'),
+        ),
+      );
+    } catch (e) {
+      AppLog.w('[WiFi] wifi_monitor start failed (non-fatal): $e');
+    }
+    _wifiEventSub = _wifiEventsChannel.receiveBroadcastStream().listen(
+          _onWifiNetworkEvent,
+          onError: (Object e) =>
+              AppLog.w('[WiFi] wifi_monitor event stream error: $e'),
+        );
+  }
+
+  void _stopWifiNetworkEventMonitor() {
+    _wifiEventSub?.cancel();
+    _wifiEventSub = null;
+    if (!Platform.isAndroid) return;
+    try {
+      unawaited(_wifiMonitorChannel.invokeMethod<void>('stop'));
+    } catch (_) {}
+  }
+
+  /// React to a native Wi‑Fi network event by immediately re-binding process
+  /// traffic to the device AP, so a mid-transfer OEM auto-switch is recovered
+  /// without waiting for the periodic safety-net bind.
+  Future<void> _onWifiNetworkEvent(dynamic event) async {
+    if (_fastSync == null) return;
+    final kind =
+        (event is Map ? event['event'] : event)?.toString() ?? 'unknown';
+    if (_eventRebindInFlight) return;
+    _eventRebindInFlight = true;
+    try {
+      await _rebindForceWifiUsage(reason: 'network event: $kind');
+      ref.read(deviceControllerProvider.notifier).touchWifiHandoff();
+    } finally {
+      _eventRebindInFlight = false;
+    }
   }
 
   void _stopWifiProgressStallWatchdog() {
@@ -317,14 +384,54 @@ class WifiTransferController extends Notifier<WifiTransferState> {
 
   void _startForceWifiKeepAlive() {
     _stopForceWifiKeepAlive();
-    // Immediate bind, then every [_forceWifiKeepAliveInterval].
+    _wifiKeepAliveTicks = 0;
+    _lastLoggedWifiSsid = null;
+    _startWifiNetworkEventMonitor();
     unawaited(_rebindForceWifiUsage(reason: 'keep-alive start'));
     _forceWifiKeepAlive = Timer.periodic(_forceWifiKeepAliveInterval, (_) {
-      // Empty reason → only failures are logged, not every 3s tick.
       unawaited(_rebindForceWifiUsage());
-      // Keep handoff TTL alive while Wi‑Fi is still working.
       ref.read(deviceControllerProvider.notifier).touchWifiHandoff();
+      unawaited(_logWifiLinkOnKeepAliveTick());
     });
+  }
+
+  Future<({String? ssid, int? rssi})> _readWifiLink() async {
+    String? ssid;
+    int? rssi;
+    try {
+      ssid = await WiFiForIoTPlugin.getSSID();
+    } catch (_) {}
+    try {
+      rssi = await WiFiForIoTPlugin.getCurrentSignalStrength();
+    } catch (_) {}
+    return (ssid: ssid, rssi: rssi);
+  }
+
+  String _formatWifiLink(({String? ssid, int? rssi}) snap) {
+    final target = state.hotspot?.ssid;
+    final onTarget = target != null &&
+        snap.ssid != null &&
+        (snap.ssid == target || snap.ssid == '"$target"');
+    return 'ssid=${snap.ssid ?? '?'} deviceAp=${target ?? '?'} onTarget=$onTarget'
+        '${snap.rssi != null ? ' rssi=${snap.rssi}dBm' : ''}';
+  }
+
+  Future<void> _logWifiLinkOnKeepAliveTick() async {
+    _wifiKeepAliveTicks++;
+    final snap = await _readWifiLink();
+    final changed = snap.ssid != _lastLoggedWifiSsid;
+    final periodic = _wifiKeepAliveTicks % _wifiSsidLogEveryTicks == 0;
+    if (!changed && !periodic) return;
+    if (changed) {
+      AppLog.w(
+        '[WiFi] link SSID changed mid-sync: was=${_lastLoggedWifiSsid ?? '?'} '
+        'now ${_formatWifiLink(snap)} — if onTarget=false the OS auto-switched '
+        'Wi‑Fi and UDP to the recorder will drop',
+      );
+      _lastLoggedWifiSsid = snap.ssid;
+    } else {
+      AppLog.i('[WiFi] link check: ${_formatWifiLink(snap)}');
+    }
   }
 
   void _noteWifiTransferProgress() {

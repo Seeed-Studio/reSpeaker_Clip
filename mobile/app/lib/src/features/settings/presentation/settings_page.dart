@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import '../../../app/theme/app_colors.dart';
 import '../../../app/theme/app_radii.dart';
 import '../../../core/widgets/app_pill_button.dart';
-import '../../../core/widgets/app_dialogs.dart';
 import '../../../core/widgets/app_toasts.dart';
 import '../../../core/l10n/app_locale_provider.dart';
 import '../../../core/l10n/app_localizations.dart';
@@ -38,7 +37,9 @@ class SettingsPage extends ConsumerWidget {
     final me = ref.watch(userProfileProvider);
     final versionAsync = ref.watch(appVersionProvider);
     final cacheSizeAsync = ref.watch(cacheSizeBytesProvider);
-    final canCheckAppUpdates = ref.watch(appUpdateCanCheckProvider);
+    final appUpdateInfo = ref.watch(appUpdateInfoProvider).valueOrNull;
+    final hasAppUpdate = appUpdateInfo?.updateAvailable == true &&
+        (appUpdateInfo?.downloadUrl.trim().isNotEmpty ?? false);
     final displayName =
         ((me?.name ?? '').trim().isNotEmpty) ? (me?.name ?? '').trim() : '—';
     final displayEmail = ((me?.email ?? session.email ?? '').trim().isNotEmpty)
@@ -145,12 +146,11 @@ class SettingsPage extends ConsumerWidget {
                   loading: () => '—',
                   error: (_, __) => '—',
                 ),
+                trailing: hasAppUpdate ? const _AppUpdateTrailing() : null,
+                onTap: hasAppUpdate
+                    ? () => _openLatestAppUpdate(context, ref, appUpdateInfo!)
+                    : null,
               ),
-              if (canCheckAppUpdates)
-                SettingsTile(
-                  title: l10n.checkForUpdates,
-                  onTap: () => _checkForAppUpdates(context, ref),
-                ),
               SettingsTile(
                 title: l10n.clearCache,
                 value: cacheSizeAsync.when(
@@ -241,38 +241,15 @@ class SettingsPage extends ConsumerWidget {
   }
 }
 
-Future<void> _checkForAppUpdates(BuildContext context, WidgetRef ref) async {
+Future<void> _openLatestAppUpdate(
+  BuildContext context,
+  WidgetRef ref,
+  AppUpdateInfo update,
+) async {
   final l10n = AppLocalizations.of(context)!;
-  final handle = AppDialogs.showLoading(
-    context,
-    message: l10n.checkingForUpdates,
-  );
   try {
-    final service = ref.read(appUpdateServiceProvider);
-    final update = await service.checkForUpdate();
-    handle.close();
-    if (!context.mounted) return;
-
-    if (update == null || !update.updateAvailable) {
-      return;
-    }
-
-    final notes = update.releaseNotes;
-    final notesText =
-        notes.isEmpty ? '' : '\n\n${notes.map((item) => '• $item').join('\n')}';
-    final ok = await AppDialogs.showConfirm(
-      context,
-      title: l10n.updateAvailableTitle,
-      message: '${l10n.latest}: ${update.latestVersionName}$notesText',
-      cancelText: l10n.updateLater,
-      confirmText: l10n.updateNow,
-      barrierDismissible: true,
-    );
-    if (!ok || !context.mounted) return;
-
-    await service.openUpdateUrl(update.downloadUrl);
+    await ref.read(appUpdateServiceProvider).openUpdateUrl(update.downloadUrl);
   } on AppUpdateServiceException catch (e) {
-    handle.close();
     if (!context.mounted) return;
     if (e.message.contains('not configured')) {
       AppToasts.showError(context, message: l10n.updateServiceNotConfigured);
@@ -280,9 +257,30 @@ Future<void> _checkForAppUpdates(BuildContext context, WidgetRef ref) async {
       AppToasts.showError(context, message: e.message);
     }
   } catch (_) {
-    handle.close();
     if (!context.mounted) return;
     AppToasts.showError(context, message: l10n.updateCheckFailed);
+  }
+}
+
+class _AppUpdateTrailing extends StatelessWidget {
+  const _AppUpdateTrailing();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        DecoratedBox(
+          decoration: BoxDecoration(
+            color: AppColors.danger,
+            shape: BoxShape.circle,
+          ),
+          child: SizedBox(width: 8, height: 8),
+        ),
+        SizedBox(width: 10),
+        Icon(Icons.chevron_right, color: AppColors.danger, size: 24),
+      ],
+    );
   }
 }
 

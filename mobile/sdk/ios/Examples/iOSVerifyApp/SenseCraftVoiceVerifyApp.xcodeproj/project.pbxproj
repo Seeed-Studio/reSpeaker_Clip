@@ -230,6 +230,7 @@
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SenseCraftVoiceVerifyApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7CTJQZ6G85;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
@@ -258,6 +259,7 @@
 				CODE_SIGN_ENTITLEMENTS = Entitlements/SenseCraftVoiceVerifyApp.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 7CTJQZ6G85;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;

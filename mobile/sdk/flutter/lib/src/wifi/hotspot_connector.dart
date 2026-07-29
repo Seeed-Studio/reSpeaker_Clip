@@ -33,6 +33,13 @@ class WifiHotspotConnector {
   /// Phone: give device AP time to beacon before scan/connect (Android).
   static const Duration _androidApSettleBeforeConnect = Duration(seconds: 2);
 
+  /// After a join attempt, association can land a moment after the plugin's
+  /// future completes. Re-check the live SSID a few times before declaring the
+  /// attempt failed — moving on to the next strategy tears down whatever
+  /// association did succeed.
+  static const int _androidJoinRecheckAttempts = 3;
+  static const Duration _androidJoinRecheckGap = Duration(milliseconds: 700);
+
   /// iOS [NEHotspotConfiguration] often fails with "network not found" if applied before the AP beacons.
   static const Duration _iosApSettleBeforeConnect = Duration(seconds: 3);
 
@@ -398,16 +405,30 @@ class WifiHotspotConnector {
 
       final scannedBssid = await _androidScanBssidForSsid(info.ssid);
 
-      Future<void> logSsidAfter(String step) async {
-        String? ssidAfter;
-        try {
-          ssidAfter = await WiFiForIoTPlugin.getSSID();
-        } catch (e) {
-          SdkLog.w('[WiFi] Android getSSID after $step failed (non-fatal): $e');
+      // Whether the phone is actually on the target AP. This — not the plugin's
+      // return value — decides whether a join attempt succeeded. On API 29+ the
+      // WifiNetworkSpecifier request can associate slightly after wifi_iot gives
+      // up, so it reports false while the phone is in fact joined; running the
+      // next strategy on that false verdict then tears the working association
+      // back down and the whole join fails.
+      Future<bool> joinedTarget(String step, {required bool recheck}) async {
+        final maxAttempts = recheck ? _androidJoinRecheckAttempts : 1;
+        for (var attempt = 1;; attempt++) {
+          String? ssidAfter;
+          try {
+            ssidAfter = await WiFiForIoTPlugin.getSSID();
+          } catch (e) {
+            SdkLog.w('[WiFi] Android getSSID after $step failed (non-fatal): $e');
+          }
+          final match = _androidSsidMatches(ssidAfter, info.ssid);
+          SdkLog.i(
+            '[WiFi] Android after $step (check $attempt/$maxAttempts): '
+            'getSSID=$ssidAfter matchTarget=$match',
+          );
+          if (match) return true;
+          if (attempt >= maxAttempts) return false;
+          await Future<void>.delayed(_androidJoinRecheckGap);
         }
-        SdkLog.i(
-          '[WiFi] Android after $step: getSSID=$ssidAfter matchTarget=${ssidAfter == info.ssid}',
-        );
       }
 
       // Join budget is intentionally short. On API 29+ the join uses a
@@ -427,8 +448,8 @@ class WifiHotspotConnector {
         withInternet: false,
         timeoutInSeconds: 20,
       );
-      await logSsidAfter('step1');
-      if (connected) {
+      var joined = await joinedTarget('step1', recheck: !connected);
+      if (connected || joined) {
         await _wifiIotForceWifiUsage(true);
         return true;
       }
@@ -444,8 +465,8 @@ class WifiHotspotConnector {
           withInternet: false,
           timeoutInSeconds: 20,
         );
-        await logSsidAfter('step2');
-        if (connected) {
+        joined = await joinedTarget('step2', recheck: !connected);
+        if (connected || joined) {
           await _wifiIotForceWifiUsage(true);
           return true;
         }
@@ -466,8 +487,8 @@ class WifiHotspotConnector {
         connected = false;
       }
       SdkLog.i('[WiFi] Android findAndConnect raw result=$connected');
-      await logSsidAfter('step3');
-      if (connected) {
+      joined = await joinedTarget('step3', recheck: !connected);
+      if (connected || joined) {
         await _wifiIotForceWifiUsage(true);
         return true;
       }
@@ -483,6 +504,21 @@ class WifiHotspotConnector {
       SdkLog.w('_connectAndroid failed', e, st);
       return false;
     }
+  }
+
+  /// Whether Android's live SSID [reported] refers to [target].
+  ///
+  /// `WifiInfo.getSSID()` wraps the name in quotes on some ROMs, and returns the
+  /// literal `<unknown ssid>` (or an empty value) while unassociated or when
+  /// location access is missing.
+  static bool _androidSsidMatches(String? reported, String target) {
+    if (reported == null) return false;
+    var s = reported.trim();
+    if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+      s = s.substring(1, s.length - 1);
+    }
+    if (s.isEmpty || s == '<unknown ssid>' || s == '0x') return false;
+    return s == target;
   }
 
   /// Returns BSSID from last scan if [ssid] is seen (Android only).

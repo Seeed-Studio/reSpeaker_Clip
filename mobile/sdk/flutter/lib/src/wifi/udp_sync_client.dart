@@ -60,6 +60,10 @@ class ClipUdpSyncClient {
   bool _connected = false;
   bool _lastFailureUnreachable = false;
 
+  /// Total datagrams pulled off the socket since [connect] — used with the
+  /// kernel drop counter to quantify burst packet loss during a download.
+  int _rxDatagramCount = 0;
+
   bool get isConnected => _connected;
 
   /// Set when [connect] or [_send] failed with a routing error (phone off AP).
@@ -134,6 +138,7 @@ class ClipUdpSyncClient {
     _earlyRxReplay.clear();
     _rxQueue.clear();
     _rxSignal = null;
+    _rxDatagramCount = 0;
     _host = InternetAddress(host);
     _port = port;
 
@@ -170,6 +175,7 @@ class ClipUdpSyncClient {
             final dg = s.receive();
             if (dg == null) break;
             if (dg.data.isNotEmpty) {
+              _rxDatagramCount++;
               _enqueueRx(Uint8List.fromList(dg.data));
             }
           }
@@ -194,9 +200,12 @@ class ClipUdpSyncClient {
     _startHeartbeat();
   }
 
+  /// Idle cadence: just enough to prove the session is still alive.
+  static const Duration _idleHeartbeatInterval = Duration(seconds: 5);
+
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _heartbeatTimer = Timer.periodic(_idleHeartbeatInterval, (_) {
       if (!_connected || _socket == null || _host == null) return;
       final ts = DateTime.now().millisecondsSinceEpoch & 0xffffffff;
       final bd = ByteData(5)
@@ -208,6 +217,9 @@ class ClipUdpSyncClient {
     });
   }
 
+  /// Silence the uplink while a bulk download is in flight: every frame we send
+  /// contends with the device's TX on a half-duplex link, and the firmware has
+  /// to service the RX path mid-burst.
   void _pauseHeartbeat() {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
@@ -249,23 +261,79 @@ class ClipUdpSyncClient {
   }
 
   /// Best-effort larger kernel RX queue to reduce bursty drops on Wi‑Fi.
+  ///
+  /// Sets SO_RCVBUF then **reads the granted value back** and logs it. On
+  /// Android/Linux the request is silently clamped to `net.core.rmem_max`
+  /// (commonly ~208 KB), and an app cannot exceed it without `SO_RCVBUFFORCE`
+  /// (needs CAP_NET_ADMIN). A small granted buffer is a prime suspect for the
+  /// burst UDP loss seen on some phones, so surface it explicitly.
   static void _tryEnlargeUdpReceiveBuffer(RawDatagramSocket socket) {
-    const bufBytes = 4 * 1024 * 1024;
+    // SO_RCVBUF: 8 on Linux/Android, 0x1002 (SO_RCVBUF) on Darwin.
+    final int optRcvBuf = (Platform.isIOS || Platform.isMacOS) ? 0x1002 : 8;
+    const requested = 8 * 1024 * 1024;
     try {
-      if (Platform.isIOS || Platform.isMacOS) {
-        socket.setRawOption(RawSocketOption.fromInt(
-          RawSocketOption.levelSocket,
-          0x1002,
-          bufBytes,
-        ));
-      } else {
-        socket.setRawOption(RawSocketOption.fromInt(
-          RawSocketOption.levelSocket,
-          8,
-          bufBytes,
-        ));
+      socket.setRawOption(RawSocketOption.fromInt(
+        RawSocketOption.levelSocket,
+        optRcvBuf,
+        requested,
+      ));
+    } catch (e) {
+      SdkLog.w('ClipUdpSync: set SO_RCVBUF failed: $e');
+    }
+    var granted = 0;
+    try {
+      final raw = socket.getRawOption(RawSocketOption(
+        RawSocketOption.levelSocket,
+        optRcvBuf,
+        Uint8List(4),
+      ));
+      if (raw.length >= 4) {
+        granted = ByteData.sublistView(raw).getInt32(0, Endian.host);
       }
-    } catch (_) {}
+    } catch (e) {
+      SdkLog.w('ClipUdpSync: get SO_RCVBUF failed: $e');
+    }
+    // Linux/Android report 2× the usable size (kernel bookkeeping overhead).
+    final usable =
+        (Platform.isAndroid || Platform.isLinux) ? granted ~/ 2 : granted;
+    final clamped = granted > 0 && granted < requested;
+    SdkLog.i(
+      'ClipUdpSync: SO_RCVBUF requested=${requested ~/ 1024}KB '
+      'granted=${granted ~/ 1024}KB (~${usable ~/ 1024}KB usable)'
+      '${clamped ? ' — CLAMPED by net.core.rmem_max; burst UDP drops likely' : ''}',
+    );
+  }
+
+  /// Linux desktop only: this socket's kernel UDP drop counter, read from the
+  /// last column of `/proc/net/udp[6]` for our bound local port.
+  ///
+  /// Android apps are blocked from these proc files by SELinux, and probing
+  /// them emits noisy `avc: denied` lines, so Android intentionally returns -1.
+  ///
+  /// A rising counter during a download means datagrams reached the phone but
+  /// the kernel discarded them because the receive buffer overflowed (the app
+  /// isolate could not drain fast enough) — i.e. NOT over-the-air RF loss.
+  int _readKernelUdpDrops() {
+    if (!Platform.isLinux) return -1;
+    final port = _socket?.port;
+    if (port == null) return -1;
+    final portHex = port.toRadixString(16).toUpperCase().padLeft(4, '0');
+    for (final path in const ['/proc/net/udp', '/proc/net/udp6']) {
+      try {
+        final f = File(path);
+        if (!f.existsSync()) continue;
+        for (final line in f.readAsLinesSync()) {
+          final parts = line.trim().split(RegExp(r'\s+'));
+          if (parts.length < 13) continue;
+          final local = parts[1]; // hex "IP:PORT"
+          final colon = local.lastIndexOf(':');
+          if (colon < 0) continue;
+          if (local.substring(colon + 1) != portHex) continue;
+          return int.tryParse(parts.last) ?? -1;
+        }
+      } catch (_) {}
+    }
+    return -1;
   }
 
   Future<Uint8List?> _recvOneUntil(DateTime deadline) async {
@@ -366,7 +434,12 @@ class ClipUdpSyncClient {
   }
 
   void _sendFileAck(bool ok) {
-    if (!_send(Uint8List.fromList([udpFrameFileAck, ok ? 0x00 : 0x01]))) {
+    final sent =
+        _send(Uint8List.fromList([udpFrameFileAck, ok ? 0x00 : 0x01]));
+    SdkLog.i(
+      'ClipUdpSync: FILE_ACK ${ok ? 'ACK' : 'NACK'} sent=$sent',
+    );
+    if (!sent) {
       SdkLog.w('ClipUdpSync: FILE_ACK send failed');
     }
   }
@@ -480,6 +553,7 @@ class ClipUdpSyncClient {
       /// Drop DATA with seq above this — stale datagrams from a prior retransmit
       /// would otherwise sit in [pendingDataBySeq] and corrupt assembly.
       var maxDataSeqInclusive = 0;
+      var expectedDataFrames = 0;
       final currentData = BytesBuilder(copy: false);
       var fileCrc = 0;
       var nextExpectedSeq = 0;
@@ -494,7 +568,11 @@ class ClipUdpSyncClient {
       // otherwise burn ~12 full-file retries (~1 min) before TRANSFER_DONE
       // file_count=0. Bail after a few consecutive same-file NACKs so the caller
       // can fall back to the reliable BLE path instead of stalling.
-      const maxConsecutiveFileNacks = 4;
+      // Match the firmware's file-level retry budget. Four attempts was too
+      // aggressive for phones with occasional transient UDP loss and caused
+      // the app to send AT+CANCEL while firmware still had retries available.
+      // Severe-loss devices may still exhaust all ten and fall back to BLE.
+      const maxConsecutiveFileNacks = 10;
       var consecutiveFileNacks = 0;
       String? lastNackFile;
 
@@ -508,10 +586,45 @@ class ClipUdpSyncClient {
       var outOfOrderHolds = 0;
       var duplicateSkips = 0;
       var staleDrops = 0;
+      var malformedDataDrops = 0;
+      var dataCrcDrops = 0;
+      // Per-file snapshots to attribute loss: datagrams delivered to us and the
+      // kernel drop counter at FILE_START, compared again at FILE_END.
+      var fileRxBaseline = 0;
+      var fileKdropBaseline = -1;
 
       void resetFileAssemblyState() {
         nextExpectedSeq = 0;
         pendingDataBySeq.clear();
+      }
+
+      String missingSeqSummary() {
+        if (expectedDataFrames <= 0) return 'none';
+        final ranges = <String>[];
+        var missingCount = 0;
+        int? rangeStart;
+        var previous = -1;
+        for (var seq = nextExpectedSeq; seq < expectedDataFrames; seq++) {
+          if (pendingDataBySeq.containsKey(seq)) continue;
+          missingCount++;
+          if (rangeStart == null) {
+            rangeStart = seq;
+          } else if (seq != previous + 1) {
+            if (ranges.length < 8) {
+              ranges.add(rangeStart == previous
+                  ? '$rangeStart'
+                  : '$rangeStart-$previous');
+            }
+            rangeStart = seq;
+          }
+          previous = seq;
+        }
+        if (rangeStart != null && ranges.length < 8) {
+          ranges.add(
+              rangeStart == previous ? '$rangeStart' : '$rangeStart-$previous');
+        }
+        return 'count=$missingCount ranges=${ranges.join(',')}'
+            '${missingCount > 0 && ranges.length >= 8 ? ',…' : ''}';
       }
 
       void appendVerifiedPayload(Uint8List payload) {
@@ -523,16 +636,22 @@ class ClipUdpSyncClient {
       void ingestDataFrame(Uint8List data) {
         final cn = currentName;
         if (cn == null) return;
-        if (data.length < _udpDataHeaderSize) return;
+        if (data.length < _udpDataHeaderSize) {
+          malformedDataDrops++;
+          return;
+        }
         final dataLen = data[3] | (data[4] << 8);
-        if (data.length < _udpDataHeaderSize + dataLen) return;
+        if (data.length < _udpDataHeaderSize + dataLen) {
+          malformedDataDrops++;
+          return;
+        }
         final recvCrc =
             ByteData.sublistView(data, 5, 9).getUint32(0, Endian.little);
         final payload =
             data.sublist(_udpDataHeaderSize, _udpDataHeaderSize + dataLen);
         final calc = crc32Ieee(payload);
         if (calc != recvCrc) {
-          SdkLog.w('ClipUdpSync: DATA crc mismatch');
+          dataCrcDrops++;
           return;
         }
         final seq = (data[1] | (data[2] << 8)) & 0xffff;
@@ -614,6 +733,7 @@ class ClipUdpSyncClient {
           final fileSize = bd.getUint32(0, Endian.little);
           declaredFileSize = fileSize;
           final chunkSlots = fileSize == 0 ? 0 : (fileSize + 1023) ~/ 1024;
+          expectedDataFrames = chunkSlots;
           maxDataSeqInclusive = fileSize == 0 ? 8 : chunkSlots + 47;
           currentData.clear();
           fileCrc = 0;
@@ -621,9 +741,13 @@ class ClipUdpSyncClient {
           outOfOrderHolds = 0;
           duplicateSkips = 0;
           staleDrops = 0;
+          malformedDataDrops = 0;
+          dataCrcDrops = 0;
           onProgress?.call(name, filesReceived, totalFiles, receivedBytes,
               totalBytes > 0 ? totalBytes : null);
           SdkLog.i('ClipUdpSync FILE_START $name ($fileSize bytes)');
+          fileRxBaseline = _rxDatagramCount;
+          fileKdropBaseline = _readKernelUdpDrops();
           lastProgressAt = DateTime.now();
           continue;
         }
@@ -641,14 +765,87 @@ class ClipUdpSyncClient {
           if (data.length < 5) continue;
           final serverCrc =
               ByteData.sublistView(data, 1, 5).getUint32(0, Endian.little);
-          final crcOk = (fileCrc & 0xffffffff) == (serverCrc & 0xffffffff);
           final cn = currentName;
+          var crcOk =
+              (fileCrc & 0xffffffff) == (serverCrc & 0xffffffff);
+
+          // Some phone Wi-Fi drivers deliver the final DATA datagrams after
+          // FILE_END. Do not NACK immediately: only for an incomplete/CRC-bad
+          // file, allow a short grace window to consume late DATA. Healthy
+          // files take this path zero times and have no added latency.
+          if (cn != null &&
+              (currentData.length != declaredFileSize || !crcOk)) {
+            const grace = Duration(milliseconds: 500);
+            final graceDeadline = DateTime.now().add(grace);
+            final beforeFrames =
+                nextExpectedSeq + pendingDataBySeq.length;
+            final beforeMissing = missingSeqSummary();
+            final deferred = <Uint8List>[];
+            SdkLog.i(
+              'ClipUdpSync FILE_END grace start ${grace.inMilliseconds}ms '
+              'frames=$beforeFrames/$expectedDataFrames '
+              'missing[$beforeMissing]',
+            );
+            while (DateTime.now().isBefore(graceDeadline)) {
+              if (shouldCancel?.call() == true) break;
+              final late = await _recvOneUntil(graceDeadline);
+              if (late == null) break;
+              if (late.isEmpty) continue;
+              final lateType = late[0];
+              if (lateType == udpFrameData) {
+                ingestDataFrame(late);
+                crcOk = (fileCrc & 0xffffffff) ==
+                    (serverCrc & 0xffffffff);
+                if (currentData.length == declaredFileSize && crcOk) {
+                  break;
+                }
+              } else if (lateType != udpFrameHeartbeat &&
+                  lateType != udpFrameFileEnd) {
+                // Firmware normally waits for FILE_ACK before sending another
+                // control frame. Preserve any unexpected frame for the normal
+                // loop rather than consuming it inside the grace window.
+                deferred.add(late);
+              }
+            }
+            if (deferred.isNotEmpty) {
+              _earlyRxReplay.insertAll(0, deferred);
+            }
+            final afterFrames =
+                nextExpectedSeq + pendingDataBySeq.length;
+            final afterMissing = missingSeqSummary();
+            SdkLog.i(
+              'ClipUdpSync FILE_END grace done recovered='
+              '${afterFrames - beforeFrames} crcOk=$crcOk '
+              'assembled=${currentData.length}/$declaredFileSize '
+              'frames=$afterFrames/$expectedDataFrames '
+              'missing[$afterMissing]',
+            );
+          }
+
+          // Loss attribution: how many datagrams we actually pulled off the
+          // socket for this file, and how many the kernel dropped (buffer
+          // overflow) in the same window. kdrop>0 ⇒ kernel/CPU-side loss, not RF.
+          final rxThisFile = _rxDatagramCount - fileRxBaseline;
+          final kdropNow = _readKernelUdpDrops();
+          final kdropDelta = (fileKdropBaseline >= 0 && kdropNow >= 0)
+              ? kdropNow - fileKdropBaseline
+              : -1;
+          final lossDiag =
+              'rx=$rxThisFile kdrop=${kdropDelta >= 0 ? kdropDelta : 'n/a'}';
+          final uniqueDataFrames = nextExpectedSeq + pendingDataBySeq.length;
+          final missing = missingSeqSummary();
           SdkLog.i(
             'ClipUdpSync FILE_END $cn crcOk=$crcOk assembled=${currentData.length}/'
             '$declaredFileSize reassembly[outOfOrder=$outOfOrderHolds '
-            'dup=$duplicateSkips stale=$staleDrops pending=${pendingDataBySeq.length}]',
+            'dup=$duplicateSkips stale=$staleDrops pending=${pendingDataBySeq.length}] '
+            'frames=$uniqueDataFrames/$expectedDataFrames '
+            'dataCrcDrops=$dataCrcDrops malformed=$malformedDataDrops '
+            'missing[$missing] $lossDiag',
           );
-          if (crcOk && cn != null && currentData.isNotEmpty) {
+          if (crcOk &&
+              cn != null &&
+              currentData.isNotEmpty &&
+              currentData.length == declaredFileSize) {
             consecutiveFileNacks = 0;
             lastNackFile = null;
             _sendFileAck(true);
@@ -674,7 +871,9 @@ class ClipUdpSyncClient {
               'ClipUdpSync FILE_END NACK: crcOk=$crcOk name=$cn assembled=${currentData.length} '
               'declared=$declaredFileSize localCrc=0x${(fileCrc & 0xffffffff).toRadixString(16)} '
               'serverCrc=0x${(serverCrc & 0xffffffff).toRadixString(16)} pending=${pendingDataBySeq.length} '
-              'nextSeq=$nextExpectedSeq',
+              'nextSeq=$nextExpectedSeq frames=$uniqueDataFrames/$expectedDataFrames '
+              'dataCrcDrops=$dataCrcDrops malformed=$malformedDataDrops '
+              'missing[$missing] $lossDiag',
             );
             _sendFileAck(false);
             if (cn != null && cn == lastNackFile) {

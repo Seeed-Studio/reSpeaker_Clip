@@ -38,7 +38,7 @@ class SettingsCard extends StatelessWidget {
               ),
             ],
           ),
-          
+
           // Material wraps InkWell splash and clips to radius so long-press does not show a gray box edge.
           child: Material(
             color: Colors.transparent,
@@ -46,7 +46,9 @@ class SettingsCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 for (var i = 0; i < children.length; i++) ...[
-                  if (i > 0) const Divider(height: 1, thickness: 1, color: AppColors.border),
+                  if (i > 0)
+                    const Divider(
+                        height: 1, thickness: 1, color: AppColors.border),
                   children[i],
                 ],
               ],
@@ -86,22 +88,28 @@ class SettingsTile extends StatelessWidget {
         ? null
         : Text(
             value!,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.textTertiary),
+            style: Theme.of(context)
+                .textTheme
+                .bodyMedium
+                ?.copyWith(color: AppColors.textTertiary),
           );
+    final showDefaultChevron = trailing == null && onTap != null;
 
     final child = Padding(
-      padding: const EdgeInsets.symmetric(horizontal:12, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       child: Row(
         children: [
           Expanded(child: Text(title, style: titleStyle)),
+          if (valueWidget != null) ...[
+            valueWidget,
+            if (trailing != null || showDefaultChevron)
+              const SizedBox(width: 10),
+          ],
           if (trailing != null) ...[
             trailing!,
-          ] else ...[
-            if (valueWidget != null) ...[
-              valueWidget,
-              const SizedBox(width: 10),
-            ],
-            const Icon(Icons.chevron_right, color: AppColors.textPlaceholder,size: 24),
+          ] else if (showDefaultChevron) ...[
+            const Icon(Icons.chevron_right,
+                color: AppColors.textPlaceholder, size: 24),
           ],
         ],
       ),
@@ -139,7 +147,7 @@ class SettingsSwitchTile extends StatelessWidget {
           Switch.adaptive(
             value: value,
             onChanged: onChanged,
-            activeColor: Theme.of(context).colorScheme.primary,
+            activeThumbColor: Theme.of(context).colorScheme.primary,
           ),
         ],
       ),
@@ -167,10 +175,12 @@ class SettingsPillAction extends StatelessWidget {
         ),
         child: Text(
           label,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: primary, fontWeight: FontWeight.w500),
+          style: Theme.of(context)
+              .textTheme
+              .bodyMedium
+              ?.copyWith(color: primary, fontWeight: FontWeight.w500),
         ),
       ),
     );
   }
 }
-

@@ -50,13 +50,14 @@ class AppUpdateServiceException implements Exception {
 const String kAppChannel =
     String.fromEnvironment('APP_CHANNEL', defaultValue: 'store');
 const String kAppUpdateBaseUrl =
-    String.fromEnvironment('APP_UPDATE_BASE_URL', defaultValue: '');
+    'https://sensecraft-voice-update-worker.seeed.cc';
+const String kDirectApkChannel = 'android_direct_apk';
 const String kAppUpdatePath = '/api/v1/app/update/check';
 
 final appChannelProvider = Provider<String>((_) => kAppChannel);
 final appUpdateCanCheckProvider = Provider<bool>((ref) {
   return Platform.isAndroid &&
-      ref.watch(appChannelProvider) == 'android_direct_apk';
+      ref.watch(appChannelProvider) == kDirectApkChannel;
 });
 
 final appUpdateServiceProvider = Provider<AppUpdateService>((ref) {
@@ -64,6 +65,16 @@ final appUpdateServiceProvider = Provider<AppUpdateService>((ref) {
     baseUrl: kAppUpdateBaseUrl,
     channel: ref.watch(appChannelProvider),
   );
+});
+
+final appUpdateInfoProvider = FutureProvider<AppUpdateInfo?>((ref) async {
+  final service = ref.watch(appUpdateServiceProvider);
+  if (!service.canCheck) return null;
+  try {
+    return await service.checkForUpdate();
+  } catch (_) {
+    return null;
+  }
 });
 
 class AppUpdateService {
@@ -84,12 +95,12 @@ class AppUpdateService {
   final String channel;
   final Dio _dio;
 
-  bool get canCheck => Platform.isAndroid && channel == 'android_direct_apk';
+  bool get canCheck => Platform.isAndroid && channel == kDirectApkChannel;
 
   Future<AppUpdateInfo?> checkForUpdate() async {
     if (!canCheck) return null;
     if (baseUrl.trim().isEmpty) {
-      throw AppUpdateServiceException('APP_UPDATE_BASE_URL is not configured');
+      throw AppUpdateServiceException('App update service is not configured');
     }
 
     final info = await PackageInfo.fromPlatform();
@@ -115,6 +126,10 @@ class AppUpdateService {
     }
     final payload = Map<String, dynamic>.from(payloadRaw);
 
+    final responsePlatform = (payload['platform'] ?? 'android').toString();
+    final responseChannel = (payload['channel'] ?? channel).toString();
+    final responsePackageName =
+        (payload['packageName'] ?? info.packageName).toString();
     final latestVersionCode = _asInt(payload['latestVersionCode']);
     final minSupportedVersionCode = _asInt(payload['minSupportedVersionCode']);
     final updateAvailable = payload['updateAvailable'] == true;
@@ -126,10 +141,20 @@ class AppUpdateService {
     final publishedAt =
         DateTime.tryParse((payload['publishedAt'] ?? '').toString());
 
+    _validateUpdatePayload(
+      platform: responsePlatform,
+      channel: responseChannel,
+      packageName: responsePackageName,
+      expectedPackageName: info.packageName,
+      action: action,
+      downloadUrl: downloadUrl,
+      updateAvailable: updateAvailable,
+    );
+
     return AppUpdateInfo(
-      platform: (payload['platform'] ?? 'android').toString(),
-      channel: (payload['channel'] ?? channel).toString(),
-      packageName: (payload['packageName'] ?? info.packageName).toString(),
+      platform: responsePlatform,
+      channel: responseChannel,
+      packageName: responsePackageName,
       currentVersionCode: currentVersionCode,
       currentVersionName: currentVersionName,
       latestVersionCode: latestVersionCode,
@@ -146,10 +171,10 @@ class AppUpdateService {
 
   Future<void> openUpdateUrl(String url) async {
     final uri = Uri.tryParse(url);
-    if (uri == null) {
+    if (!_isHttpsUri(uri)) {
       throw AppUpdateServiceException('Invalid update url');
     }
-    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final ok = await launchUrl(uri!, mode: LaunchMode.externalApplication);
     if (!ok) {
       throw AppUpdateServiceException('Could not open update url');
     }
@@ -186,6 +211,36 @@ class AppUpdateService {
         .map((item) => item.toString())
         .where((item) => item.trim().isNotEmpty)
         .toList();
+  }
+
+  static void _validateUpdatePayload({
+    required String platform,
+    required String channel,
+    required String packageName,
+    required String expectedPackageName,
+    required String action,
+    required String downloadUrl,
+    required bool updateAvailable,
+  }) {
+    if (platform.toLowerCase() != 'android') {
+      throw AppUpdateServiceException('Unsupported update platform');
+    }
+    if (channel != kDirectApkChannel) {
+      throw AppUpdateServiceException('Unsupported update channel');
+    }
+    if (packageName != expectedPackageName) {
+      throw AppUpdateServiceException('Update package does not match this app');
+    }
+    if (action != 'download') {
+      throw AppUpdateServiceException('Unsupported update action');
+    }
+    if (updateAvailable && !_isHttpsUri(Uri.tryParse(downloadUrl))) {
+      throw AppUpdateServiceException('Invalid update url');
+    }
+  }
+
+  static bool _isHttpsUri(Uri? uri) {
+    return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty;
   }
 
   static String _joinPath(String left, String right) {

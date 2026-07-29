@@ -17,6 +17,12 @@
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
+    <!-- Observe Wi‑Fi network onAvailable/onLost so Fast Sync can re-bind to the
+         device AP the instant an OEM ROM drops / switches the network. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Required by WifiManager.createWifiLock: keeps the radio out of power save
+         while Fast Sync streams UDP from the device AP. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     
     <!-- Local audio recording -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
