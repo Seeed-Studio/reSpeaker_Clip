@@ -59,6 +59,23 @@ west build --build-dir build-clip-prod --board clip/nrf5340/cpuapp applications/
   -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 ```
 
+**Development (console over USB CDC — no J-Link / UART adapter needed):**
+```sh
+west build --build-dir build-clip-dev --board clip/nrf5340/cpuapp applications/clip \
+  -- -DFILE_SUFFIX=dev
+```
+This variant auto-enables the app's USB CDC ACM at boot (`CONFIG_CLIP_USB_AUTO_ENABLE=y`)
+and redirects the console + UART log backend from uart0 to the CDC port, so logs are
+visible over USB the moment the device is plugged in. Flash it like any other app image
+(signed bin via USB DFU, or `merged.hex` with a J-Link). Notes:
+
+- Log level follows the app's `prj.conf` (`CONFIG_CLIP_LOG_LEVEL`) — same as the debug build.
+- While USB is up the SD card is exported to the host via MSC, so FS (SD) logging stays off.
+- Messages printed before USB enumeration are lost; with no host attached, console output
+  is dropped (never blocks boot).
+- `FILE_SUFFIX` files are discovered only at configure time: if you add/remove suffixed
+  files, rebuild with `--pristine` (a stale `DTC_OVERLAY_FILE` is cached otherwise).
+
 > **Board identifier**: `clip/nrf5340/cpuapp` (NOT `respeaker/...`)
 
 ### Firmware Upgrade (USB — no J-Link needed)

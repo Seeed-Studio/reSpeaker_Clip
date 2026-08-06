@@ -1,0 +1,40 @@
+/*
+ * Copyright (c) 2025 Seeed Technology Co., Ltd.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Development-environment variant of clip_nrf5340_cpuapp.overlay, selected
+ * when building with -DFILE_SUFFIX=dev. FILE_SUFFIX semantics: the suffixed
+ * file REPLACES the base file, so keep this in sync with
+ * clip_nrf5340_cpuapp.overlay!
+ *
+ * Adds: console (and with it the UART log backend, printk, fault output)
+ * redirected from uart0 to the app's USB CDC ACM port, so users without a
+ * J-Link / UART adapter can watch logs over USB.
+ *
+ * Trade-offs (accepted for a debug convenience build):
+ * - Messages printed before USB enumeration completes are lost (the CDC
+ *   port is not connected yet); runtime logging is unaffected.
+ * - hw-flow-control is intentionally NOT enabled on cdc_acm_uart: with it,
+ *   cdc_acm poll_out blocks forever while no host is reading, which would
+ *   hang boot on a charger-only port. Without it, a slow or absent host
+ *   just drops console output.
+ */
+
+/ {
+    chosen {
+        zephyr,console = &cdc_acm_uart;
+        zephyr,shell-uart = &cdc_acm_uart;
+    };
+};
+
+/* Enable display for UI module */
+&ch1115 {
+    status = "okay";
+};
+
+&i2c2 {
+    status = "okay";
+};
