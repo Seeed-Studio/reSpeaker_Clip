@@ -2,3 +2,31 @@ config BOARD_CLIP
 	select SOC_NRF5340_CPUAPP_QKAA if BOARD_CLIP_NRF5340_CPUAPP
 	select SOC_NRF5340_CPUAPP_QKAA if BOARD_CLIP_NRF5340_CPUAPP_NS
 	select SOC_NRF5340_CPUNET_QKAA if BOARD_CLIP_NRF5340_CPUNET
+
+# -----------------------------------------------------------------------------
+# Development-environment switches
+#
+# These live in the BOARD Kconfig (not the app Kconfig) on purpose: snippet
+# conf files are broadcast by sysbuild to every image (mcuboot, b0n,
+# ipc_radio), and assigning an app-only symbol there aborts the build. A
+# board-level symbol is visible to every image built for this board, so the
+# `dev` snippet can set it safely; images without supporting code just
+# ignore it.
+# -----------------------------------------------------------------------------
+
+config CLIP_USB_AUTO_ENABLE
+	bool "Auto-enable the app USB CDC+MSC at boot (development)"
+	default n
+	help
+	  Development environments (built with -DFILE_SUFFIX=dev, see
+	  applications/clip/sysbuild/clip_dev.conf): bring up the clip app's
+	  USB CDC ACM + MSC device right after boot instead of waiting for
+	  AT+USB=on over BLE, so the serial port is available the moment the
+	  device is plugged in.
+
+	  While USB is enabled the SD card is exported to the host over MSC
+	  and unmounted from the app, so FS (SD) logging is unavailable, and
+	  the console is redirected to the CDC port via the dev board overlay
+	  (applications/clip/boards/clip_nrf5340_cpuapp_dev.overlay). The
+	  log level is left untouched and follows the application's prj.conf
+	  (CONFIG_CLIP_LOG_LEVEL).

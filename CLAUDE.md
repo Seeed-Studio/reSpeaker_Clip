@@ -80,9 +80,31 @@ The default (no-snippet) build is the **debug** image: UART console on, FS log t
 
 Build with snippet: `west build ... -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production` (SNIPPET_ROOT must be an absolute path).
 
+### Dev Build (console over USB CDC)
+
+For users without a J-Link / UART adapter, a **dev** variant redirects the console to USB:
+
+```sh
+west build --build-dir build-clip-dev --board clip/nrf5340/cpuapp applications/clip -- -DFILE_SUFFIX=dev
+```
+
+- `FILE_SUFFIX=dev` makes sysbuild pick up `applications/clip/sysbuild/clip_dev.conf`
+  (`CONFIG_CLIP_USB_AUTO_ENABLE=y`, a board-level Kconfig symbol so the conf is broadcast-safe)
+  and `applications/clip/boards/clip_nrf5340_cpuapp_dev.overlay` (console + shell-uart →
+  `cdc_acm_uart`). The suffixed overlay REPLACES the base overlay — keep them in sync.
+- `main.c` calls `usb_cdc_enable()` at boot when `CLIP_USB_AUTO_ENABLE` is set, and skips
+  auto-enabling the FS log backend (SD is MSC-owned while USB is up). Log level follows
+  `prj.conf` (`CONFIG_CLIP_LOG_LEVEL`) — no runtime filtering.
+- Verified isolation: mcuboot / b0n / ipc_radio configs are byte-identical to the default build.
+- Gotcha: suffixed files are only discovered at configure time. Adding/removing one requires
+  `--pristine`; otherwise the stale `DTC_OVERLAY_FILE` stays cached in the image's CMakeCache.
+- Trade-offs: pre-enumeration logs lost; no host -> output dropped (never blocks boot);
+  console shares the CDC port with AT responses. This is a debug-convenience image only,
+  not a release artifact.
+
 ### Output Firmware
 
-Two images per release: **debug** (`build-clip`, console + SD log) and **production** (`build-clip-prod`, `-- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production`, console off).
+Two images per release: **debug** (`build-clip`, console + SD log) and **production** (`build-clip-prod`, `-- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production`, console off). A third local-only variant, the **dev** build (`build-clip-dev`, `-DFILE_SUFFIX=dev`), exists for debugging over USB CDC without a J-Link — see "Dev Build" above; it is not exported by the release job.
 
 **CI** — `.github/workflows/firmware.yml` builds the clip app on every push/PR to `main`. It installs the **Zephyr SDK 0.17.0** toolchain + **NCS v3.3.0 (Zephyr v4.3)** source via `west` (the `nrfutil toolchain-manager` subcommand was deprecated and removed, and the standalone pc-nrfutil binary has no toolchain install — the old CI failed on `nrfutil self-upgrade`/`install` for exactly this reason). It installs both `zephyr/scripts/requirements-base.txt` and `nrf/scripts/requirements.txt` (the nrf one is required for image-signing deps like `cryptography`; the *base* zephyr file is used instead of the full `requirements.txt` because the full one pulls `requirements-extras.txt` → `spsdk`, whose git `#egg=` deps make pip backtrack through every `setuptools_scm` version and hang), applies the MCUboot patches, and `west build`s the sysbuild (MCUboot + app + ipc-radio). Compilation check only; verified locally in a clean `ubuntu:22.04` container. `.github/workflows/mobile-ci.yml` (fast: analyze + unit tests, runs on PR) and `.github/workflows/mobile-verify.yml` (full: debug APK / assembleDebug / iOS smoke, push + manual) cover the `mobile/` SDKs. `.github/workflows/release.yml` is **tag-triggered** (push a `vX.Y.Z` tag): it builds the debug + production images, exports the 8 artifacts below, and publishes a GitHub Release whose body is `docs/release_notes/vX.Y.Z.md` (that file **must** exist before tagging, or the job fails). The manual export block below is the local-dev equivalent of what the release job produces automatically:
 

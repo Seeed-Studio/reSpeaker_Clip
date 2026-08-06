@@ -240,7 +240,10 @@ int clip_init(void)
 #ifdef CONFIG_LOG_BACKEND_FS
         const struct log_backend *fs_be = log_backend_get_by_name("log_backend_fs");
         if (fs_be) {
-            if (IS_ENABLED(CONFIG_CLIP_LOG_FS_DEFAULT_ON)) {
+            /* Dev mode (USB auto-enabled) hands the SD card to USB MSC,
+             * so the FS log backend has nothing to write to; keep it off. */
+            if (IS_ENABLED(CONFIG_CLIP_LOG_FS_DEFAULT_ON) &&
+                !IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)) {
                 /* Debug: FS log on by default (WRN+ERR to /SD:/LOG) */
                 log_backend_activate(fs_be, NULL);
                 uint32_t src_cnt = log_src_cnt_get(0);
@@ -259,6 +262,13 @@ int clip_init(void)
     err = usb_cdc_init();
     if (err) {
         LOG_WRN("USB init failed: %d", err);
+    }
+
+    /* Development environment (FILE_SUFFIX=dev): bring USB up at boot so
+     * the CDC port is available without BLE. The log level simply follows
+     * the app's prj.conf (CONFIG_CLIP_LOG_LEVEL); no runtime filtering. */
+    if (IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)) {
+        usb_cdc_enable();
     }
 
     /* Initialize transfer subsystem */
