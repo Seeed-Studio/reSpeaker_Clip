@@ -58,3 +58,6 @@ output/
 
 # Reference docs (not for commit)
 ref/
+
+# Patent disclosure outputs (skill)
+outputs/
