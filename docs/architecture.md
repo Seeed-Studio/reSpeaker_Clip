@@ -14,7 +14,7 @@ The reSpeaker Clip is an embedded audio recording device built on Zephyr RTOS, r
 
 **System Boundaries:**
 - Hardware: nRF5340, NPM1300 PMIC, PDM microphones, SD card, nRF7002 WiFi
-- Firmware: Zephyr RTOS v3.2.1 (via NCS) + custom application
+- Firmware: Zephyr RTOS v4.3 (NCS v3.3.0) + custom application
 - Protocols: BLE AT command protocol, CLIP UDP transfer protocol
 
 ### 1.2 Architectural Drivers
@@ -50,13 +50,14 @@ The reSpeaker Clip is an embedded audio recording device built on Zephyr RTOS, r
 |                   Application Layer                      |
 |  +-------------+  +-------------+  +-----------------+  |
 |  | Event       |  | AT Server   |  | Button          |  |
-|  | Dispatcher  |  | (29 cmds)   |  | Handler         |  |
+|  | Dispatcher  |  | (30 cmds)   |  | Handler         |  |
 |  +-------------+  +-------------+  +-----------------+  |
 +---------------------------------------------------------+
 |                    Service Layer                         |
 |  +-------------+  +-------------+  +-----------------+  |
 |  | Transport   |  | Transfer    |  | Config          |  |
-|  | (BLE + UDP) |  | Manager     |  | (Settings/NVS)  |  |
+|  | (BLE/UDP/   |  | Manager     |  | (Settings/NVS)  |  |
+|  |  USB)       |  |             |  |                 |  |
 |  +-------------+  +-------------+  +-----------------+  |
 +---------------------------------------------------------+
 |                  Processing Layer                        |
@@ -106,7 +107,7 @@ The reSpeaker Clip is an embedded audio recording device built on Zephyr RTOS, r
 |  | AT Server     |  | Transport      |  | Transfer    |  |
 |  | (dedicated    |  | Abstraction    |  | Manager     |  |
 |  |  thread)      |  | Layer          |  | (dedicated  |  |
-|  | 29 commands   |  | BLE | UDP      |  |  thread)    |  |
+|  | 30 commands   |  | BLE/UDP/USB    |  |  thread)    |  |
 |  +---------------+  +----------------+  +-------------+  |
 |                                                         |
 |  +---------------------------------------------------+ |
@@ -132,7 +133,7 @@ The reSpeaker Clip is an embedded audio recording device built on Zephyr RTOS, r
 
 | Layer | Technology | Version |
 |-------|-----------|---------|
-| RTOS | Zephyr | 3.2.1 (via NCS) |
+| RTOS | Zephyr | 4.3 (NCS v3.3.0) |
 | MCU | Nordic nRF5340 | Dual-core (App + Net) |
 | Audio Codec | Opus | Embedded build |
 | Audio DSP | SpeexDSP | Custom (noise suppress + dereverb) |
@@ -167,8 +168,12 @@ The main thread runs a blocking event loop using `k_msgq` for events and `k_sem`
 **Main Loop** (`clip_main_loop()`):
 ```c
 while (true) {
-    clip_event_wait(K_MSEC(1000));   // Wait for events or 1s timeout
-    clip_event_process();            // Process all pending events
+    /* K_FOREVER when idle (allows deep idle); 1s tick while recording
+     * to advance the recording-time counter. */
+    k_timeout_t wait = (clip_event_get_state() == CLIP_STATE_RECORDING)
+                       ? K_MSEC(1000) : K_FOREVER;
+    clip_event_wait(wait);             // Wait for events (or 1s while recording)
+    clip_event_process();              // Process all pending events
     if (clip_event_get_state() == CLIP_STATE_RECORDING) {
         g_ctx.status.recording_time++;
     }
@@ -242,7 +247,7 @@ int clip_post_event_sync(enum clip_event event, struct clip_event_result_info *i
 
 **Purpose**: Parse and dispatch AT commands from BLE and UDP transports.
 
-**Architecture**: The AT server runs on a dedicated thread (priority 7, stack 4096). Commands arrive via a `k_msgq` queue (up to 10 items). Each queue item carries the raw command bytes, length, and transport type for response routing.
+**Architecture**: The AT server runs on a dedicated thread (priority 7, stack 8192 in prj.conf). Commands arrive via a `k_msgq` queue (up to 10 items). Each queue item carries the raw command bytes, length, and transport type for response routing.
 
 **Command Types:**
 ```c
@@ -261,39 +266,40 @@ struct at_command {
 };
 ```
 
-**Registered Commands (29):**
+**Registered Commands (30):**
 
 | Command | Operations | Description |
 |---------|-----------|-------------|
-| GSTAT | QUERY | Get device status (state, battery, session, time) |
-| DEVICE | QUERY | Get device info (model, serial) |
-| VERSION | QUERY | Get firmware version |
-| TIME | SET, QUERY | Set/get time (Unix timestamp or YYYYMMDDHHMMSS) |
-| MODE | SET, QUERY | Set/get recording mode (normal/enhanced) |
-| NOISE | SET, QUERY | Set/get noise suppression level (dB) |
-| DEREVERB | SET, QUERY | Enable/disable dereverberation |
-| AUTODEL | SET, QUERY | Set/get auto-delete days |
-| BRIGHTNESS | SET, QUERY | Set/get OLED brightness (0-255) |
+| GSTAT | EXEC | Get device status (state, battery, session, time) |
+| BATT | QUERY, EXEC | Get battery status (%, charging, voltage mV, temp C) |
+| STORAGE | QUERY, EXEC | SD card storage info (total/free/used MB, used %) |
+| DEVICE | QUERY, EXEC | Get device name |
+| VERSION | EXEC | Get firmware version |
+| TIME | SET, QUERY, EXEC | Set/get time (Unix timestamp or YYYYMMDDHHMMSS) |
+| MODE | SET, QUERY, EXEC | Set/get recording mode (normal/enhanced) |
+| AUTODEL | SET, QUERY, EXEC | Set/get auto-delete days |
+| BRIGHTNESS | SET, QUERY, EXEC | Set/get OLED brightness (0-255) |
 | POWEROFF | EXEC | Enter PMIC ship mode |
-| FACTORY | EXEC | Factory reset (config + format SD + reboot) |
-| PAIR | SET | Clear BLE bonds + format SD (privacy) + reboot |
+| FACTORY | SET, EXEC | Factory reset (requires confirmation; formats SD + reboot) |
+| PAIR | SET, QUERY | Query pairing status or `AT+PAIR=reset` to clear bonds + reboot |
 | REBOOT | EXEC | Reboot device (optionally clear bonds) |
-| START | EXEC | Start recording |
+| DFU | EXEC | Reboot into MCUboot recovery mode |
+| START | EXEC, SET | Start recording (optional mode parameter) |
 | STOP | EXEC | Stop recording |
 | PAUSE | EXEC | Pause recording |
 | RESUME | EXEC | Resume recording |
 | MARK | EXEC | Add bookmark at current position |
-| LIST | QUERY | List sessions (paginated) |
-| MARKS | QUERY | Get bookmarks for a session |
-| DOWNLOAD | EXEC | Start file transfer |
+| LIST | SET, QUERY, EXEC | List sessions (paginated) / session details / file list |
+| MARKS | SET, QUERY, EXEC | Get bookmarks for a session (paginated) |
+| DOWNLOAD | SET, EXEC | Start file transfer (session or session:file) |
 | CANCEL | EXEC | Cancel file transfer |
-| DELETE | EXEC | Delete a session |
-| PURGE | EXEC | Purge old sessions by auto-delete policy |
-| PURGEABLE | QUERY | Get count of purgeable sessions |
+| DELETE | SET | Delete a session |
 | FORMAT | EXEC | Format SD card |
-| WIFI | SET, QUERY | Start/stop WiFi AP, query status |
-| USB | SET, QUERY | Enable/disable USB CDC, query status (default: off) |
+| WIFI | SET, QUERY, EXEC | Start/stop WiFi AP, query status |
+| WIFICFG | SET, QUERY | Set/get WiFi AP channel + regulatory domain at runtime |
 | NAME | SET, QUERY | Set/get custom BLE device name |
+| USB | SET, QUERY, EXEC | Enable/disable USB CDC+MSC, query status (default: off) |
+| LOG | SET, QUERY, EXEC | SD log backend level: off \| info \| debug |
 
 **Response Format**: JSON over the originating transport.
 ```json
@@ -311,6 +317,7 @@ struct at_command {
 ```c
 #define TRANSPORT_TYPE_BLE  0
 #define TRANSPORT_TYPE_UDP  1
+#define TRANSPORT_TYPE_USB  2   // USB CDC ACM — third AT-command channel
 ```
 
 **Transport Operations:**
@@ -326,7 +333,7 @@ struct transport_ops {
 };
 ```
 
-**Priority**: `transport_get_active()` returns BLE if connected, otherwise UDP. This allows seamless fallback between transports.
+**Priority**: `transport_get_active()` checks transports in explicit priority order **UDP > BLE** (UDP preferred for large transfers); the USB CDC channel receives responses directly for commands submitted over USB.
 
 **Registration**: Transports register at init time:
 ```c
@@ -347,7 +354,9 @@ PDM DMIC (16kHz, 2ch, 20ms frames)
     v
 process_pcm_frame():
     STEREO mode: pass through (no DSP)
-    MERGE mode: (L + R) / 2 -> SpeexDSP (noise suppress + dereverb, NO AGC)
+    MERGE mode: (L + R) / 2 -> SpeexDSP (noise suppress + dereverb)
+                + custom lightweight integer AGC + high-pass
+                (SpeexDSP AGC unavailable in FIXED_POINT)
     |
     v
 Opus Encoder (20ms frames, 320 samples)
@@ -360,11 +369,12 @@ Storage write (2-byte length header + Opus packet)
 
 | Mode | Audio Mode | Channels | Bitrate | Complexity | DSP |
 |------|-----------|----------|---------|------------|-----|
-| Normal | STEREO | 2 (stereo Opus) | 32kbps (16k/ch) | 0 | None |
-| Enhanced | MERGE | 1 (mono Opus) | 32kbps | 1 | Noise suppress + dereverb |
+| Normal | STEREO | 2 (stereo Opus) | 64kbps (32k/ch, Kconfig value x2) | 1 | None |
+| Enhanced | MERGE | 1 (mono Opus) | 32kbps | 1 | Noise suppress + dereverb + integer AGC |
 
-Bitrate and complexity are Kconfig per-mode constants, not runtime configurable:
-- Normal: `CONFIG_CLIP_NORMAL_BITRATE=16000`, `CONFIG_CLIP_NORMAL_COMPLEXITY=0`
+Bitrate and complexity are Kconfig per-mode constants, not runtime configurable
+(stereo doubles the configured per-channel bitrate):
+- Normal: `CONFIG_CLIP_NORMAL_BITRATE=32000` (x2 = 64kbps total), `CONFIG_CLIP_NORMAL_COMPLEXITY=1`
 - Enhanced: `CONFIG_CLIP_ENHANCED_BITRATE=32000`, `CONFIG_CLIP_ENHANCED_COMPLEXITY=1`
 
 **Audio Constants:**
@@ -422,7 +432,7 @@ session ID; old `/SD:/REC/<session_id>/` directories are not read.
 
 **File Coordination**: A `file_closed_sem` signals the transfer thread when a file is closed and ready for transfer, enabling live recording sync.
 
-**Bookmarks**: Binary format (`marks.bin`) with 4-byte magic "MRK1", 4-byte count, then entries.
+**Bookmarks**: Binary format (`marks.bin`): 4-byte magic "BMRK", 2-byte count, then N x 4-byte offset entries (uint32 seconds from session start).
 
 **SD Card Idle Power-Gating** (low power): when no recording / transfer / AT / USB /
 log activity occurs for 45s (`SD_IDLE_POWEROFF_DELAY_MS`), the SD stack is torn
@@ -454,7 +464,7 @@ a "Storage Full" error is shown on the OLED, and a BLE event is posted.
 
 **Purpose**: File-level transfer over BLE or UDP with retransmit support.
 
-**Transfer Thread** (priority 5, stack 16384): Triggered by `transfer_start()` via semaphore. Reads files from SD card in chunks (`CONFIG_CLIP_TRANSFER_CHUNK_SIZE=4096`) and sends via the active transport.
+**Transfer Thread** (priority 5, stack 4096 in prj.conf): Triggered by `transfer_start()` via semaphore. Reads files from SD card in chunks (`CONFIG_CLIP_TRANSFER_CHUNK_SIZE=4096`) and sends via the active transport.
 
 **Features:**
 - File-level retransmit (up to `TRANSFER_MAX_FILE_RETRIES=10` retries)
@@ -483,13 +493,14 @@ enum transfer_state {
 
 **Purpose**: WiFi AP mode control for nRF7002.
 
-**Configuration:**
+**Configuration** (defaults; channel/reg-domain are runtime settings persisted in settings key `config/wifi_channel` / the reg-domain value, settable at any time via `AT+WIFICFG=<channel>:<CC>` — channels 1-13 (2.4GHz) or 36-165 (5GHz)):
 ```c
 #define WIFI_AP_SSID_PREFIX "ClipAP_"     // + 4 hex digits of chip ID
-#define WIFI_AP_PASSWORD "12345678"
-#define WIFI_AP_CHANNEL 36               // 5GHz
+#define WIFI_AP_PASSWORD "12345678"       // default; random 8-char password
+                                        // generated on first pairing
+#define WIFI_AP_CHANNEL 36               // 5GHz default (CONFIG_CLIP_WIFI_AP_CHANNEL)
 #define WIFI_AP_MAX_CLIENTS 1
-#define WIFI_AP_REG_DOMAIN "US"
+#define WIFI_AP_REG_DOMAIN "US"          // CONFIG_CLIP_WIFI_AP_REG_DOMAIN
 #define WIFI_AP_UDP_PORT 8089
 ```
 
@@ -516,9 +527,11 @@ enum transfer_state {
 
 **Security Rationale**: In production, the USB CDC console exposes AT commands and log output. By defaulting to disabled and requiring explicit BLE-enabled activation, the attack surface is reduced for end-user deployments.
 
+### 3.9 WiFi UDP Server (wifi_udp.c)
+
 **Purpose**: Receive AT commands and ACK frames from WiFi clients.
 
-**UDP Thread** (priority 5, stack 4096): Listens on port 8089, dispatches incoming packets.
+**UDP Thread** (priority 5, stack 2048 in prj.conf): Listens on port 8089, dispatches incoming packets.
 
 **Protocol** (CLIP UDP Transfer Protocol, see `docs/udp_protocol.md`):
 - Server sends: DATA, FILE_START, FILE_END, TRANSFER_DONE, AT_RESP, HEARTBEAT
@@ -537,10 +550,10 @@ enum transfer_state {
 | Key | Settings Path | Type | Default | Description |
 |-----|--------------|------|---------|-------------|
 | CONFIG_KEY_MODE (0x03) | config/mode | uint8_t | 0 (normal) | Recording mode |
-| CONFIG_KEY_NOISE (0x04) | config/noise_suppress | uint8_t | 15 | Noise suppression (dB) |
+| CONFIG_KEY_NOISE (0x04) | config/noise_suppress | uint8_t | 12 | Noise suppression (dB) |
 | CONFIG_KEY_AUTODEL (0x06) | config/auto_delete_days | int8_t | -1 (off) | Auto-delete days |
-| CONFIG_KEY_DEREVERB (0x09) | config/dereverb_enabled | bool | false | Dereverberation |
-| CONFIG_KEY_BRIGHTNESS (0x0A) | config/oled_brightness | uint8_t | 128 | OLED brightness |
+| CONFIG_KEY_DEREVERB (0x09) | config/dereverb_enabled | bool | true | Dereverberation |
+| CONFIG_KEY_BRIGHTNESS (0x0A) | config/oled_brightness | uint8_t | 32 | OLED brightness |
 
 **Time Persistence**: Unix timestamp saved to `time/unix_timestamp`. On boot, time is restored from storage and advanced by elapsed uptime. This allows session IDs to remain meaningful across reboots.
 
@@ -590,9 +603,16 @@ Event notifications are JSON objects sent over the BLE GATT Response characteris
 
 **Purpose**: Battery monitoring via NPM1300 PMIC with nRF Fuel Gauge.
 
-**Fuel Gauge**: Uses `CONFIG_NRF_FUEL_GAUGE=y` with `CONFIG_NRF_FUEL_GAUGE_VARIANT_SECONDARY_CELL=y` and the profiled `clip_25C` 240 mAh cell model for State of Charge (SoC) estimation. The opaque gauge state is saved in LittleFS and explicitly loaded at boot, so SoC remains continuous across restart rather than being re-estimated from the recovered cell voltage. The saved state is tagged with a CRC of the battery model; it is discarded automatically after a model or state-format update. Displayed % equals the fuel gauge's integer SoC estimate directly (the bottom reserve that capped the top at 97% was removed); the application does not apply additional smoothing, rate limiting, directional clamping, or a 100% display latch.
+**Fuel Gauge**: Uses `CONFIG_NRF_FUEL_GAUGE=y` with `CONFIG_NRF_FUEL_GAUGE_VARIANT_SECONDARY_CELL=y` and the profiled `clip_25C` 240 mAh cell model for State of Charge (SoC) estimation. The opaque gauge state is saved in LittleFS and explicitly loaded at boot, so SoC remains continuous across restart rather than being re-estimated from the recovered cell voltage. The saved state is tagged with a CRC of the battery model; it is discarded automatically after a model or state-format update.
 
-**Reporting**: Battery level (0-100%), charging status reported via AT+GSTAT and displayed on OLED status bar. A low-battery warning (<15%, discharging) shows a UI event; there is **no** automatic low-battery shutdown (removed — unreliable SoC during PMIC I2C failures caused false shutdowns). Power-off is manual (`AT+POWEROFF` / button).
+**Displayed %**: a *directionally rate-limited* view of the fuel gauge's integer
+SoC — the displayed value moves at most `CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP`
+(default 3 percentage points) per 60s poll, so a normal charge/discharge tracks
+with zero lag while a spurious jump (e.g., during charger plug-in) is clamped.
+The displayed value is persisted across reboot (seeded on boot), and setting the
+Kconfig step to 0 restores the raw gauge value.
+
+**Reporting**: Battery level (0-100%), charging status reported via AT+GSTAT and displayed on OLED status bar. A low-battery warning (15% or below, discharging) shows a UI event; there is **no** automatic low-battery shutdown (removed — unreliable SoC during PMIC I2C failures caused false shutdowns). Power-off is manual (`AT+POWEROFF` / button).
 
 **Charge Termination**: 4.25V (raised from 4.20V) so the fuel gauge reaches ~100% instead of settling at ~99%. The cell (240/HSZ 362123) is 4.20V-rated; 4.25V is a mild overcharge (reduced cycle life, accepted for accurate 100%).
 
@@ -603,7 +623,7 @@ Event notifications are JSON objects sent over the BLE GATT Response characteris
 
 **Purpose**: Translate button hardware events into device events.
 
-**Driver**: Custom GPIO input driver (`CONFIG_INPUT_CLIP`) with own thread (stack 512, priority 5).
+**Driver**: Custom GPIO input driver (`CONFIG_GPIO_BUTTON`) with own thread (stack 512, priority 5).
 
 **Button Events and Actions:**
 
@@ -643,7 +663,7 @@ enum ui_state {
     UI_STATE_POWER_OFF,        // Power-off confirmation
     UI_STATE_USB_CONNECTED,    // USB plugged in
     UI_STATE_OTA,              // OTA in progress
-    UI_STATE_LOW_BATTERY,      // Low battery (<10%) fullscreen
+    UI_STATE_LOW_BATTERY,      // Low battery (<=15%, discharging) fullscreen
 };
 ```
 
@@ -652,7 +672,7 @@ enum ui_state {
 - Enhanced mode: wave animation using real-time audio energy levels (13-bar histogram from BLE audio vis data)
 - Bookmark: flash animation
 - Status: auto-timeout after 3 seconds
-- Low battery: fullscreen warning when battery < 10%
+- Low battery: fullscreen warning when battery falls to 15% or below (one-shot until recharged)
 
 **Status Bar Icons** (24x24 XBM):
 - Battery level (0/25/50/75/100% + charging)
@@ -747,7 +767,7 @@ For each file in session:
     For each 4KB chunk:
         send_file_data() --> [DATA frames with seq numbers]
         Wait for ACK
-        If NACK: retransmit file (up to 5 retries)
+        If NACK: retransmit file (up to 10 retries)
     send_file_end() --> [FILE_END frame]
     |
     v
@@ -780,13 +800,15 @@ Main thread: clip_event_process()
 
 ### 5.1 Thread Overview
 
+*Effective values — `applications/clip/prj.conf` overrides several Kconfig defaults (noted below).*
+
 | Thread | Priority | Stack Size | Purpose |
 |--------|----------|------------|---------|
 | Main (event loop) | 0 | 6144 (CONFIG_MAIN_STACK_SIZE) | Event processing, state transitions, WiFi on/off |
 | Audio recording | 0 | 32768 (CONFIG_CLIP_AUDIO_STACK_SIZE) | DMIC read, DSP, Opus encode, storage write |
-| AT Server | 7 | 4096 (CONFIG_CLIP_AT_SERVER_STACK_SIZE) | AT command parsing and dispatch |
-| Transfer | 5 | 16384 (CONFIG_CLIP_TRANSFER_STACK_SIZE) | File transfer (read + send chunks) |
-| UDP Server | 5 | 4096 (CONFIG_CLIP_UDP_THREAD_STACK_SIZE) | WiFi UDP packet handling |
+| AT Server | 7 | 8192 (CONFIG_CLIP_AT_SERVER_STACK_SIZE, prj.conf; Kconfig default 4096) | AT command parsing and dispatch |
+| Transfer | 5 | 4096 (CONFIG_CLIP_TRANSFER_STACK_SIZE, prj.conf; Kconfig default 16384) | File transfer (read + send chunks) |
+| UDP Server | 5 | 2048 (CONFIG_CLIP_UDP_THREAD_STACK_SIZE, prj.conf; Kconfig default 4096) | WiFi UDP packet handling |
 | Input driver | 5 | 512 (CONFIG_INPUT_GPIO_BUTTON_THREAD_STACK_SIZE) | Button debounce and event detection |
 | Display UI | - | - | Zephyr display subsystem thread |
 | BLE stack | - | 4096 (CONFIG_BT_RX_STACK_SIZE) | Zephyr BLE internal |
@@ -928,7 +950,7 @@ Managed independently by the transfer subsystem. Does not affect device state di
 | CLIP_ENHANCED_BITRATE | 32000 | Enhanced mode Opus bitrate (bps) |
 | CLIP_ENHANCED_COMPLEXITY | 1 | Enhanced mode Opus complexity (0-10) |
 | CLIP_DEFAULT_NOISE | 12 | Default noise suppression (dB) |
-| CLIP_DEFAULT_DEREVERB | n | Default dereverberation enabled |
+| CLIP_DEFAULT_DEREVERB | y | Default dereverberation enabled |
 | CLIP_DEFAULT_AUTODEL | -1 | Default auto-delete days (-1=off) |
 | CLIP_DEFAULT_BRIGHTNESS | 32 | Default OLED brightness (0-255) |
 | CLIP_STORAGE_FULL_PERCENT | 95 | SD usage % at which recording is refused |
@@ -962,7 +984,7 @@ Managed independently by the transfer subsystem. Does not affect device state di
 | config/mode | uint8_t | 0 | Recording mode (0=normal, 1=enhanced) |
 | config/noise_suppress | uint8_t | 12 | Noise suppression level (dB) |
 | config/auto_delete_days | int8_t | -1 | Auto-delete days (-1=off, 0-30) |
-| config/dereverb_enabled | bool | false | Dereverberation enabled |
+| config/dereverb_enabled | bool | true | Dereverberation enabled |
 | config/oled_brightness | uint8_t | 32 | OLED brightness (0-255) |
 | time/unix_timestamp | int64_t | - | Synced time (for session IDs) |
 
@@ -973,12 +995,12 @@ Managed independently by the transfer subsystem. Does not affect device state di
 | Component | Size | Allocation |
 |-----------|------|-----------|
 | Audio thread stack | 32 KB | Static (K_THREAD_STACK_DEFINE) |
-| Transfer thread stack | 16 KB | Static |
+| Transfer thread stack | 4 KB | Static (prj.conf; Kconfig default 16 KB) |
 | Audio memory slab | 16 x 1280 B = 20 KB | Static (K_MEM_SLAB_DEFINE_STATIC) |
-| AT server thread stack | 4 KB | Static |
-| UDP server thread stack | 4 KB | Static |
+| AT server thread stack | 8 KB | Static (prj.conf; Kconfig default 4 KB) |
+| UDP server thread stack | 2 KB | Static (prj.conf; Kconfig default 4 KB) |
 | Main thread stack | 6 KB | Static (CONFIG_MAIN_STACK_SIZE) |
-| Heap | 128 KB | Static (CONFIG_HEAP_MEM_POOL_SIZE) |
+| Heap | 80 KB | Static (CONFIG_HEAP_MEM_POOL_SIZE=81920 in prj.conf) |
 | Transfer chunk buffer | 4 KB | Static |
 | Opus encoder state | ~20 KB | Heap (opus_encoder_create) |
 | SpeexDSP preprocessor | ~10 KB | Heap (speex_preprocess_state_init) |

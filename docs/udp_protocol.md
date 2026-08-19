@@ -3,7 +3,8 @@
 ## Overview
 
 Fire-and-forget UDP file transfer protocol for the CLIP embedded device. Designed for
-simplicity and minimal RAM footprint (~100 bytes static state, no frame buffering).
+simplicity and minimal RAM footprint (~600 bytes static state, dominated by the
+512-byte selective-repeat NACK bitmap; no frame buffering).
 
 **Strategy**: DATA frames are sent without per-frame acknowledgment. Each DATA frame
 includes a per-frame CRC32 for corruption detection. Full-file integrity is verified
@@ -22,7 +23,7 @@ port 8089. All communication is bidirectional on a single socket.
 | FILE_END | 0x11 | S→C | End file transfer (full-file CRC32) |
 | TRANSFER_DONE | 0x12 | S→C | All files complete |
 | AT_RESP | 0x20 | S→C | AT command response (JSON) |
-| HEARTBEAT | 0x30 | Both | Keepalive |
+| HEARTBEAT | 0x30 | C→S | Keepalive (client→device only; the device never sends it) |
 
 All multi-byte fields are **little-endian**.
 
@@ -42,7 +43,7 @@ Field: type  seq_lo seq_hi len_lo len_hi crc32 (4 bytes)     data (N)
 | Field | Size | Description |
 |-------|------|-------------|
 | type | 1 | 0x01 |
-| seq | 2 | Per-file sequence number (uint16 LE, starts at 0) |
+| seq | 2 | Per-file sequence number (uint16 LE, starts at 0). **Wraps at 4096** (12-bit effective seq space, `UDP_SEQ_MODULO`), so files larger than ~4 MB (4096 × 1024-byte frames) cannot be selectively repaired and must not exceed the bitmap coverage |
 | len | 2 | Data length, max 1024 bytes (uint16 LE) |
 | crc32 | 4 | IEEE CRC32 of data field only (uint32 LE) |
 | data | N | Raw file data |
@@ -80,7 +81,10 @@ received seqs sends `result=0x01` + `total_seqs` + a bitmap of the missing frame
 server re-reads and retransmits only those seqs (at their original seq), then re-sends
 FILE_END — converging even when each round loses different frames. A legacy server reads
 only `result` (byte 1) and ignores the trailing fields → whole-file retransmit. A legacy
-client sends the 2-byte NACK → server retransmits the whole file. Retransmitted frames
+client sends the 2-byte NACK → server retransmits the whole file — **the shipped
+reference Python client sends only the 2-byte legacy NACK**, so in practice repair
+against the reference client is always whole-file; the bitmap path exists in the
+firmware for future/alternate clients. Retransmitted frames
 are paced (inter-frame delay halving each repair round, configurable via
 `CONFIG_CLIP_UDP_REPAIR_PACE_US`).
 
@@ -139,7 +143,11 @@ Field: type  len (2)   json_data
 | len | 2 | Response length (uint16 LE) |
 | json_data | len | UTF-8 encoded JSON |
 
-### HEARTBEAT (0x30) — Bidirectional
+### HEARTBEAT (0x30) — Client→Server
+
+The device **never sends** HEARTBEAT frames — it only receives them (to reset the
+connection-inactivity timer). Sending them is a client-side choice; the reference
+Python client sends one every 5 seconds.
 
 ```
 Byte:  [0]   [1] [2] [3] [4]
@@ -149,7 +157,7 @@ Field: type  timestamp (4)
 | Field | Size | Description |
 |-------|------|-------------|
 | type | 1 | 0x30 |
-| timestamp | 4 | Sender's uptime in milliseconds (uint32 LE) |
+| timestamp | 4 | Opaque sender timestamp (reference client: Unix epoch milliseconds, uint32 LE). The device does not interpret it. |
 
 ---
 
@@ -172,7 +180,8 @@ Client                              Server
   |                                   |
   |<-- FILE_END(crc32) ---------------|
   |--- FILE_ACK(OK/NACK) ------------|
-  |                                   |  (on NACK: retransmit entire file)
+  |                                   |  (on NACK: selective repair or
+  |                                   |   whole-file retransmit, then FILE_END)
   |  ... (next file, if any) ...     |
   |                                   |
   |<-- TRANSFER_DONE(sid, count) -----|
@@ -196,16 +205,28 @@ Client                              Server
 ### Client Side
 
 - **Discard corrupted frames**: Frames with per-frame CRC mismatch are silently dropped
-- **Accumulate data**: Valid DATA payloads are appended in order (out-of-order frames buffered by seq)
+- **Accumulate data**: Valid DATA payloads are appended in arrival order — the reference
+  Python client does **not** buffer out-of-order frames by seq. Loss or misordering is
+  detected only via the full-file CRC at FILE_END (which then triggers repair)
 - **Full-file verification**: On FILE_END, client compares its accumulated CRC32 with server's CRC32
-- **FILE_ACK response**: 0x00 = CRC OK (file saved); 0x01 = NACK — with a missing-seq bitmap if the client tracks seqs (selective repair), or a bare 2-byte NACK (whole-file retransmit)
+- **FILE_ACK response**: 0x00 = CRC OK (file saved); 0x01 = NACK — with a missing-seq bitmap if the client tracks seqs (selective repair), or a bare 2-byte NACK (whole-file retransmit). **The shipped reference client sends only the bare 2-byte NACK.**
 
 ### Retransmission
 
-- Server retries FILE_END up to 3 times (2-second timeout each)
-- On NACK, server retransmits the entire file from FILE_START
-- Max 10 file-level retransmissions before abort (configurable: `TRANSFER_MAX_FILE_RETRIES`)
-- No per-frame retransmission
+- Server retries FILE_END up to 3 times, only on FILE_ACK **timeout** (2-second timeout each); a NACK does not consume a FILE_END retry
+- On NACK, the server immediately escalates to repair: selective retransmit of the bitmap's missing seqs (if a bitmap was sent), falling back to whole-file retransmit from FILE_START — then re-sends FILE_END
+- Max 10 repair rounds per file before abort (`TRANSFER_MAX_FILE_RETRIES`, a compile-time constant in `transfer.h` — not a Kconfig)
+- No per-frame ACK; per-frame repair happens only via the selective-repeat path after a FILE_END NACK (whole-file when the client sends a legacy NACK)
+
+### Transfer Modes / Flow Control
+
+- **Cancel mid-transfer**: `AT+CANCEL` sets a volatile flag checked by the transfer
+  thread; the transfer aborts after the current file and the cleanup (close file,
+  send TRANSFER_DONE, state reset) runs in the transfer thread.
+- **Pause/resume**: `AT+PAUSE` / `AT+RESUME` control **recording only** — they do not
+  pause or resume an in-flight transfer. There is no transfer-level pause.
+- **Record while syncing**: the device supports recording and WiFi sync concurrently
+  (see `applications/clip/tests/tools/record.py`, "Record and sync in real-time").
 
 ---
 
@@ -237,7 +258,7 @@ Both server (Zephyr) and client (Python) must use the **same algorithm**:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| Heartbeat interval | 5000 ms | Keepalive frequency (`CONFIG_CLIP_UDP_HEARTBEAT_INTERVAL_MS`) |
+| Heartbeat interval | client-side (reference client: 5 s) | Keepalive frequency — the client's choice; the device never sends heartbeats. (`CONFIG_CLIP_UDP_HEARTBEAT_INTERVAL_MS` exists in Kconfig but is unused by the firmware.) |
 | Connection timeout | 30000 ms | No activity = disconnected (`CONFIG_CLIP_UDP_CONNECTION_TIMEOUT_MS`) |
 | FILE_ACK timeout | 2000 ms | Max wait for FILE_ACK after FILE_END |
 | FILE_END retries | 3 | Max FILE_END retransmissions before abort |

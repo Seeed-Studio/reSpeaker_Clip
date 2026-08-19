@@ -13,7 +13,7 @@ The Clip board uses nRF5340 dual-core architecture:
 ## Build
 
 ```sh
-source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
 export ZEPHYR_EXTRA_MODULES=$(pwd)
 west build --build-dir build-dtm --pristine --board clip/nrf5340/cpunet tests/dtm
 ```
@@ -25,6 +25,12 @@ west flash --build-dir build-dtm && nrfutil device reset
 ```
 
 This flashes both the cpunet (DTM) and cpuapp (remote_shell) images.
+
+> **No MCUboot**: this is factory/cert firmware. `sysbuild.conf` sets
+> `SB_CONFIG_BOOTLOADER_NONE=y` (plus `SB_CONFIG_SECURE_BOOT_NETCORE=n` and
+> `SB_CONFIG_PARTITION_MANAGER=n`, so the image links at 0x0), which means the
+> image is flashed **directly via J-Link** — no bootloader, no OTA slots, no
+> signing.
 
 ## Hardware Connection
 

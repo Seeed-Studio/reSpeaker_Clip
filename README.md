@@ -20,7 +20,7 @@ USB, AT-command control, and UDP file transfer.
 
 ## Key Features
 
-- **Audio**: PDM mic → SpeexDSP preprocessing (noise suppression / AGC / dereverb) → Opus encoding
+- **Audio**: PDM mic → SpeexDSP preprocessing (noise suppression / dereverb; custom integer AGC) → Opus encoding
 - **BLE**: AT-command protocol, OTA DFU (MCUmgr), GATT notifications
 - **WiFi**: AP mode (`ClipAP_XXXX`) with UDP file transfer (CRC32-verified)
 - **USB**: CDC ACM serial (3rd AT channel) + MSC mass storage (SD card) + 1200-baud → DFU recovery trigger
@@ -37,6 +37,34 @@ USB, AT-command control, and UDP file transfer.
 - `west` (Zephyr's meta-tool)
 - nRF Connect for Desktop (flashing) or `nrfutil`
 - Python 3.10+ (for test tools)
+
+### Installing the toolchain
+
+This repo is a Zephyr **module**, not a standalone west workspace — you need an
+NCS v3.3.0 workspace *beside* it first.
+
+```sh
+# 1. Install west
+pip install west
+
+# 2. Initialize an NCS v3.3.0 workspace (manifest tag verified against the
+#    local dev workspace: nrf repo at tag v3.3.0, a.k.a. ncs-v3.3.0)
+west init -m https://github.com/nrfconnect/sdk-nrf --mr v3.3.0 ~/ncs/v3.3.0
+cd ~/ncs/v3.3.0
+west update
+
+# 3. Zephyr SDK 0.17.0 (toolchain)
+west sdk install --sdk-version 0.17.0
+
+# 4. Python requirements (same combo CI uses — the nrf one carries
+#    image-signing deps like cryptography)
+pip install zephyr/scripts/requirements-base.txt nrf/scripts/requirements.txt
+```
+
+Then clone this repo anywhere and pick up the Build steps below (the
+`source .../zephyr-env.sh` + `export ZEPHYR_EXTRA_MODULES=$(pwd)` pair registers
+the module). Canonical fallback:
+[Nordic — Install nRF Connect SDK](https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/installation.html).
 
 ### Build
 
@@ -56,7 +84,7 @@ west build --build-dir build-clip --board clip/nrf5340/cpuapp applications/clip
 **Production (low-power, console off):**
 ```sh
 west build --build-dir build-clip-prod --board clip/nrf5340/cpuapp applications/clip \
-  -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
+  -- -DSNIPPET=production
 ```
 
 > **Board identifier**: `clip/nrf5340/cpuapp` (NOT `respeaker/...`)
@@ -118,7 +146,7 @@ minicom -D /dev/ttyACM0 -b 921600
 | `drivers/` | Custom drivers (GPIO button) |
 | `lib/` | Libraries (Opus, SpeexDSP, Lua, 1200-baud USB DFU trigger) |
 | `samples/` | Example apps (hello_world, opus_encode, wifi_ap_iperf, etc.) |
-| `tests/` | Factory/RF test firmware (`clip`, `otp`, `dtm`, `wifi_radio`, `re`, ...) |
+| `tests/` | Factory/RF test firmware (`clip`, `battery_cycle`, `dtm`, `wifi_radio`, `re`) |
 | `patches/mcuboot/` | MCUboot customization patches (applied to the NCS tree) |
 | `docs/` | Project documentation |
 
@@ -134,6 +162,8 @@ minicom -D /dev/ttyACM0 -b 921600
 
 ### Project Docs (`docs/`)
 
+See [docs/README.md](docs/README.md) for the full documentation map.
+
 | Doc | Description |
 |-----|-------------|
 | [architecture.md](docs/architecture.md) | System architecture & design |
@@ -142,18 +172,25 @@ minicom -D /dev/ttyACM0 -b 921600
 | [requirements.md](docs/requirements.md) | Product requirements |
 | [custom_app_guide.md](docs/custom_app_guide.md) | **Custom app development guide** — build, flash, BLE OTA, USB serial DFU recovery |
 | [usb_dfu.md](docs/usb_dfu.md) | Firmware upgrade guide (USB / BLE / programmer) |
+| [release_process.md](docs/release_process.md) | Releasing — tagging, CI, artifacts |
 | [audio_quality_standard.md](docs/audio_quality_standard.md) | Audio recording quality standard |
 | [development.md](docs/development.md) | Development log |
-| [whitepaper.md](docs/whitepaper.md) | Firmware whitepaper |
+
+Release artifacts (debug + production images, OTA zips) for every version are on
+the [GitHub Releases page](https://github.com/Seeed-Studio/reSpeaker_Clip/releases).
 
 See [CLAUDE.md](CLAUDE.md) for detailed build/flash/power-management guidance
 and known pitfalls.
 
+> English docs are canonical; a Chinese translation is maintained for the
+> hardware test firmware (`tests/clip/README_zh.md`).
+
 ## Testing
 
 ```sh
-# BLE protocol tests
-python tests/ble_test.py --interactive
+# Interactive BLE AT terminal (auto-discovers the device, or pass a BLE address)
+python applications/clip/tests/tools/ble_terminal.py
+python applications/clip/tests/tools/ble_terminal.py AA:BB:CC:DD:EE:FF
 
 # WiFi UDP file sync (connect to ClipAP_XXXX first; password 12345678 by default,
 # becomes a random one after the first BLE pairing)
@@ -161,9 +198,16 @@ python applications/clip/tests/tools/udp_sync.py --session <session_id>
 
 # Hardware test firmware
 west build --build-dir build-test --board clip/nrf5340/cpuapp --pristine tests/clip
+
+# Python test suite (unit tests, no device needed)
+cd applications/clip/tests && pytest   # docs: tests/docs/testing.md
 ```
 
 WiFi AP: SSID `ClipAP_XXXX` (last 4 hex of chip ID) · Password `12345678` (default; random after first pairing) · IP `192.168.4.1` · UDP Port `8089`
+
+Note: that AP identity is for the **main app**. The **hardware test firmware**
+(`tests/clip`) instead uses a per-device BLE name + AP SSID `Clip_<6hex>`
+derived from the chip ID — see `tests/clip/README.md` ("Device Identity").
 
 ## Mobile App & SDK
 

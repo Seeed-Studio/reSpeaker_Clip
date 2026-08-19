@@ -69,6 +69,9 @@ applications/clip/tests/
 │   ├── client.py            # BLE client class
 │   ├── commands.py          # AT command wrappers
 │   ├── transfer.py          # File transfer handling
+│   ├── codec.py             # OGG Opus encoding/decoding
+│   ├── wifi.py              # WiFi UDP transport
+│   ├── progress.py          # Unified progress display
 │   ├── exceptions.py        # Custom exceptions
 │   └── utils.py             # Utility functions
 ├── tests/                   # pytest test cases
@@ -76,17 +79,25 @@ applications/clip/tests/
 │   ├── conftest.py          # pytest fixtures
 │   ├── test_basic.py        # Basic AT commands
 │   ├── test_config.py       # Configuration commands
+│   ├── test_edge_cases.py   # Edge-case / error handling
 │   ├── test_recording.py    # Recording control
 │   ├── test_transfer.py     # File transfer
-│   └── test_storage.py      # Storage management
+│   ├── test_storage.py      # Storage management
+│   └── test_unit.py         # Unit tests (no device required)
 ├── tools/                   # Utility scripts
-│   ├── ble_terminal.py      # Interactive terminal
-│   ├── sync.py              # File sync tool
-│   ├── decode_opus.py       # Opus decoder
-│   └── ble_test.py          # Quick test script
+│   ├── ble_terminal.py      # Interactive BLE terminal
+│   ├── clip-cli.py          # Unified CLI (BLE + WiFi)
+│   ├── clip-web.py          # Web interface
+│   ├── record.py            # Record + real-time sync
+│   ├── serial_terminal.py   # USB CDC serial terminal
+│   ├── sync.py              # BLE session sync
+│   ├── udp_sync.py          # WiFi UDP session sync
+│   ├── udp_terminal.py      # UDP AT terminal
+│   └── decode_opus.py       # Opus to WAV converter
+├── audio_test/              # Audio quality test corpus + results
 ├── docs/                    # Documentation
 ├── requirements.txt         # Python dependencies
-└── pytest.ini              # pytest configuration
+└── pytest.ini               # pytest configuration
 ```
 
 ### Test Categories
@@ -207,21 +218,22 @@ asyncio.run(sync_all())
 ### ble_terminal.py - Interactive Terminal
 
 ```bash
-# Auto-discover and connect
+# Auto-discover and connect (pass a BLE address to skip discovery)
 python tools/ble_terminal.py
-
-# Connect to specific device
-python tools/ble_terminal.py --device AA:BB:CC:DD:EE:FF
+python tools/ble_terminal.py AA:BB:CC:DD:EE:FF
 ```
 
-Commands in terminal:
-- `AT+VERSION` - Get version info
-- `AT+GSTAT` - Get device status
-- `AT+START=normal` - Start recording
-- `AT+STOP` - Stop recording
-- `AT+LIST` - List sessions
-- `help` - Show all commands
-- `quit` - Exit terminal
+Shortcut commands in terminal:
+- `version` - Get version info
+- `gstat` - Get device status
+- `start` - Start recording
+- `stop` - Stop recording
+- `pause` / `resume` - Pause and resume recording
+- `mark` - Add bookmark
+- `quit` / `exit` - Exit terminal
+
+Anything else is sent as an AT command — an `AT+` prefix is added
+automatically if missing (e.g. `LIST` → `AT+LIST`, or type `AT+LIST` directly).
 
 ### sync.py - File Sync Tool
 
@@ -238,8 +250,15 @@ python tools/sync.py --all-sessions
 # Show status only
 python tools/sync.py --status
 
-# Keep sessions on device
-python tools/sync.py --keep
+# Delete sessions from the device after syncing
+# (by default synced sessions are kept on the device)
+python tools/sync.py --delete
+
+# Force re-sync from the beginning (ignore synced status)
+python tools/sync.py --session 20240101_120000 --resync
+
+# Exit after no new files are found (instead of monitoring)
+python tools/sync.py --oneshot
 
 # Custom output directory
 python tools/sync.py -o /path/to/downloads
@@ -256,19 +275,6 @@ python tools/decode_opus.py recording.opus recording.wav --channels 2
 
 # Different sample rate
 python tools/decode_opus.py recording.opus recording.wav --sample-rate 48000
-```
-
-### ble_test.py - Quick Test Script
-
-```bash
-# Run all tests
-python tools/ble_test.py
-
-# Run specific test
-python tools/ble_test.py --test version
-
-# Use specific device
-python tools/ble_test.py --device AA:BB:CC:DD:EE:FF
 ```
 
 ## Environment Variables
@@ -401,6 +407,6 @@ jobs:
 
 ## Additional Resources
 
-- [Protocol Documentation](../../docs/protocol.md)
-- [Architecture Documentation](../../docs/architecture.md)
-- [Development Notes](../../docs/development.md)
+- [Protocol Documentation](../../../../docs/protocol.md)
+- [Architecture Documentation](../../../../docs/architecture.md)
+- [Development Notes](../../../../docs/development.md)

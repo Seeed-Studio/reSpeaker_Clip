@@ -17,7 +17,28 @@ the USB and BLE paths. All host tools talk the **mcumgr Simple Management Protoc
 
 Native USB-DFU (`dfu-util`) is **not** used — see [Why not dfu-util / native USB-DFU?](#why-not-dfu-util--native-usb-dfu).
 
-## Artifacts (per release, in `output/<version>/`)
+## Getting the firmware
+
+Official binaries are published on **GitHub Releases** — one release per version
+tag, each containing the 8 artifacts listed below:
+<https://github.com/Seeed-Studio/reSpeaker_Clip/releases>
+
+- **Field users** normally want the **production** build: upload
+  `clip-<v>-production-signed.bin` (app-only upgrade) or
+  `clip-<v>-production-ota.zip` (app + network core) — this is the low-power
+  image with the serial console disabled.
+- **Debug** builds (console on, higher idle current) are for development and
+  post-mortem log inspection.
+- Developers can also **build locally** — see the [repo README](../README.md)
+  and [docs/custom_app_guide.md](custom_app_guide.md). A local build produces
+  the same files in the build directory (`zephyr.signed.bin`,
+  `dfu_application.zip`, `merged.hex`, ...); Releases just package them with
+  version-tagged names.
+
+## Artifacts (the 8 files per release)
+
+Every GitHub Release (and every local build) produces these — on Releases they
+are named `clip-<version>-{debug,production}-*`:
 
 | File | What it is | Use with |
 |------|-----------|----------|
@@ -25,6 +46,9 @@ Native USB-DFU (`dfu-util`) is **not** used — see [Why not dfu-util / native U
 | `clip-<v>-*-merged_CPUNET.hex` | Network core only | Programmer |
 | `clip-<v>-*-signed.bin` | Signed **app** image | USB serial DFU, BLE (mcumgr) |
 | `clip-<v>-*-ota.zip` | Multi-image package (app + net core) | USB serial DFU, BLE (mcumgr/nRF Connect) |
+
+(`debug` and `production` variants of each = the 8 files; a local build's
+`output/<version>/` export is the same set.)
 
 For an app-only field upgrade, upload the `-signed.bin`. For a full app + net-core
 upgrade, upload the `-ota.zip`.
@@ -173,9 +197,12 @@ Same SMP protocol over Bluetooth LE. Use the `-ota.zip`.
   ```
 - **mcumgr**:
   ```sh
-  mcumgr --conntype ble --connstring peer_name=ClipAP_... \
+  mcumgr --conntype ble --connstring peer_name=Clip \
       image upload clip-0.0.5-production-ota.zip
   ```
+  (`peer_name` does a prefix match against the device's BLE advertised name,
+  which is `Clip XXXX` — the 4 hex suffix of the FICR device id. Note that
+  `ClipAP_XXXX` is the **WiFi AP SSID**, not the BLE name.)
 
 ## Programmer (when a probe is available)
 
@@ -216,3 +243,60 @@ After the swap and reboot:
 nrfutil mcu-manager serial image-list --serial-port /dev/ttyACM0   # running image + hash
 # or on the device: AT+VERSION  →  confirms the new version string
 ```
+
+## Troubleshooting
+
+### No `0x8069` recovery port appears
+
+- **Cable**: try another USB cable — charge-only cables have no data lines.
+- **VBUS**: the **button** path is VBUS-gated (MCUboot patch `0001`); without a
+  real USB connection the device will never enter serial recovery that way.
+- **Button timing**: hold the user button **before/while** plugging USB, and keep
+  holding until the device enumerates. The OLED shows "Recovery Mode".
+- **1200-baud path on the clip app**: USB is BLE-gated — send `AT+USB=on` over
+  BLE first so the app's CDC port (PID `0x0069`) appears, then trigger 1200
+  baud. If BLE is unavailable, the **button path is the fallback** — it needs no
+  BLE, only a USB connection.
+
+### Upload fails / interrupted mid-upload
+
+Serial recovery is idempotent — nothing is written to the active (primary) slot
+until the full image has been received into the secondary slot and its
+signature verified. Just re-run the upload from scratch; a partial image in the
+secondary slot is harmless.
+
+### Device rejects the image (signature verification failed)
+
+The image was signed with a different key than the one baked into the device's
+MCUboot. Re-obtain the official artifacts from
+[Releases](https://github.com/Seeed-Studio/reSpeaker_Clip/releases). Note that
+this repository's default key (`root-rsa-2048.pem`) is MCUboot's
+publicly-available **sample** key — fine for development, but any image you
+build yourself with it will only run on development devices expecting that key.
+
+### Bad image boots / device misbehaves after upgrade
+
+This board's MCUboot runs in **overwrite-only** mode
+(`MCUBOOT_MODE_OVERWRITE_ONLY` in `boards/seeed/clip/Kconfig.sysbuild`) — the
+new image is copied over the primary slot with **no automatic revert** and no
+`image-confirm`/revert semantics. If the upgraded image is bad, recovery means
+re-entering serial recovery (1200 baud, or button + USB) and uploading a known
+good image (e.g. the last working version from Releases).
+
+### Boot loop after repeated pair/unpair
+
+A corrupted settings partition (`/lfs/settings/run` on the external flash)
+can stall `settings_load` and boot-loop the app. Recover without opening the
+device: enter serial recovery (above) and use the MCUboot custom **erase
+settings** mcumgr command (group 64 / peruser, command 1 —
+`patches/mcuboot/README.md` patch `0004`), which erases the LittleFS
+superblock so the filesystem reformats cleanly on next boot (BLE bonds and app
+settings are lost). The **erase SD card** command (command 0) is the sibling
+factory-reset.
+
+### Still bricked
+
+The last resort is SWD/J-Link reflashing of the full image (`*-merged.hex`) —
+a **development** operation that needs an opened device and a probe. Enclosed
+field devices should go through RMA instead.
+
