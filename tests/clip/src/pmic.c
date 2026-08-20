@@ -593,6 +593,16 @@ int pmic_charger_set(bool enable)
 	return ret;
 }
 
+int pmic_display_work_stop(void)
+{
+	struct k_work_sync sync;
+
+	/* Stop the 1 s battery/OLED refresh so it stops waking the CPU every
+	 * second and stops writing to a suspended I2C2 / unpowered OLED.
+	 * Same cancellation pmic_enter_ship_mode() uses. */
+	return k_work_cancel_delayable_sync(&battery_display_work, &sync);
+}
+
 static int pmic_enter_ship_mode(void)
 {
 	struct k_work_sync sync;

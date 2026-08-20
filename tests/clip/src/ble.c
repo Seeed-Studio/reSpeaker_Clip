@@ -15,6 +15,7 @@
 #include <zephyr/bluetooth/gatt.h>
 #include "ble.h"
 #include <string.h>
+#include <stdlib.h>
 #include "identity.h"
 
 LOG_MODULE_REGISTER(ble, LOG_LEVEL_INF);
@@ -327,7 +328,7 @@ static int cmd_ble_txpower(const struct shell *sh, size_t argc, char **argv)
 	int8_t power = (int8_t)atoi(argv[1]);
 
 	/* Set TX power for advertising (handle_type=0, handle=0) */
-	buf = bt_hci_cmd_create(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, sizeof(*cp));
+	buf = bt_hci_cmd_alloc(K_FOREVER);
 	if (!buf) {
 		shell_error(sh, "Failed to create HCI cmd");
 		return -ENOMEM;
@@ -352,7 +353,7 @@ static int cmd_ble_txpower(const struct shell *sh, size_t argc, char **argv)
 	if (current_conn) {
 		uint16_t conn_handle = bt_conn_index(current_conn);
 
-		buf = bt_hci_cmd_create(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, sizeof(*cp));
+		buf = bt_hci_cmd_alloc(K_FOREVER);
 		if (buf) {
 			cp = net_buf_add(buf, sizeof(*cp));
 			cp->handle_type = BT_HCI_VS_LL_HANDLE_TYPE_CONN;

@@ -539,7 +539,7 @@ static int cmd_udp_test(const struct shell *sh, size_t argc, char **argv)
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(IPERF_PORT);
-	ret = inet_pton(AF_INET, iperf_server_ip, &addr.sin_addr);
+	ret = net_addr_pton(AF_INET, iperf_server_ip, &addr.sin_addr);
 	if (ret != 1) {
 		shell_print(sh, "Invalid IP address");
 		return -EINVAL;

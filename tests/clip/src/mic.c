@@ -42,7 +42,7 @@ static const struct device *const mic_ldo = DEVICE_DT_GET(DT_NODELABEL(npm1300_l
 static const struct gpio_dt_spec pdm_en_gpio = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
 	.pin = 14,
-	.dt_flags = GPIO_OUTPUT | GPIO_ACTIVE_HIGH,
+	.dt_flags = GPIO_ACTIVE_HIGH,
 };
 
 K_MEM_SLAB_DEFINE_STATIC(mem_slab, BLOCK_SIZE, BLOCK_COUNT, 4);

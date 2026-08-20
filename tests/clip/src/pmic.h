@@ -28,4 +28,15 @@ int pmic_get_battery_status(uint32_t *voltage_mv, uint8_t *percent, bool *chargi
  */
 int pmic_battery_state_save(void);
 
+/**
+ * @brief Stop the 1 s periodic battery/OLED refresh work
+ *
+ * Call before shutting the OLED/I2C2 down or parking in a sleep state,
+ * so the handler stops waking the CPU every second and stops writing to
+ * a suspended bus / unpowered display.
+ *
+ * @return k_work_cancel_delayable_sync() result (0 = cancelled)
+ */
+int pmic_display_work_stop(void);
+
 #endif /* PMIC_H */
