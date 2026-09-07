@@ -10,6 +10,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/regulator.h>
 #include <zephyr/audio/dmic.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/shell/shell.h>
@@ -32,7 +33,17 @@ LOG_MODULE_REGISTER(mic, LOG_LEVEL_INF);
 #define BLOCK_COUNT 4
 
 static const struct device *const dmic = DEVICE_DT_GET(DT_ALIAS(dmic0));
-static const struct gpio_dt_spec mic_en = GPIO_DT_SPEC_GET_OR(DT_NODELABEL(mic_reg), gpios, {0});
+
+/* Mic 1.8V supply = NPM1300 LDO1. Off by default (no regulator-boot-on in DTS),
+ * so it must be enabled here — mirroring applications/clip audio.c. */
+static const struct device *const mic_ldo = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldo1));
+
+/* PDM_EN: P1.14 drives the TXS0104E level-shifter VCCB (PDM signal path). */
+static const struct gpio_dt_spec pdm_en_gpio = {
+	.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
+	.pin = 14,
+	.dt_flags = GPIO_OUTPUT | GPIO_ACTIVE_HIGH,
+};
 
 K_MEM_SLAB_DEFINE_STATIC(mem_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
 
@@ -311,18 +322,31 @@ SHELL_CMD_REGISTER(mic, &sub_mic_cmds, "Microphone commands", NULL);
 
 int mic_power_off(void)
 {
-	if (mic_en.port) {
-		gpio_pin_configure_dt(&mic_en, GPIO_OUTPUT);
-		gpio_pin_set_dt(&mic_en, 0);
+	/* Disable mic 1.8V via NPM1300 LDO1 */
+	if (device_is_ready(mic_ldo)) {
+		regulator_disable(mic_ldo);
+	}
+	/* Disable PDM level shifter */
+	if (device_is_ready(pdm_en_gpio.port)) {
+		gpio_pin_set_dt(&pdm_en_gpio, 0);
 	}
 	return 0;
 }
 
 int mic_power_on(void)
 {
-	if (mic_en.port) {
-		gpio_pin_configure_dt(&mic_en, GPIO_OUTPUT);
-		gpio_pin_set_dt(&mic_en, 1);
+	/* Enable PDM level shifter (TXS0104E VCCB) */
+	if (device_is_ready(pdm_en_gpio.port)) {
+		gpio_pin_configure_dt(&pdm_en_gpio, GPIO_OUTPUT_HIGH);
+	}
+	/* Enable mic 1.8V via NPM1300 LDO1 */
+	if (device_is_ready(mic_ldo)) {
+		int ret = regulator_enable(mic_ldo);
+		if (ret) {
+			LOG_ERR("Mic LDO1 enable failed: %d", ret);
+			return ret;
+		}
+		k_msleep(10);	/* let the mic settle; avoids power-up pop */
 	}
 	return 0;
 }

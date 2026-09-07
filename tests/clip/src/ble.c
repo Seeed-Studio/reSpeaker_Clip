@@ -14,6 +14,8 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include "ble.h"
+#include <string.h>
+#include "identity.h"
 
 LOG_MODULE_REGISTER(ble, LOG_LEVEL_INF);
 
@@ -47,8 +49,10 @@ static uint64_t last_stats_bytes;
 static struct k_thread notify_thread;
 static K_THREAD_STACK_DEFINE(notify_stack, 2048);
 
-/* Advertising data */
-static const struct bt_data ad[] = {
+/* Advertising data.
+ * ad[] is non-const: the name entry is updated at init to the per-device
+ * runtime name (Clip_<suffix>) set via bt_set_name(). */
+static struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
 };
@@ -281,6 +285,14 @@ int ble_init(void)
 
 	/* Register connection callbacks */
 	bt_conn_cb_register(&conn_callbacks);
+
+	/* Per-device BLE name (Clip_<suffix>); the WiFi AP SSID uses the same
+	 * suffix, so产测 can lock a board by name. Update the name AD to the
+	 * runtime name (ad[] is non-const for this). */
+	const char *id_name = identity_ble_name_get();
+	bt_set_name(id_name);
+	ad[1].data = id_name;
+	ad[1].data_len = (uint8_t)strlen(id_name);
 
 	/* Start advertising */
 	err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad),

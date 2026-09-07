@@ -23,6 +23,7 @@ target_sources(app PRIVATE
 	src/pmic.c
 	src/motor.c
 	src/usb.c
+	src/identity.c
 	src/flash_test.c
 	# The test image builds the CH1115 driver directly. CONFIG_OLED_DISPLAY is
 	# deliberately disabled in prj.conf to prevent the module from adding the

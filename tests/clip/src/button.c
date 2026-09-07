@@ -9,6 +9,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include "button.h"
+#include "oled.h"
 
 LOG_MODULE_REGISTER(button, LOG_LEVEL_INF);
 
@@ -16,10 +17,21 @@ LOG_MODULE_REGISTER(button, LOG_LEVEL_INF);
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_NODELABEL(usr_btn), gpios);
 static struct gpio_callback button_cb_data;
 
+/* Visual feedback on press: fill the OLED for ~1 s (the 1 s battery-display
+ * refresh in pmic.c then restores the normal screen). Deferred to a work item
+ * — the GPIO ISR can't touch I2C2. */
+static struct k_work button_oled_work;
+static void button_oled_flash_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	oled_test_fill();
+}
+
 /* Button interrupt handler */
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	LOG_INF("Button pressed!");
+	k_work_submit(&button_oled_work);
 }
 
 int button_init(void)
@@ -27,6 +39,8 @@ int button_init(void)
 	int ret;
 
 	LOG_INF("Initializing Button...");
+
+	k_work_init(&button_oled_work, button_oled_flash_handler);
 
 	/* Initialize button */
 	if (!gpio_is_ready_dt(&button)) {

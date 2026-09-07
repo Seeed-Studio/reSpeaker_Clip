@@ -176,6 +176,20 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_usb,
 
 SHELL_CMD_REGISTER(usb, &sub_usb, "USB commands", NULL);
 
+int usb_msc_disable(void)
+{
+	if (!usbd_initialized) {
+		return -EALREADY;
+	}
+
+	int ret = usbd_disable(&sample_usbd);
+	if (ret != 0) {
+		LOG_WRN("USB disable failed: %d", ret);
+	}
+	msc_enabled = false;
+	return ret;
+}
+
 int usb_msc_init(void)
 {
 	LOG_INF("USB MSC module ready (use 'usb msc on' to enable)");

@@ -12,7 +12,7 @@ state transitions.
 ## Build
 
 ```sh
-source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
 export ZEPHYR_EXTRA_MODULES=$(pwd)
 west build --build-dir build-suspend --pristine \
     --board clip/nrf5340/cpuapp samples/suspend_to_ram

@@ -32,6 +32,27 @@
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
+/* This image has no MCUboot (SB_CONFIG_BOOTLOADER_NONE), unlike applications/
+ * clip where MCUboot accesses the external SPI flash first and so has already
+ * driven flash_vdd high + woken the chip before the app probes it. Here
+ * spi_nor (POST_KERNEL prio 80) is the first access, and with
+ * CONFIG_PM_DEVICE_RUNTIME_ASYNC the boot-on regulator enable is deferred, so
+ * the GPIO hasn't been driven yet -> JEDEC read returns 00 00 00. Force the
+ * regulator on and block long enough (tPUW ~10 ms) for the chip to settle,
+ * BEFORE spi_nor runs. */
+static int flash_vdd_preinit(const struct device *dev)
+{
+	ARG_UNUSED(dev);
+
+	const struct device *fv = DEVICE_DT_GET(DT_NODELABEL(flash_vdd));
+	if (device_is_ready(fv)) {
+		(void)regulator_enable(fv);
+	}
+	k_msleep(50);
+	return 0;
+}
+SYS_INIT(flash_vdd_preinit, POST_KERNEL, 78);
+
 static int cmd_reboot(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -71,23 +92,8 @@ static void sys_poweroff_with_battery_state(void)
 	sys_poweroff();
 }
 
-static int cmd_sys_stop(const struct shell *sh, size_t argc, char **argv)
-{
-	struct sd_shutdown_result sd;
-
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
-
-	shell_print(sh, "Stopping WiFi and SD, then entering nRF5340 SYSTEM OFF");
-	sys_wifi_power_off();
-	sd = sys_sd_shutdown();
-	if (sd.ldo_after) {
-		shell_warn(sh, "LDO2 is still enabled (unmount=%d deinit=%d spi4=%d cs=%d ldo=%d)",
-			   sd.unmount_rc, sd.deinit_rc, sd.suspend_rc, sd.cs_rc, sd.ldo_rc);
-	}
-	k_sleep(K_MSEC(200)); /* Let the shell message leave UART first. */
-	sys_poweroff_with_battery_state();
-}
+/* cmd_sys_stop is defined after the device pointers below (it touches all of
+ * them for a full shutdown). */
 
 /* Isolate the UART contribution before SYSTEM OFF. The production Clip build
  * saves about 570 uA by disabling UART console/logging. */
@@ -278,8 +284,75 @@ static int cmd_sys_buck_pfm_stop(const struct shell *sh, size_t argc, char **arg
 	sys_poweroff_with_battery_state();
 }
 
+/* Full shutdown: stop every peripheral known to leak or hold a wake source,
+ * THEN suspend the UART (~570 uA console leak) and enter SYSTEM OFF. Use this
+ * (not the single-peripheral `sys *_stop` isolation commands) to measure sleep
+ * current. NOTE: with SWD/J-Link attached, nRF5340 cannot enter true SYSTEM
+ * OFF — detach the probe and power-cycle to read uA-level current. */
+static int cmd_sys_stop(const struct shell *sh, size_t argc, char **argv)
+{
+	struct sd_shutdown_result sd;
+	int ret;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "Full peripheral shutdown, then nRF5340 SYSTEM OFF");
+
+	/* 1. BLE / network-core radio (wake source) */
+	shell_print(sh, "  [1/8] BLE: adv stop + disable");
+	ret = bt_le_adv_stop();
+	if (ret != 0 && ret != -EALREADY) {
+		shell_warn(sh, "    adv stop: %d", ret);
+	}
+	(void)bt_disable();
+
+	/* 2. nRF7002 WiFi supply (~70 uA) */
+	shell_print(sh, "  [2/8] WiFi: nRF7002 power off");
+	sys_wifi_power_off();
+
+	/* 3. USB device (wake source when VBUS present) */
+	shell_print(sh, "  [3/8] USB: disable");
+	(void)usb_msc_disable();
+
+	/* 4. SD card + LDO2 */
+	shell_print(sh, "  [4/8] SD: unmount + SPI4 suspend + LDO2 off");
+	sd = sys_sd_shutdown();
+	if (sd.ldo_after) {
+		shell_warn(sh, "    LDO2 still on (unmount=%d deinit=%d spi4=%d cs=%d ldo=%d)",
+			   sd.unmount_rc, sd.deinit_rc, sd.suspend_rc, sd.cs_rc, sd.ldo_rc);
+	}
+
+	/* 5. Mic LDO1 */
+	shell_print(sh, "  [5/8] Mic: LDO1 off");
+	if (device_is_ready(ldo1)) {
+		(void)regulator_disable(ldo1);
+	}
+
+	/* 6. OLED (bus suspend + VDD/RESET low to avoid ESD back-power) */
+	shell_print(sh, "  [6/8] OLED: bus suspend + VDD off");
+	(void)pm_device_action_run(i2c2, PM_DEVICE_ACTION_SUSPEND);
+	(void)gpio_pin_configure(gpio1, 9, GPIO_OUTPUT_INACTIVE);  /* RESET */
+	(void)gpio_pin_configure(gpio1, 8, GPIO_OUTPUT_INACTIVE);  /* OLED VDD */
+
+	/* 7. BUCK2 PFM (low-power regulator mode) */
+	shell_print(sh, "  [7/8] BUCK2: PFM");
+	if (device_is_ready(buck2)) {
+		(void)regulator_set_mode(buck2, NPM13XX_BUCK_MODE_PFM);
+	}
+
+	/* 8. UART console (~570 uA) — suspended LAST so the shell stays up until
+	 * the final message is flushed. */
+	shell_print(sh, "  [8/8] UART: suspend (console goes dark) -> SYSTEM OFF");
+	k_sleep(K_MSEC(300));  /* let the last line flush before UARTE dies */
+	(void)pm_device_action_run(uart0, PM_DEVICE_ACTION_SUSPEND);
+
+	sys_poweroff_with_battery_state();
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_sys_cmds,
-	SHELL_CMD(stop, NULL, "Stop WiFi and SD safely then system power off", cmd_sys_stop),
+	SHELL_CMD(stop, NULL, "Full shutdown (all peripherals) then SYSTEM OFF", cmd_sys_stop),
 	SHELL_CMD(uart_stop, NULL, "Suspend UARTE then system power off", cmd_sys_uart_stop),
 	SHELL_CMD(wifi_stop, NULL, "Cut nRF7002 power then system power off", cmd_sys_wifi_stop),
 	SHELL_CMD(oled_stop, NULL, "Cut OLED VDD then system power off", cmd_sys_oled_stop),

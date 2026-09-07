@@ -14,8 +14,9 @@ export ZEPHYR_EXTRA_MODULES=$(pwd)
 # Build (must be pristine after a VERSION / Kconfig / DTS change)
 west build --build-dir build-test --pristine always --board clip/nrf5340/cpuapp tests/clip
 
-# Flash and reset (the nrfutil runner auto-resets after flashing)
-west flash --build-dir build-test
+# Flash and reset (this image boots directly via J-Link, no MCUboot;
+# west flash --reset does not work on this board, so reset with nrfutil)
+west flash --build-dir build-test && nrfutil device reset
 ```
 
 ## Serial Configuration
@@ -26,14 +27,41 @@ west flash --build-dir build-test
 
 ## Test Modules
 
+### Device Identity (Production Test)
+
+Every board's **BLE advertising name** and **WiFi AP SSID** carry a unique suffix derived from the chip id (nRF5340 FICR DEVICEID — factory-programmed, stable across reboot/reflash), so a production jig can lock RSSI/identity to the DUT among many boards:
+
+- **BLE name**: `Clip_<6-hex>` (e.g. `Clip_A1B2C3`)
+- **AP SSID**: `Clip_<6-hex>` (same suffix as BLE, e.g. `Clip_A1B2C3`)
+
+The `ident` shell command prints all of a board's identities in one shot:
+
+```
+uart:~$ ident
+BLE name : Clip_A1B2C3
+BLE MAC  : AA:BB:CC:DD:EE:FF
+AP SSID  : Clip_A1B2C3
+suffix   : A1B2C3 (chip_id last 6 hex)
+```
+
+> Suffix length defaults to 6 hex (24-bit); change `IDENTITY_SUFFIX_HEX_LEN` in `src/identity.c` to 8/12 for larger fleets (FICR provides 16 hex digits).
+
 ### 1. BLE Test
 
 **Purpose**: Test Bluetooth Low Energy functionality as peripheral device
 
 **Description**: BLE automatically starts advertising on boot. Connect with a BLE central device to test GATT services and throughput.
 
+**Commands**:
+```bash
+ble_txpower <dBm>    # Set BLE TX power for advertising (and active connection, if any)
+```
+nRF5340 TX power steps: `-40, -20, -16, -12, -8, -4, 0, 3, 4, 5, 6, 7, 8` dBm. The command
+prints both the requested and the actually selected power (running it with no argument
+prints the usage/steps list).
+
 **Expected Results**:
-- Device advertises as "Clip_Test"
+- Device advertises as `Clip_<6-hex>` (unique per board; see "Device Identity" above)
 - Supports GATT connections and notifications for throughput testing
 
 ### 2. WiFi AP Test
@@ -41,7 +69,7 @@ west flash --build-dir build-test
 **Purpose**: Test nRF7002 WiFi module in AP (hotspot) mode
 
 **AP Configuration**:
-- SSID: `ClipTest_XXXX` (auto-generated from chip ID)
+- SSID: `Clip_<6-hex>` (unique per board; see "Device Identity" above)
 - Password: `12345678`
 - Band/Channel: configurable — `wifi on <channel>` (2.4GHz: 1-13, 5GHz: 36-165; default 36 / 5GHz)
 - IP: 192.168.4.1
@@ -57,7 +85,7 @@ wifi scan [band]     # Scan networks (0=all, 1=2.4G, 2=5G)
 
 **Quick Test**:
 1. Run `wifi on`, note the SSID from serial output
-2. Connect phone/PC to `ClipTest_XXXX`, password `12345678`
+2. Connect phone/PC to `Clip_<6-hex>` (run `ident` to read this board's SSID), password `12345678`
 3. Device should get 192.168.4.x address via DHCP
 4. Run `wifi status` to confirm AP is running
 
@@ -77,7 +105,7 @@ wifi scan [band]     # Scan networks (0=all, 1=2.4G, 2=5G)
 
 **Test Procedure**:
 
-**Step 1: Start iperf2 server on PC (connected to ClipTest AP)**
+**Step 1: Start iperf2 server on PC (connected to the Clip AP)**
 ```bash
 iperf -s -u -p 5001 -i 1
 ```
@@ -140,6 +168,9 @@ mic capture [time_sec]  # Capture audio and print sample stats
 mic record [time_sec]   # Record WAV file to SD card (default 3 sec)
 ```
 
+Mic power (NPM1300 LDO1 1.8V + PDM level shifter) is applied automatically at the start of
+`capture`/`record` and released again afterwards.
+
 **Expected Results**:
 - Audio capture starts and stops
 - Sample statistics (avg/min/max) printed for each block
@@ -151,52 +182,6 @@ mic record [time_sec]   # Record WAV file to SD card (default 3 sec)
 3. Enable USB MSC to access files: `usb msc on`
 4. Copy WAV files from USB drive on PC
 5. Disable USB MSC: `usb msc off`
-
-### 10. USB Mass Storage Test
-
-**Purpose**: Expose SD card as USB drive for direct file access from PC
-
-**Commands**:
-```bash
-usb msc on       # Unmount SD, enable USB MSC (SD appears as USB drive)
-usb msc off      # Disable USB MSC, remount SD card
-usb status       # Show USB and SD card status
-```
-
-**Usage**:
-1. Record audio to SD: `mic record 5`
-2. Enable USB MSC: `usb msc on`
-3. Connect USB cable to PC - SD card appears as USB mass storage
-4. Copy files from the drive
-5. Safely eject drive on PC, then: `usb msc off`
-
-**Notes**:
-- USB MSC and filesystem cannot access SD card simultaneously
-- Always disable MSC before recording again
-- UART shell (921600 baud) uses a separate UART, not USB
-
-### 11. SPI Flash Speed Test
-
-**Purpose**: Test SPI flash (PY25Q64H 8MB) raw read/write/erase performance
-
-**Commands**:
-```bash
-flash speed            # Test 960KB (default and maximum)
-flash speed 512        # Test 512KB
-flash speed 64         # Test 64KB
-```
-
-**Test Procedure**:
-1. Erases test area (4KB sectors)
-2. Writes test pattern
-3. Reads back and verifies data integrity
-4. Reports erase/write/read speeds in KB/s
-
-**Notes**:
-- Tests in the unused 960KB external-flash OTA app slot (offset `0x000000`)
-- Does not touch the LittleFS partition at offset `0x130000`, which stores the battery gauge state
-- 4KB chunk size aligned to flash erase sector
-- Max test size: 960KB
 
 ### 5. Button Test
 
@@ -266,7 +251,58 @@ motor test           # Run motor test
 - Pulse duration is accurate
 - Patterns play as expected
 
-### 9. Crystal Capacitance Tuning
+### 9. USB Mass Storage Test
+
+**Purpose**: Expose SD card as USB drive for direct file access from PC
+
+**Commands**:
+```bash
+usb msc on       # Unmount SD, enable USB MSC (SD appears as USB drive)
+usb msc off      # Disable USB MSC, remount SD card
+usb status       # Show USB and SD card status
+```
+
+**Usage**:
+1. Record audio to SD: `mic record 5`
+2. Enable USB MSC: `usb msc on`
+3. Connect USB cable to PC - SD card appears as USB mass storage
+4. Copy files from the drive
+5. Safely eject drive on PC, then: `usb msc off`
+
+**Notes**:
+- USB MSC and filesystem cannot access SD card simultaneously
+- Always disable MSC before recording again
+- UART shell (921600 baud) uses a separate UART, not USB
+
+### 10. SPI Flash Test
+
+**Purpose**: Test SPI flash (PY25Q64H 8MB) raw read/write/erase performance and integrity
+
+**Commands**:
+```bash
+flash speed            # Speed test, 960KB (default and maximum)
+flash speed 512        # Speed test, 512KB
+flash speed 64         # Speed test, 64KB
+flash test             # Quick PASS/FAIL self-test
+```
+
+**Speed Test Procedure** (`flash speed`):
+1. Erases test area (4KB sectors)
+2. Writes test pattern
+3. Reads back and verifies data integrity
+4. Reports erase/write/read speeds in KB/s
+
+**PASS/FAIL Test** (`flash test`): erases one 4KiB block at the test offset, writes a 256-byte
+pattern, reads it back and compares. Prints `PASS:` or `FAIL:` with the failing step — handy as a
+one-shot production check.
+
+**Notes**:
+- Tests in the unused 960KB external-flash OTA app slot (offset `0x000000`)
+- Does not touch the LittleFS partition at offset `0x130000`, which stores the battery gauge state
+- 4KB chunk size aligned to flash erase sector
+- Max test size: 960KB
+
+### 11. Crystal Capacitance Tuning
 
 **Purpose**: Tune internal load capacitance for LFXO (32.768kHz) and HFXO (32MHz) crystals. The board has no external load capacitors — internal capacitance must be configured via registers.
 
@@ -324,7 +360,7 @@ HFXO capacitance set to: 9.0 pF (CAPVALUE=90)
 **Solutions**:
 1. Check card is properly inserted
 2. Try reformatting card as FAT32
-3. Use `sd eject` before removing card
+3. Use `sd umount` before removing card
 4. Check for transient sync errors (these are normal)
 
 ### WiFi Connection Failures
@@ -387,11 +423,31 @@ not nPM1300 ship mode.
 
 `sys sd_stop` runs the same sequence and prints each return code for diagnosis.
 
+All `sys` subcommands (`sys <sub>`) — each variant shuts down its named domain
+then enters SYSTEM OFF, so you can measure its contribution to idle current:
+
+| Command | Description |
+|---------|-------------|
+| `sys stop` | Full shutdown (all peripherals) then SYSTEM OFF |
+| `sys uart_stop` | Suspend UARTE then SYSTEM OFF |
+| `sys wifi_stop` | Cut nRF7002 power then SYSTEM OFF |
+| `sys oled_stop` | Cut OLED VDD then SYSTEM OFF |
+| `sys mic_stop` | Cut microphone LDO1 then SYSTEM OFF |
+| `sys ble_stop` | Stop BLE then SYSTEM OFF |
+| `sys buck_pfm_stop` | Set BUCK2 PFM then SYSTEM OFF |
+| `sys sd_status` | Show SD/PMIC device initialization state (no power-off) |
+| `sys sd_stop` | Log SD shutdown steps then SYSTEM OFF |
+
+To leave SYSTEM OFF and come back up without reflashing, use the plain `reboot`
+command (reboots the device) instead of a `sys *_stop` variant.
+
 ## Memory Usage
 
+As of the 2026-08-19 pristine build:
+
 ```
-FLASH:      911 KB (86.9% of 1 MB)
-RAM:        374 KB (~85% of 440 KB)
+FLASH:      934 KB (91.2% of 1 MB)
+RAM:        375 KB (83.8% of 448 KB)
 ```
 
 ## Test Coverage Matrix
@@ -407,6 +463,7 @@ RAM:        374 KB (~85% of 440 KB)
 | PMIC | - | ✓ | ✓ | ✓ | ✓ |
 | Motor | ✓ | - | - | - | - |
 | USB MSC | - | ✓ | ✓ | - | ✓ |
+| Flash | ✓ | - | - | ✓ | ✓ |
 
 ## Built-in Shell Commands
 
@@ -484,16 +541,14 @@ Use SHELL_CMD_* macros for shell command registration:
 
 ## Version History
 
-- 2026-07-10: Updated for NCS v3.3.0 (build env); documented `sd verify`/`sd test`/`sd patterns` reliability suite and `wifi on [channel]` (2.4GHz support) + `wifi scan`
+- 2026-08-19: Per-device identity — BLE name and AP SSID now `Clip_<6-hex>` from the chip id (FICR); new `ident` command
 - 2026-07-16: Added persistent model-based battery display to the hardware-test OLED
+- 2026-07-10: Updated for NCS v3.3.0 (build env); documented `sd verify`/`sd test`/`sd patterns` reliability suite and `wifi on [channel]` (2.4GHz support) + `wifi scan`; removed IMU content (final hardware has no IMU)
 - 2026-05-12: Added SPI flash speed test command
 - 2026-05-11: Added LFXO/HFXO crystal capacitance tuning commands
 - 2026-05-08: Added USB MSC module (expose SD card as USB drive), added WAV recording
 - 2026-04-22: Updated documentation to accurately reflect implemented features, removed non-existent BLE and WiFi scan commands, corrected SD card commands
-- 2025-03-09: Added IMU test module with software I2C
-- 2025-03-09: Added vibration motor test commands
-- 2025-03-09: Added PMIC (NPM1300) test commands
-- 2025-03-09: Added OLED display test commands
+- 2025-03-09: Added vibration motor, PMIC (NPM1300), and OLED test commands; IMU test module with software I2C (removed — final hardware has no IMU)
 - 2023: Initial test suite framework
 
 ## License

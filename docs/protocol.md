@@ -15,6 +15,13 @@ The reSpeaker Clip uses a JSON-based AT command protocol for communication betwe
 
 ### 1.2 Transport Layer (BLE GATT)
 
+> **Transports:** AT commands run over three transports — BLE GATT (this
+> section), WiFi UDP (Appendix D), and USB CDC ACM serial. All three feed the
+> same AT server; the active transport for responses is auto-selected per
+> response with priority **UDP > BLE** (USB CDC behaves identically to BLE for
+> AT commands). File transfer uses the BLE File Data characteristic or the UDP
+> binary frames.
+
 **Service UUID**: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
 
 The protocol uses Bluetooth Low Energy with GATT (Generic Attribute Profile) as the transport layer. Three characteristics are provided:
@@ -71,6 +78,20 @@ descriptive message (e.g. `{"ok":false,"msg":"SD card not mounted"}`). There is
 **no numeric error code** — handlers return only the message string. A few
 commands also return an informational message on success via `"msg"` (e.g.
 `AT+FACTORY`, `AT+NAME` clear).
+
+### 1.6 Reference Implementations
+
+A complete Python SDK and host tools live in `applications/clip/tests/` (see
+its `README.md` and `EXAMPLES.md` for usage and installation):
+- `applications/clip/tests/tools/ble_terminal.py` — interactive AT terminal over BLE
+- `applications/clip/tests/tools/udp_terminal.py` — same over the WiFi UDP transport
+- `applications/clip/tests/tools/udp_sync.py` — bulk file sync over WiFi UDP
+- `applications/clip/tests/tools/record.py` — remote recording control
+- `applications/clip/tests/tools/clip-cli.py` — scripted command-line client
+
+The underlying client library (`client.py`, `commands.py`, `transfer.py`,
+`codec.py`, `wifi.py`) is in `applications/clip/tests/clip/` and is the
+reference for any new client implementation.
 
 ## 2. BLE GATT Service Definition
 
@@ -151,13 +172,34 @@ values.append(data[6] & 0x0F)         # 13th value (low nibble of last byte)
 
 ### 2.3 Connection Requirements
 
+**Advertised local name:** `Clip XXXX` — the literal string `Clip` followed by a
+space and 4 hex digits of the nRF5340 FICR DEVICEID low 16 bits (e.g.
+`Clip A1B2`). The WiFi AP SSID uses the same suffix (`ClipAP_A1B2`).
+
 | Requirement | Specification |
 |-------------|---------------|
-| Pairing | LE Secure Connections (mandatory) |
-| Bonding | Required (stored for auto-reconnect) |
-| Encryption | AES-128 CCM (mandatory) |
+| Pairing | LE Secure Connections, **Just Works** (unauthenticated) — see below |
+| Bonding | Required (stored for auto-reconnect, single bond) |
+| Encryption | AES-128 CCM, level 2 (mandatory) |
 | MTU | Negotiated up to 517 (default 23) |
 | Connection Interval | 15-80 ms (adaptive) |
+
+**Pairing/association model (what a client should expect):**
+
+- The device is the security initiator: immediately after connect, its
+  `connected()` callback schedules a security request that calls
+  `bt_conn_set_security(conn, BT_SECURITY_L2)` (encryption, unauthenticated).
+- The device has no display/keyboard for pairing and registers only an
+  auto-confirm `pairing_confirm` callback (no passkey display / numeric
+  comparison callbacks), so the association method is **Just Works** over LE
+  Secure Connections (when the central supports it). There is no PIN to enter
+  and no user confirmation number.
+- Pairing is **bondable with a single bond slot** (`CONFIG_BT_BONDABLE=y`,
+  `CONFIG_BT_MAX_PAIRED=1`, `CONFIG_BT_KEYS_OVERWRITE_OLDEST=y`); keys persist
+  in settings. On reconnect the device re-encrypts with the stored LTK and
+  disconnects the link if encryption is not reached (level < 2 or pairing
+  error), so a client that deleted its bond will be disconnected and must
+  re-pair.
 
 ### 2.4 MTU Negotiation
 
@@ -191,7 +233,6 @@ Execute an operation or retrieve status:
 - `AT+DELETE` - Delete session
 - `AT+FORMAT` - Format SD card
 - `AT+POWEROFF` - Power off device
-- `AT+FACTORY` - Factory reset
 - `AT+REBOOT` - Reboot device
 - `AT+DFU` - Reboot into MCUboot DFU/recovery mode
 - `AT+WIFI` - Start WiFi AP (equivalent to `AT+WIFI=on`)
@@ -201,7 +242,7 @@ Execute an operation or retrieve status:
 Format: `AT+XX=<value>`
 
 Set configuration or execute with parameters:
-- `AT+MODE=<normal|enhanced|stereo|merge>` - Set recording mode
+- `AT+MODE=<normal|enhanced>` - Set recording mode (`AT+START=<mode>` additionally accepts the legacy aliases `stereo`/`merge`)
 - `AT+AUTODEL=<off|0|1-30>` - Set auto-delete policy
 - `AT+BRIGHTNESS=<0-255>` - Set OLED brightness
 - `AT+TIME=<unix_ts>` - Set system time
@@ -257,7 +298,7 @@ All responses use JSON with consistent structure:
 ```json
 {
   "ok": false,
-  "error": "Error message description"
+  "msg": "Error message description"
 }
 ```
 
@@ -287,6 +328,8 @@ AT+GSTAT
     "duration": 0,
     "battery": 85,
     "charging": true,
+    "temp": 26,
+    "voltage": 3980,
     "mode": "normal",
     "bitrate": 16000,
     "free_space": 1024,
@@ -302,6 +345,8 @@ AT+GSTAT
 - `duration`: Current recording duration in seconds
 - `battery`: Battery percentage (0-100)
 - `charging`: Charging status (true/false)
+- `temp`: Battery temperature in °C (NTC via NPM1300)
+- `voltage`: Battery voltage in mV
 - `mode`: Recording mode (normal/enhanced)
 - `bitrate`: Bitrate for current mode (normal=16000, enhanced=32000)
 - `free_space`: Free space in MB
@@ -373,6 +418,80 @@ AT+VERSION
 
 ---
 
+##### AT+BATT - Battery Status
+
+Get the current battery status (SoC %, charging state, voltage, temperature).
+
+**Request:**
+```
+AT+BATT
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "battery": 85,
+    "charging": true,
+    "voltage": 3980,
+    "temp": 26
+  }
+}
+```
+
+**Fields:**
+- `battery`: Battery percentage (0-100, fuel-gauge SoC estimate)
+- `charging`: Charging status (true/false)
+- `voltage`: Battery voltage in mV
+- `temp`: Battery temperature in °C (NTC via NPM1300; useful for verifying the charge cutoff)
+
+> Values come from the battery module's periodic poll (NPM1300 + nRF Fuel Gauge). Useful for field/debug thermal monitoring.
+
+---
+
+##### AT+STORAGE - SD Card Storage Info
+
+Get SD card storage statistics. Use `AT+STORAGE?` (or bare `AT+STORAGE`).
+
+**Request:**
+```
+AT+STORAGE?
+```
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "mounted": true,
+    "total_mb": 15193,
+    "free_mb": 14000,
+    "used_mb": 1193,
+    "used_pct": 7,
+    "recorded_mb": 980
+  }
+}
+```
+
+**Fields:**
+- `mounted`: Whether the SD card is currently mounted (see note)
+- `total_mb`: Card capacity in MB
+- `free_mb`: Free space in MB
+- `used_mb`: Used space in MB (`total - free`)
+- `used_pct`: Used percentage (0-100)
+- `recorded_mb`: Total recorded audio in MB (all sessions)
+
+> When the SD card is idle power-gated (unmounted), the last-known
+> `total_mb`/`free_mb` values are reported with `"mounted": false`.
+> `total_mb`/`free_mb` of 0 means the card was never seen at boot.
+
+**Error Cases:**
+- `{"ok":false,"msg":"Use AT+STORAGE?"}` (any SET argument)
+- `{"ok":false,"msg":"Storage unavailable"}`
+
+---
+
 #### 3.3.2 Recording Control
 
 ##### AT+START - Start Recording
@@ -385,12 +504,7 @@ AT+START=normal
 ```
 
 **Parameters:**
-- `mode`: "normal", "enhanced", or "rtc"
-  - `normal`/`stereo` and `enhanced`/`merge` start an on-card recording
-  - `rtc` starts a live BLE stream session — nothing is written to the SD
-    card (see Section 4.8). Requires BLE connected with File Data
-    notifications enabled; the session aborts if the stream is not started
-    with `AT+DOWNLOAD` within 5 seconds.
+- `mode`: "normal" or "enhanced" (legacy aliases: "stereo" = normal, "merge" = enhanced; case-insensitive). Omitted → current mode.
 
 **Response:**
 ```json
@@ -417,6 +531,7 @@ RTC sessions additionally report the mode:
 > `data` contains only the `session` id (an empty object if the id isn't ready yet).
 
 **Error Cases:**
+- `{"ok":false,"msg":"invalid mode (normal/stereo/enhanced/merge)"}` (bad mode argument)
 - `{"ok":false,"msg":"Already recording or invalid state"}` / `"Audio module busy"` / `"Failed to start recording"`
 - `"WiFi active, cannot record"` / `"USB MSC active, disable USB first"` (recording blocked while WiFi/USB active)
 - `"RTC requires BLE connected and file data notify enabled"` (RTC preconditions not met)
@@ -523,7 +638,7 @@ List all sessions with pagination, get session details, or list files with pagin
 AT+LIST
 ```
 
-**Note:** Sessions are sorted newest-first (descending by session ID, which is a timestamp). A shared cache is used for efficient pagination — DELETE operations invalidate the cache.
+**Note:** Sessions are sorted newest-first (descending by session ID, which is a timestamp). Sessions are enumerated per request (no persistent cache).
 
 **Request (Paginated Sessions):**
 ```
@@ -549,8 +664,8 @@ AT+LIST=20240203100000?1&20
     "page": 1,
     "per_page": 10,
     "sessions": [
-      {"id": "20240203100000", "files": 30, "size": 5242880, "bookmarks": 5},
-      {"id": "20240203120000", "files": 15, "size": 2621440, "bookmarks": 0}
+      {"id": "20240203120000", "files": 15, "size": 2621440, "bookmarks": 0},
+      {"id": "20240203100000", "files": 30, "size": 5242880, "bookmarks": 5}
     ]
   }
 }
@@ -592,7 +707,7 @@ AT+LIST=20240203100000?1&20
 **Fields:**
 - `total`: Total number of items (sessions or files)
 - `page`: Current page number (default 1)
-- `per_page`: Items per page (default 10, max 50)
+- `per_page`: Items per page (default 10; session list caps at 50, file list caps at 20)
 - `sessions`: Array of session objects (session list pagination)
   - `id`: Session ID
   - `files`: Total number of audio files in session
@@ -629,7 +744,7 @@ AT+DOWNLOAD=20240203100000:0016.opus
 ```
 
 **Error Cases:**
-- `3001`: Session not found (when listing files)
+- `{"ok":false,"msg":"Session not found"}` (when listing files) / `"Invalid session ID"` / `"SD card not mounted"` / `"Failed to list sessions"`
 
 ---
 
@@ -654,7 +769,7 @@ AT+DELETE=20240203100000
 - `deleted`: `true` once the session directory has been removed
 
 **Error Cases:**
-- `{"ok":false,"msg":"Session not found"}` / `"Invalid session ID"` / `"Cannot delete current recording session"`
+- `{"ok":false,"msg":"Session not found"}` / `"Invalid session ID"` / `"cannot delete active session"` / `"Missing session_id"` / `"SD card not mounted"`
 
 **Side Effects:**
 - Deletes the session directory and all its files
@@ -712,19 +827,18 @@ AT+MARKS=20240203100000?2&10
 - `session`: Session ID (summary response)
 - `total`: Total number of bookmarks
 - `page`: Current page number (1-based)
-- `per_page`: Items per page (default 10, max 50)
+- `per_page`: Items per page (default 20, max 100)
 - `bookmarks`: Array of bookmark entries; each entry has only `offset` (seconds from session start). Notes are not stored.
 
 **Pagination Logic:**
 - Without `?`: Returns summary with total count
 - With `?page&per_page`: Returns specific page
-  - Default: page=1, per_page=10
-  - Maximum per_page: 50
+  - Default: page=1, per_page=20
+  - Maximum per_page: 100
 - Client increments `page` to get next page
 
 **Error Cases:**
-- `3001`: Session not found
-- `3005`: Bookmark file corrupted
+- `{"ok":false,"msg":"Missing session_id"}` / `"Invalid session ID"` / `"Failed to get bookmark count"` / `"Failed to get bookmarks"` / `"SD card not mounted"`
 
 ---
 
@@ -833,7 +947,8 @@ After the start response, the device sends binary frames on the File Data charac
 
 ##### AT+PAUSE - Pause Recording
 
-Pause ongoing recording.
+Pause ongoing recording. This pauses **recording only** — it is not a transfer
+control (transfers are controlled with `AT+CANCEL`; see Section 4.5).
 
 **Request:**
 ```
@@ -867,7 +982,7 @@ AT+PAUSE
 
 ##### AT+RESUME - Resume Recording
 
-Resume paused recording.
+Resume paused **recording** (has no effect on file transfers).
 
 **Request:**
 ```
@@ -1111,9 +1226,7 @@ AT+NAME?
 - `AT+NAME=CLEAR` removes the name (sets to empty)
 
 **Error Cases:**
-- Name too long (> 256 bytes)
-- Contains control characters
-- Empty name (use `CLEAR` to remove)
+- `{"ok":false,"msg":"Missing name"}` / `"Name too long (max 256 bytes)"` / `"Invalid characters"` / `"Name cannot be empty"` / `"Save failed"`
 
 ---
 
@@ -1187,6 +1300,10 @@ AT+WIFI?
 - Cannot start recording while WiFi is active
 
 **Auto-off:** WiFi AP automatically stops after 3 minutes if no client connects.
+
+**Error Cases:**
+- `{"ok":false,"msg":"Missing argument (on/off)"}` / `"Invalid argument (use on/off)"`
+- `"Cannot start WiFi in current state"` / `"Failed to start WiFi AP"` / `"Failed to stop WiFi AP"`
 
 ---
 
@@ -1386,17 +1503,19 @@ AT+PAIR=reset
 - "unpaired": Not bonded
 
 **Side Effects of Reset:**
-- Clears BLE bond information (`ble_clear_bonds`) and persists the deletion
-  (`settings_save`) so it survives the reboot
-- Replies immediately after clearing pairing configuration, before erasing the
-  SD card, so the client does not time out on cards containing many recordings
+- Clears BLE bond information (`ble_clear_bonds`) and saves settings
+  **synchronously** so the deletion survives the reboot
+- Replies **immediately** after the bond clear + settings save; the SD card
+  erase is deliberately deferred to background work (~500 ms delay) so the
+  client does not time out on cards containing many recordings
 - **Formats the SD card** in the background — destroys all recordings (privacy
   wipe on unpair)
-- Reboots the device after SD erasure completes
+- Reboots the device after the SD erasure completes
 - Requires re-pairing
 
-> The bond clear + settings persist + SD format all run synchronously before the
-> reboot, so the device is guaranteed to come back unbonded with a clean SD card.
+> The reply (`"sd_erase":"pending"`) is sent before the erase; the reboot
+> happens only after the background erase finishes, so the device is
+> guaranteed to come back unbonded with a clean SD card.
 
 
 ---
@@ -1485,7 +1604,7 @@ AT+DFU
 ##### AT+WIFICFG - WiFi Channel / Regulatory Domain
 
 Configure the WiFi AP channel and 2-letter regulatory domain (applied on the
-next WiFi start). 5 GHz channels only (36–165).
+next WiFi start). Valid channels: **1–13 (2.4 GHz) or 36–165 (5 GHz)**.
 
 **Request (Set):**
 ```
@@ -1518,7 +1637,11 @@ AT+WIFICFG?
 ```
 
 **Error Cases:**
-- `{"ok":false,"msg":"Missing argument (format: channel:CC)"}` / `"Invalid format (use: channel:CC, e.g. 36:US)"` / `"Channel must be 36-165 (5GHz)"` / `"Reg domain must be 2 uppercase letters"`
+- `{"ok":false,"msg":"Missing argument (format: channel:CC)"}` / `"usage: channel:CC e.g. 36:US"` (no colon / domain not 2 letters)
+- `"channel: 1-13 (2.4G) or 36-165 (5G)"` (invalid channel)
+- `"reg domain: 2-letter country"` (non-letters)
+
+> A lowercase reg domain is accepted and auto-uppercased (`36:us` → `US`).
 
 ---
 
@@ -1700,8 +1823,10 @@ File transfer runs in the background. AT commands can be sent during transfer:
 **Supported during transfer:**
 - `AT+GSTAT` — Query status (returns "TRANSMITTING" state with `state`, `session`, `total`, `bytes` fields)
 - `AT+CANCEL` — Cancel transfer (thread-safe: handled in transfer thread)
-- `AT+PAUSE` — Pause transfer
-- `AT+RESUME` — Resume paused transfer
+
+> `AT+PAUSE`/`AT+RESUME` apply to **recording only**, not to transfers — there
+> is no paused transfer state. The only transfer controls are `AT+CANCEL` and
+> resume-via-`AT+DOWNLOAD=session:file` (Section 4.6).
 
 **Example:**
 ```
@@ -1826,16 +1951,12 @@ BLE disconnect.
 │     │ AT+DOWNLOAD                                  └──────────┘       │
 │     │                                            │                    │
 │     ▼                                            ▼                    │
-│  ┌──────────────┐                        ┌──────────────┐       │
-│  │ TRANSMITTING │<───────────────────────│    PAUSED    │──────>│
-│  └──────┬───────┘    AT+PAUSE            └──────┬───────┘       │
-│          │                                  │       │               │
-│          │ AT+RESUME                         │ AT+CANCEL             │
-│          ▼                                  ▼       ▼               │
-│       IDLE <───────────────────────────────┘    IDLE               │
-│                                                             │
-│         │ AT+CANCEL / Error                             │
-│         ▼                                               │
+│  ┌──────────────┐                                       │
+│  │ TRANSMITTING │  (AT+CANCEL / completion / disconnect  │
+│  └──────┬───────┘   → IDLE; no PAUSED transfer state)    │
+│          │                                                │
+│          │ AT+CANCEL / Error                              │
+│          ▼                                                │
 │  ┌──────────────┐                                       │
 │  │    ERROR     │──────────────────────────────────────┘
 │  └──────────────┘         Recovery / AT+REBOOT          │
@@ -1893,35 +2014,22 @@ BLE disconnect.
 │   ┌──────────┐      AT+DOWNLOAD       ┌──────────────┐ │
 │   │   IDLE   │ ──────────────────────>│ TRANSMITTING │ │
 │   └──────────┘                        └──────┬───────┘ │
-│        ▀                                      │        │
-│         │            AT+PAUSE /               │        │
-│         │            Disconnect               │        │
-│         └─────────────────────────────────────┘        │
-│                  │                                    │
-│                  ▼                                    │
-│           ┌──────────┐                               │
-│           │  PAUSED  │                               │
-│           └────┬─────┘                               │
-│                │                                     │
-│    ┌───────────┴─────────────┐                       │
-│    │                         │                       │
-│    ▼                         ▼                       │
-│ AT+RESUME              AT+CANCEL                    │
-│    │                         │                       │
-│    └─────────────────────────┼───────────────────────┘
-│                              ▼
-│                         ┌──────────┐
-│                         │   IDLE   │
-│                         └──────────┘
+│         │                                │        │
+│         │   AT+CANCEL / completion /     │        │
+│         │   disconnect (auto-cancel) /   │        │
+│         └──────── timeout ───────────────┘        │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
 ```
 
 **Transitions:**
 - IDLE → TRANSMITTING: `AT+DOWNLOAD`
-- TRANSMITTING → PAUSED: `AT+PAUSE` OR disconnect
-- PAUSED → TRANSMITTING: `AT+RESUME`
-- TRANSMITTING/PAUSED → IDLE: `AT+CANCEL` OR completion OR timeout
+- TRANSMITTING → IDLE: `AT+CANCEL` OR completion OR timeout OR transport disconnect (auto-cancel)
+
+> There is **no PAUSED transfer state**. `AT+PAUSE`/`AT+RESUME` act on
+> recording only (Section 3.3.5). If the transport drops mid-transfer, the
+> device cancels the transfer and returns to IDLE; the client resumes with
+> `AT+DOWNLOAD=<session_id>:<next_file>` (Section 4.6).
 
 ### 5.4 Connection State Machine
 
@@ -2035,30 +2143,15 @@ Binary format for efficient bookmark storage.
 [2 bytes count: uint16_t]
 ```
 
-**Entry (78 bytes):**
+**Entry (4 bytes each, `count` entries):**
 ```
-[4 bytes timestamp: uint32]
 [4 bytes offset: uint32 - seconds from session start]
-[2 bytes file_index: uint16]
-[4 bytes file_offset: uint32]
-[64 bytes note: null-terminated UTF-8 string]
 ```
 
-**Total entry size:** 78 bytes (fixed)
-
-**Example C struct:**
-```c
-struct __attribute__((packed)) mark_entry {
-    uint32_t timestamp;
-    uint32_t offset_sec;
-    uint16_t file_index;
-    uint32_t file_offset;
-    char note[64];
-};
-```
+Only the offset is stored — there is no timestamp, file index, or note field.
 
 **Usage:**
-- Stored on device: `/SD:/REC/{session_id}/marks.bin`
+- Stored on device: `/SD:/REC/YYYYMMDD/HH/MM/SS/marks.bin` (bucketed layout, Section 6.1)
 - Created when session starts
 - Updated when bookmarks are added (in-memory, flushed on save)
 
@@ -2099,17 +2192,25 @@ Each Opus file is a sequence of frames:
 - **Frame data**: Raw Opus encoded bytes
 - **Frame size**: Typically 20ms @ 16kHz = 320 samples
 
-### 6.5 Transfer Marker (.transferred)
+> **Playback note:** the recorded `NNNN.opus` files are this raw
+> length-prefixed Opus container — **not** Ogg Opus or WebM. Standard players
+> will not play them as-is. Use the reference tooling to convert:
+> `applications/clip/tests/clip/codec.py` (`convert_to_ogg_opus()`, wraps the
+> raw frames into a valid Ogg Opus file) or
+> `applications/clip/tests/tools/decode_opus.py` (decodes directly to WAV).
+> Decoder parameters (sample rate, channel count) come from the session's
+> `session.json` (`sample_rate`, `channels` fields, Section 6.2).
 
-Empty file created upon successful transfer completion.
+### 6.6 Transfer Marker
 
-```
-touch /SD:/REC/20240203100000/.transferred
-```
+There is **no** `.transferred` marker file. Transfer progress is persisted as
+the `synced` file count inside the session's `session.json` (Section 6.2,
+updated after each successful transfer, stored at
+`/SD:/REC/YYYYMMDD/HH/MM/SS/session.json`).
 
 **Purpose:**
-- Marks session as successfully transferred
-- Used by auto-delete policy
+- Marks how many files were successfully transferred (resume point)
+- Used by auto-delete policy and the untransferred-session indicator
 
 ## 7. Notifications and Events
 
@@ -2173,7 +2274,7 @@ Sent when a bookmark is added during recording.
 - `session`: Session ID
 - `mark_count`: Total number of bookmarks in the session after this mark
 
-#### 7.1.3 Connection / USB / Storage Events
+#### 7.1.3 Connection / WiFi / USB / Storage Events
 
 Other state-change events use the generic two-field form
 `{"event":"<name>","status":"<status>"}` (built by `ble_notify_event`):
@@ -2181,8 +2282,11 @@ Other state-change events use the generic two-field form
 | `event` | `status` | Trigger |
 |---------|----------|---------|
 | `ble` | `connected` / `disconnected` | A central connects / disconnects |
+| `wifi` | `on` / `off` | WiFi AP started / stopped (manual or auto-off) |
 | `usb` | `on` / `off` | USB CDC enabled / disabled (cable, 10-min auto-off, or `AT+USB`) |
 | `storage` | `full` | SD card crosses the storage-full threshold; recording is refused |
+
+This is the complete list of `ble_notify_event` sources.
 
 Example:
 ```json
@@ -2197,76 +2301,12 @@ Example:
 
 Real-time audio energy data is sent via the Audio Visualization characteristic (`0x6E400005`), not as a JSON event. See Section 2.2.4 for the data format.
 
-### 7.3 System Events
+### 7.3 BLE Event Notifications
 
-#### Connection Event
-
-```json
-{
-  "ok": true,
-  "event": "connected",
-  "addr": "AA:BB:CC:DD:EE:FF"
-}
-```
-
-#### Disconnection Event
-
-```json
-{
-  "ok": true,
-  "event": "disconnected",
-  "reason": "timeout"
-}
-```
-
-### 7.4 BLE Event Notifications
-
-Events are pushed to the app via the Response Send characteristic (`6E400003`) as JSON objects. All events contain an `"event"` key, which distinguishes them from AT command responses (which use `"ok"` as the top-level key without `"event"`).
-
-**General Format:**
-```json
-{"event":"<type>","status":"<value>"}
-```
-
-#### Event Types
-
-| Event Type | Status Values | Description |
-|------------|---------------|-------------|
-| `ble` | `connected`, `disconnected` | BLE connection state change |
-| `wifi` | `on`, `off` | WiFi AP started or stopped |
-| `usb` | `on`, `off` | USB CDC+MSC enabled or disabled |
-
-**Examples:**
-
-BLE connected:
-```json
-{"event":"ble","status":"connected"}
-```
-
-BLE disconnected:
-```json
-{"event":"ble","status":"disconnected"}
-```
-
-WiFi AP started:
-```json
-{"event":"wifi","status":"on"}
-```
-
-WiFi AP stopped (manual or auto-off):
-```json
-{"event":"wifi","status":"off"}
-```
-
-USB enabled:
-```json
-{"event":"usb","status":"on"}
-```
-
-USB disabled (manual or auto-disable):
-```json
-{"event":"usb","status":"off"}
-```
+Connection, WiFi, USB, and storage events are documented in Section 7.1.3 —
+they all use the generic `{"event":"<name>","status":"<value>"}` form (e.g.
+`{"event":"ble","status":"connected"}`) on the Response Send characteristic.
+There is no separate `{"ok":true,"event":"connected"}` message format.
 
 **Client handling:** When receiving a JSON message on the Response Send characteristic, check for the `"event"` key. If present, the message is an event notification rather than a command response.
 
@@ -2293,7 +2333,7 @@ These message strings appear across commands (exact text from the handlers):
 | `SD card not mounted` | SD not present / not mounted when a storage command runs |
 | `Failed to list sessions` | SD I/O error enumerating sessions |
 | `Session not found` | Unknown session id |
-| `Cannot delete current recording session` | `AT+DELETE` on the active session |
+| `cannot delete active session` | `AT+DELETE` on the active session |
 | `Invalid session ID` | Malformed id |
 | `Already recording or invalid state` | `AT+START` while recording |
 | `No active session` / `Not recording` | `AT+STOP`/`AT+MARK`/`AT+PAUSE` with nothing running |
@@ -2335,7 +2375,6 @@ These message strings appear across commands (exact text from the handlers):
 |-----------|---------|
 | Transfer start | 10 seconds |
 | Between chunks | 30 seconds |
-| Pause resume | 5 minutes |
 | Total transfer | 1 hour |
 
 ### 9.3 Rate Limiting
@@ -2360,8 +2399,10 @@ To prevent BLE congestion:
 
 **LE Secure Connections (mandatory)**
 - Uses Elliptic Curve Diffie-Hellman (ECDH)
-- Provides MITM protection
-- Numeric comparison or Passkey entry
+- Association method is **Just Works** (device has no input/output for
+  passkey display or numeric comparison; the device auto-confirms pairing)
+- Consequently pairing is unauthenticated — MITM protection is *not* provided
+  by the pairing process itself; physical proximity at pairing time is assumed
 
 ### 10.2 Encryption
 
@@ -2418,7 +2459,7 @@ To prevent BLE congestion:
 
 **SD Card Error Recovery:**
 ```
-1. Detect error: {"error":"SD card error"}
+1. Detect error: {"ok":false,"msg":"SD card not mounted"}
 2. Stop current operation
 3. Reinsert SD card
 4. Wait for detection
@@ -2443,6 +2484,8 @@ To prevent BLE congestion:
 | AT+GSTAT | EXEC | Get device status | 3.3.1 |
 | AT+TIME | GET/SET | System time | 3.3.1 |
 | AT+VERSION | EXEC | Version info | 3.3.1 |
+| AT+BATT | EXEC | Battery status (%, charging, mV, °C) | 3.3.1 |
+| AT+STORAGE | EXEC/GET | SD storage statistics | 3.3.1 |
 | AT+DEVICE | EXEC/GET | Device name | 3.3.7 |
 | AT+START | EXEC/SET | Start recording | 3.3.2 |
 | AT+STOP | EXEC | Stop recording | 3.3.2 |
@@ -2466,63 +2509,8 @@ To prevent BLE congestion:
 | AT+REBOOT | EXEC | Reboot | 3.3.7 |
 | AT+NAME | GET/SET | User device name (≤256 bytes) | 3.3.7 |
 | AT+LOG | GET/SET | SD log backend (off/info/debug) | 3.3.7 |
-
-## Appendix E: Button Events
-
-The device has a single user button (GPIO1.15, active-low) with multi-level press detection.
-
-### E.1 Button Actions
-
-| Action | Trigger | Behavior |
-|--------|---------|----------|
-| Single Click | Press & release (< 1s) | Context-dependent (see below) |
-| Long Press | Hold > 1s | Start RTC streaming from IDLE or stop an active recording; confirm with vibration |
-| Long Press Level 1/2/3 | Continue holding > 2s/3s/4s | Power off screen (cancel on release) |
-| Release | Button released | Execute deferred action or power off |
-| Double Click | Two quick presses | Reserved (no action) |
-
-### E.2 Single Click Behavior
-
-| Current State | Action |
-|---------------|--------|
-| RECORDING | Add bookmark |
-| PAUSED | Add bookmark |
-| IDLE | Show status bar (timed) |
-| WIFI_SYNC | Show status bar (timed) |
-| ERROR | Show status bar (timed) |
-
-### E.3 Long Press Behavior
-
-**Recording active:**
-1. At 1s hold → Stop recording immediately + vibrate
-2. Continue holding → Enter power-off flow
-
-**Idle:**
-1. At 1s hold → Vibrate to confirm threshold
-2. Continue holding → Enter power-off flow
-3. On release before power-off levels → Request an RTC session
-4. RTC starts only when BLE is connected and File Data notify is enabled;
-   otherwise the device remains idle
-
-**Error / WiFi Sync:** Long press does not start a session.
-
-**Charging:** Power-off is blocked. Long press levels are ignored.
-
-### E.4 Power-Off Flow
-
-1. Long press reaches Level 1 (> 2s hold) → Power-off screen displayed
-2. User releases button → Device enters ship mode (ultra-low power)
-3. If user releases before Level 1 → Action canceled, no power-off
-
-### E.5 State Change Notifications
-
-Button actions that change state send unsolicited notifications:
-
-| Action | Notification |
-|--------|-------------|
-| Start RTC from button | `{"event":"state","state":"STREAMING",...}` |
-| Stop recording | `{"event":"state","state":"IDLE",...}` |
-| Add bookmark | `{"event":"mark","session":"...","mark_count":N}` |
+| AT+DFU | EXEC | Reboot into MCUboot DFU/recovery | 3.3.7 |
+| AT+WIFICFG | GET/SET | WiFi channel / reg domain | 3.3.7 |
 
 ## Appendix B: Example Sessions
 
@@ -2628,7 +2616,7 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | FILE_END | `0x11` | Device→Client | End file (full-file CRC32) |
 | TRANSFER_DONE | `0x12` | Device→Client | All files complete |
 | AT_RESP | `0x20` | Device→Client | AT command response (JSON) |
-| HEARTBEAT | `0x30` | Bidirectional | Keepalive |
+| HEARTBEAT | `0x30` | Client→Device | Keepalive (client-originated) |
 
 > RTC live-stream frames (`0x13`–`0x15`, Section 4.3) are BLE-only and are
 > not defined for the UDP transport.
@@ -2642,7 +2630,7 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | DATA header | 5 bytes | 9 bytes (+4 CRC32) |
 | Per-frame CRC | None (link layer) | IEEE CRC32 per frame |
 | FILE_ACK | None | Yes (CRC mismatch → retransmit) |
-| Heartbeat | None | 5s interval, 30s timeout |
+| Heartbeat | None | ~200 ms during transfer, 30s idle timeout |
 | Throughput | ~15 KB/s | ~500 KB/s |
 
 ### D.4 Frame Formats (UDP-specific differences)
@@ -2666,6 +2654,7 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 
 #### FILE_ACK Frame (Client→Device)
 
+**Legacy ACK form (2 bytes):**
 ```
 [type:1][result:1]
 ```
@@ -2675,7 +2664,22 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | 0 | 1 | type | `0x03` |
 | 1 | 1 | result | `0x00` = CRC OK, `0x01` = CRC mismatch |
 
-Sent by client after receiving FILE_END. If CRC mismatch, device retransmits the file (up to 3 retries).
+**Selective-NACK form (result = `0x01` with bitmap):**
+```
+[type:1][result:1][total_seqs:2][missing_bitmap:N]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x03` |
+| 1 | 1 | result | `0x01` (CRC mismatch) |
+| 2 | 2 | total_seqs | Total DATA sequence numbers in the file (uint16 LE) |
+| 4 | N | missing_bitmap | Bitmap of missing sequence numbers: bit `i` set = seq `i` not received (LSB-first, 1 byte per 8 seqs) |
+
+Sent by client after receiving FILE_END. With the bitmap, the device
+retransmits only the missing DATA frames (selective repair); without a bitmap
+(legacy 2-byte form or empty bitmap), it retransmits the whole file (up to 3
+retries).
 
 #### AT_RESP Frame
 
@@ -2689,7 +2693,7 @@ Sent by client after receiving FILE_END. If CRC mismatch, device retransmits the
 | 1 | 2 | len | JSON response length (uint16 LE) |
 | 3 | N | json_data | JSON response text |
 
-#### HEARTBEAT Frame (Bidirectional)
+#### HEARTBEAT Frame (Client→Device keepalive)
 
 ```
 [type:1][timestamp:4]
@@ -2700,8 +2704,12 @@ Sent by client after receiving FILE_END. If CRC mismatch, device retransmits the
 | 0 | 1 | type | `0x30` |
 | 1 | 4 | timestamp | Uptime in milliseconds (uint32 LE) |
 
-**Interval:** 5 seconds
-**Timeout:** 30 seconds (connection considered lost)
+**Client interval:** ~200 ms during an active transfer (keeps the phone's WiFi
+radio out of power-save); sent as a general keepalive when idle (the reference
+client uses ~5 s)
+**Timeout:** 30 seconds without activity on the UDP socket (any frame counts) —
+the device drops the connection (`CONFIG_CLIP_UDP_CONNECTION_TIMEOUT_MS`)
+**Note:** the device only receives heartbeats; it does not originate them.
 
 ### D.5 AT Command Format (UDP)
 
@@ -2742,3 +2750,170 @@ Client                            Device (192.168.4.1:8089)
  │<─ TRANSFER_DONE("20260326...", 30)│
  │                                  │
 ```
+## Appendix E: Button Events
+
+The device has a single user button (GPIO1.15, active-low) with multi-level press detection.
+
+### E.1 Button Actions
+
+| Action | Trigger | Behavior |
+|--------|---------|----------|
+| Single Click | Press & release (< 1s) | Context-dependent (see below) |
+| Long Press | Hold > 1s | Start/stop recording, confirm with vibration |
+| Long Press Level 1/2/3 | Continue holding > 2s/3s/4s | Power off screen (cancel on release) |
+| Release | Button released | Execute deferred action or power off |
+| Double Click | Two quick presses | Reserved (no action) |
+
+### E.2 Single Click Behavior
+
+| Current State | Action |
+|---------------|--------|
+| RECORDING | Add bookmark |
+| PAUSED | Add bookmark |
+| IDLE | Show status bar (timed) |
+| WIFI_SYNC | Show status bar (timed) |
+| ERROR | Show status bar (timed) |
+
+### E.3 Long Press Behavior
+
+**Recording active:**
+1. At 1s hold → Stop recording immediately + vibrate
+2. Continue holding → Enter power-off flow
+
+**Idle / Error / WiFi Sync:**
+1. At 1s hold → Vibrate to confirm threshold
+2. Continue holding → Enter power-off flow
+3. On release before power-off levels → Start recording
+
+**Charging:** Power-off is blocked. Long press levels are ignored.
+
+### E.4 Power-Off Flow
+
+1. Long press reaches Level 1 (> 2s hold) → Power-off screen displayed
+2. User releases button → Device enters ship mode (ultra-low power)
+3. If user releases before Level 1 → Action canceled, no power-off
+
+### E.5 State Change Notifications
+
+Button actions that change state send unsolicited notifications:
+
+| Action | Notification |
+|--------|-------------|
+| Start recording | `{"event":"state","state":"RECORDING",...}` |
+| Stop recording | `{"event":"state","state":"IDLE",...}` |
+| Add bookmark | `{"event":"mark","session":"...","mark_count":N}` |
+
+
+## Appendix F: Extending the Protocol — Adding a New AT Command
+
+This is the copy-paste walkthrough for adding a new command to the firmware.
+Example: a hypothetical `AT+PING` that returns `{"ok":true,"data":{"pong":true}}`.
+
+All commands are registered in `applications/clip/src/at_commands.c`, inside
+`at_commands_register()`. There is no array — each command is a
+`static const struct at_command` registered individually with
+`at_server_register_cmd()`.
+
+**Handler signature** (`applications/clip/include/at_server.h`):
+
+```c
+typedef int (*at_cmd_handler_t)(struct at_cmd_ctx *ctx, char *response, size_t len);
+```
+
+- `ctx->name` / `ctx->type` / `ctx->args` carry the parsed command (args is
+  the raw string after `=`, or NULL).
+- The handler writes the JSON response (and trailing `\n`) into `response`
+  and returns the number of bytes written; return an `AT_ERR_*` code
+  (e.g. `AT_ERR_PARAM`, `AT_ERR_NOMEM`) on failure — the server then sends
+  the error JSON itself.
+
+**1. Write the handler** (anywhere above `at_commands_register()`):
+
+```c
+/* PING - connectivity test */
+static int cmd_ping_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
+{
+    int n = snprintf(response, len, "{\"ok\":true,\"data\":{\"pong\":true}}");
+    if (n < 0 || n >= len - 2) {
+        return AT_ERR_NOMEM;
+    }
+    response[n] = '\n';
+    return n + 1;
+}
+```
+
+For responses with a `"msg"` or dynamic `"data"`, prefer the existing helper
+`create_json_response(bool success, const char *message, const char *data_json, char *response, size_t len)`
+(it builds `{"ok":true|false}` plus optional `,"msg":"..."` and `,"data":<raw json>`
+— pass `data_json` as a rendered JSON fragment string).
+
+**2. Register it** in `at_commands_register()`:
+
+```c
+    /* PING - connectivity test */
+    static const struct at_command ping_cmd = {
+        .name = "PING",
+        .flags = AT_CMD_EXEC,
+        .handler = cmd_ping_handler,
+    };
+    err = at_server_register_cmd(&ping_cmd);
+    if (err) return err;
+```
+
+`struct at_command` fields in order: `name`, `flags` (`AT_CMD_SET`,
+`AT_CMD_QUERY`, `AT_CMD_EXEC` — see `at_server.h`), `handler`.
+
+**3. Build, flash, test:**
+
+```sh
+west build --build-dir build-clip --board clip/nrf5340/cpuapp applications/clip
+west flash --build-dir build-clip && nrfutil device reset   # --reset does NOT work on this board
+python applications/clip/tests/tools/ble_terminal.py        # then type PING or AT+PING
+```
+
+`ble_terminal.py` auto-prepends `AT+` if the input doesn't already start with
+`AT+`, so `PING` and `AT+PING` are equivalent. The same command also works
+over UDP (`udp_terminal.py`) and USB CDC since all transports feed one AT
+server.
+
+**4. Document it** in this file — add the full command section under 3.3.x
+and a row in the Appendix A quick reference table, in the same PR.
+
+## Appendix G: BLE OTA for Client Developers
+
+For mobile apps implementing in-app firmware update.
+
+**Transport.** The running application exposes the standard mcumgr SMP
+service over BLE (`CONFIG_NCS_SAMPLE_MCUMGR_BT_OTA_DFU=y` in
+`applications/clip/prj.conf`, which selects Zephyr's `MCUMGR_TRANSPORT_BT`):
+
+- Service UUID: `8D53DC1D-1DB7-4CD3-868B-8A527460AA84`
+- Characteristic (write + notify): `DA2E7828-FBCE-4E01-AE9E-261174997C48`
+
+Speak plain mcumgr/SMP (CBOR-encoded image management group) over that
+characteristic — the same protocol `mcumgr` / `newtmgr` clients use.
+
+**No bootloader reboot needed.** Image upload happens into the secondary slot
+while the application keeps running. The device is dual-image
+(`CONFIG_MCUMGR_GRP_IMG_UPDATABLE_IMAGE_NUMBER=2`): image 0 = application
+core, image 1 = network core.
+
+**Swap semantics — important.** This board's MCUboot runs in **overwrite-only
+mode** (`MCUBOOT_MODE_OVERWRITE_ONLY` is the board default in
+`boards/seeed/clip/Kconfig.sysbuild`). That means:
+
+- There is **no image-test / image-confirm / automatic revert**. The classic
+  mcumgr "test then confirm" dance does not apply.
+- After upload completes, send the mcumgr reset (OS group) — on reboot
+  MCUboot overwrites the primary slot with the new image and boots it
+  **immediately and unconditionally**. A bad image cannot roll back.
+
+**Which artifact to upload:**
+
+- `clip-<ver>-ota.zip` (the sysbuild `dfu_application.zip`) — multi-image
+  package containing app core **and** network core images. Preferred.
+- `clip-<ver>-signed.bin` — application-core image only.
+
+Both are attached to each GitHub Release. Host-tool procedures (mcumgr CLI,
+nRF Connect, USB serial DFU fallback) are covered in
+[`docs/usb_dfu.md`](usb_dfu.md).

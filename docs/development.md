@@ -8,24 +8,24 @@
 |---------|-------|
 | PDM Microphone Capture | 16kHz, stereo/mono/merge modes |
 | Opus Encoding | Mode-specific bitrate/complexity via Kconfig |
-| SpeexDSP Processing | Noise suppression, dereverberation (no AGC - FIXED_POINT limitation) |
-| Audio Modes | Normal (stereo, 16kbps/ch, complexity 0), Enhanced (mono, 32kbps, complexity 1) |
+| SpeexDSP Processing | Noise suppression, dereverberation (SpeexDSP AGC unavailable in FIXED_POINT; custom integer AGC + high-pass in Enhanced/MERGE mode) |
+| Audio Modes | Normal (stereo, 32kbps/ch = 64kbps total, complexity 1), Enhanced (mono, 32kbps, complexity 1) |
 | SD Card Storage | FAT32, timestamp buckets under `/SD:/REC/YYYYMMDD/HH/MM/SS/` with 100-file group directories |
 | SD Card Log Persistence | LOG_BACKEND_FS, /SD:/LOG/, 128KB files x20; AT+LOG=off\|info\|debug (debug default INF) |
 | Session Metadata | session.json and marks.bin per timestamp-bucket session |
 | Bookmark System | Binary marks.bin with notes |
 | BLE GATT Service | Command, Response, File Data, Event characteristics |
 | BLE Event Notifications | State changes, marks, BLE/WiFi/USB events via notify |
-| AT Command Protocol | 29 commands |
+| AT Command Protocol | 30 commands |
 | File Transfer (BLE) | Pause/resume/cancel, session-level resume |
 | File Transfer (UDP) | Fire-and-forget with per-file CRC32, file-level retransmit |
-| Transport Abstraction | BLE + UDP backends via transport.h |
-| WiFi AP Mode | SSID: ClipAP_XXXX, Password: 12345678, IP: 192.168.4.1, Port: 8089 |
+| Transport Abstraction | BLE + UDP + USB CDC channels via transport.h (active selection UDP > BLE) |
+| WiFi AP Mode | SSID: ClipAP_XXXX, default password 12345678 (random 8-char password regenerated on first pairing), IP: 192.168.4.1, Port: 8089 |
 | WiFi Auto-Off | 3 min timeout (CONFIG_CLIP_WIFI_TIMEOUT_MS=180000) |
 | USB CDC Security | Disabled by default, AT+USB control, auto-off on disconnect |
 | NVS Configuration | 5 settings persist: mode, noise, autodel, dereverb, brightness |
-| Battery Monitoring | NPM1300 PMIC + nRF Fuel Gauge (SoC smoothing) |
-| Button Handler | Custom input driver: long-press RTC stream, short-press bookmark, single-click status |
+| Battery Monitoring | NPM1300 PMIC + nRF Fuel Gauge (directionally rate-limited, persisted SoC display) |
+| Button Handler | Custom input driver: long-press record, short-press bookmark, single-click status |
 | OLED Display | CH1115 driver (88x48, I2C), 24x24 icons, 8x16 font, status bar, recording time, battery/charging, low battery fullscreen |
 | Haptic Motor | PMIC GPIO2 control (optional, Kconfig) |
 | CPU Boost | 128MHz/64MHz reference-counted system |
@@ -44,6 +44,8 @@
 | Command | Type | Purpose |
 |---------|------|---------|
 | AT+GSTAT | EXEC | Get device status |
+| AT+BATT | QUERY/EXEC | Get battery status (%, charging, voltage, temp) |
+| AT+STORAGE | QUERY/EXEC | SD card storage info |
 | AT+DEVICE | EXEC/GET | Device name |
 | AT+VERSION | EXEC | Version info |
 | AT+TIME | GET/SET | System time (Unix timestamp) |
@@ -61,12 +63,14 @@
 | AT+FORMAT | EXEC | Format SD card |
 | AT+POWEROFF | EXEC | Power off (ship mode) |
 | AT+WIFI | EXEC/GET/SET | WiFi AP control |
+| AT+WIFICFG | SET/GET | WiFi AP channel + regulatory domain |
 | AT+MODE | GET/SET | Recording mode |
 | AT+BRIGHTNESS | GET/SET | OLED brightness |
 | AT+PAIR | GET/SET | BLE pairing |
 | AT+FACTORY | SET | Factory reset |
 | AT+REBOOT | EXEC | Reboot |
 | AT+USB | GET/SET | USB CDC control (default: off, auto-off on disconnect) |
+| AT+DFU | EXEC | Reboot into MCUboot recovery mode |
 | AT+LOG | SET | SD log backend level: off \| info \| debug (debug default info) |
 | AT+NAME | GET/SET | Custom BLE device name |
 
@@ -76,9 +80,9 @@
 |--------|----------|-------|---------|
 | Main | 0 | Default | Event loop, status updates |
 | Audio | 0 | 32768 | PDM capture, DSP, Opus encode |
-| Transfer | 5 | 16384 | File transfer over BLE/UDP |
-| UDP Server | 5 | 4096 | WiFi UDP packet handling |
-| AT Server | 7 | 4096 | AT command parsing and dispatch |
+| Transfer | 5 | 4096 | File transfer over BLE/UDP |
+| UDP Server | 5 | 2048 | WiFi UDP packet handling |
+| AT Server | 7 | 8192 | AT command parsing and dispatch |
 
 ### Memory Usage
 
@@ -89,14 +93,14 @@
 
 | Mode | Audio | Bitrate | Complexity | DSP | Segment Duration |
 |------|-------|---------|------------|-----|-----------------|
-| Normal | Stereo (L+R) | 16kbps/ch (32kbps total) | 0 | Disabled | 60s (sync) / 300s (no sync) |
+| Normal | Stereo (L+R) | 32kbps/ch (64kbps total) | 1 | Disabled | 60s (sync) / 300s (no sync) |
 | Enhanced | Mono (L+R merged) | 32kbps | 1 | Enabled | 60s (sync) / 300s (no sync) |
 
 ### Build & Flash
 
 ```sh
 # Environment
-source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
 export ZEPHYR_EXTRA_MODULES=$(pwd)
 
 # Build

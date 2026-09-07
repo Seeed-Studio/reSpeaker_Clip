@@ -2,9 +2,9 @@
 
 This directory contains patches to be applied to the MCUboot source tree in NCS.
 The patches are against **NCS v3.3.0** (`~/ncs/v3.3.0/bootloader/mcuboot`).
-They are applied automatically (and idempotently) by `scripts/build_release.sh`,
-which is used by CI (`.github/workflows/release.yml`) — manual application is only
-needed for interactive development.
+In CI they are applied inline (idempotently, via a `git apply --check` loop) by
+`.github/workflows/firmware.yml` and `.github/workflows/release.yml` before the
+build. Local/dev builds need the manual `git apply` steps below.
 
 ## Applying Patches (Required After Fresh NCS Install)
 
@@ -25,12 +25,57 @@ git status
 
 ## Patch Development Workflow
 
-1. **Modify source directly** in `~/ncs/v3.3.0/bootloader/mcuboot/`
-2. **Build**: `west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applications/clip`
-3. **Test**: Flash or export `dfu_application.zip`
-4. **Export patches**: `git diff` from mcuboot tree → save to `patches/mcuboot/`
-5. **Verify patches**: `git checkout -- .` then `git apply` each patch in order, rebuild
-6. **Update this README**
+MCUboot source lives in the NCS tree; patches here are the durable artifact.
+Workflow: **modify source → build → verify → export patches**.
+
+1. **Modify MCUboot source directly** in the NCS tree:
+   ```sh
+   vim ~/ncs/v3.3.0/bootloader/mcuboot/boot/zephyr/main.c
+   vim ~/ncs/v3.3.0/bootloader/mcuboot/boot/zephyr/io_display.c
+   vim ~/ncs/v3.3.0/bootloader/mcuboot/boot/boot_serial/src/boot_serial.c
+   vim ~/ncs/v3.3.0/bootloader/mcuboot/boot/bootutil/src/loader.c
+   ```
+
+2. **Build** — must be pristine for mcuboot changes:
+   ```sh
+   west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applications/clip
+   ```
+
+3. **Verify and test**:
+   ```sh
+   west flash --build-dir build-clip && nrfutil device reset
+   # or export for OTA test:
+   cp build-clip/dfu_application.zip output/
+   ```
+
+4. **Export patches** from the modified source:
+   ```sh
+   cd ~/ncs/v3.3.0/bootloader/mcuboot
+   # Existing tracked files (main.c, Kconfig, CMakeLists, ...):
+   git diff boot/zephyr/main.c > /path/to/reSpeaker_Clip/patches/mcuboot/XXXX.patch
+   # New files (io_display.c) — build the diff with sed to prefix '+':
+   { echo "diff --git a/boot/zephyr/io_display.c b/boot/zephyr/io_display.c"
+     echo "new file mode 100644"
+     echo "--- /dev/null"
+     echo "+++ b/boot/zephyr/io_display.c"
+     printf "@@ -0,0 +1,%d @@\n" $(wc -l < boot/zephyr/io_display.c)
+     sed 's/^/+/' boot/zephyr/io_display.c
+   } >> /path/to/reSpeaker_Clip/patches/mcuboot/XXXX.patch
+   # Multiple file changes can be combined into one patch:
+   git diff boot/zephyr/CMakeLists.txt boot/zephyr/Kconfig boot/zephyr/main.c >> patch.diff
+   ```
+
+5. **Verify patches apply cleanly** on a fresh tree:
+   ```sh
+   cd ~/ncs/v3.3.0/bootloader/mcuboot
+   git checkout -- .
+   git apply /path/to/0001-xxx.patch
+   git apply /path/to/0002-xxx.patch   # ... in order
+   west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applications/clip
+   ```
+
+6. **Update this README** — document what the patch does, which files it
+   touches, and any constraints.
 
 ---
 
@@ -69,7 +114,7 @@ and the device boots normally.
 
 ## 0002-add-oled-display-support.patch
 
-**Files**: `boot/zephyr/CMakeLists.txt`, `boot/zephyr/Kconfig`, `boot/zephyr/main.c`, `boot/zephyr/io_display.c` (new), `boot/bootutil/src/loader.c`
+**Files**: `boot/zephyr/CMakeLists.txt`, `boot/zephyr/Kconfig`, `boot/zephyr/main.c`, `boot/zephyr/io_display.c` (new)
 
 ### Summary
 
@@ -90,7 +135,7 @@ Adds OLED display support to MCUboot for showing OTA progress, status messages, 
   - `mcuboot_status_change()`: Shows OTA icon + "Updating..." + 0% on swap start
   - `boot_serial_upload_progress_hook()`: Serial recovery upload progress
   - `boot_copy_progress_hook()`: Real-time progress during image copy (`boot_copy_region()`)
-- **Weak hook** in `loader.c`: `boot_copy_progress_hook(total, copied)` called after each chunk
+- **Weak hook** in `loader.c` (added by patch 0005): `boot_copy_progress_hook(total, copied)` called after each chunk
 
 ### Display states
 
