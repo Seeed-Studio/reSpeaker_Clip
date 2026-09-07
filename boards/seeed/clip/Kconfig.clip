@@ -30,29 +30,3 @@ config CLIP_USB_AUTO_ENABLE
 	  (applications/clip/boards/clip_nrf5340_cpuapp_dev.overlay). The
 	  log level is left untouched and follows the application's prj.conf
 	  (CONFIG_CLIP_LOG_LEVEL).
-
-config CLIP_USB_MSC_DYNAMIC
-	bool "Hand the SD card between USB MSC and the app without disabling USB"
-	default n
-	help
-	  Keep the USB device (CDC + MSC) enumerated at all times and hand
-	  the SD card over by ejecting/inserting the MSC media instead of
-	  enabling/disabling USB:
-
-	  - when a recording or file transfer starts, the MSC media is
-	    reported as ejected (NOT READY / MEDIUM NOT PRESENT) and the
-	    card is mounted in the app;
-	  - when the activity stops, the card is unmounted and the media is
-	    reported as present again.
-
-	  The CDC serial port never disappears, so the console and logs keep
-	  running through recordings. Hosts that still hold a file open when
-	  the media ejects will see I/O errors (same as physically pulling
-	  the card); eject/unmount on the host before recording when
-	  possible, or stop udisks2/automount.
-
-	  Without this option (product behavior), enabling USB hands the SD
-	  card to the host exclusively and recording/transfer are refused
-	  until USB is disabled.
-
-	  Used by the development build (applications/clip/sysbuild/clip_dev.conf).

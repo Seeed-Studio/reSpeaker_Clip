@@ -31,7 +31,6 @@
 #include "transfer.h"
 #include "ble.h"
 #include "display.h"
-#include "usb_cdc.h"
 
 LOG_MODULE_REGISTER(audio, CONFIG_CLIP_LOG_LEVEL);
 
@@ -687,9 +686,6 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
         /* Check if stop was requested before we started */
         if (stop_requested) {
             stop_requested = false;
-            /* The SD hold taken when START was accepted is released here,
-             * since the recording never actually began. */
-            usb_msc_sd_release();
             continue;
         }
 
@@ -697,7 +693,6 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
         ret = audio_start_recording_internal(current_mode);
         if (ret < 0) {
             LOG_ERR("Failed to start recording: %d", ret);
-            usb_msc_sd_release();
             continue;
         }
 
@@ -978,10 +973,6 @@ create_new_segment:
 
         /* Perform cleanup in audio thread context */
         audio_stop_recording_internal();
-        /* File + session closed: hand the SD card back to the USB host
-         * (dynamic MSC; no-op otherwise). Must happen here, after the
-         * storage close, never earlier. */
-        usb_msc_sd_release();
         stop_requested = false;
         pause_requested = false;
 

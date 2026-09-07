@@ -872,7 +872,7 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
                 return create_json_response(false, "WiFi active, cannot record",
                                            NULL, response, len);
             }
-            if (usb_msc_blocks_recording()) {
+            if (usb_cdc_is_enabled()) {
                 return create_json_response(false, "USB MSC active, disable USB first",
                                            NULL, response, len);
             }

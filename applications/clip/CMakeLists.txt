@@ -32,9 +32,3 @@ target_sources(app PRIVATE
     src/battery.c
     src/usb_cdc.c
 )
-
-# Dynamic MSC handoff (dev builds): proxy disk behind the MSC LUN so the SD
-# card can be ejected/inserted at runtime without re-enumerating USB.
-if(CONFIG_CLIP_USB_MSC_DYNAMIC)
-    target_sources(app PRIVATE src/sd_share.c)
-endif()

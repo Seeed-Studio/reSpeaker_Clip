@@ -66,73 +66,15 @@ west build --build-dir build-clip-dev --board clip/nrf5340/cpuapp applications/c
 ```
 This variant auto-enables the app's USB CDC ACM at boot (`CONFIG_CLIP_USB_AUTO_ENABLE=y`)
 and redirects the console + UART log backend from uart0 to the CDC port, so logs are
-visible over USB the moment the device is plugged in. It uses **dynamic MSC handoff**
-(`CONFIG_CLIP_USB_MSC_DYNAMIC=y`): the USB device (CDC + MSC) stays enumerated at all
-times, and the SD card is handed between host and app by ejecting/inserting the MSC
-*media* — never by disabling USB. Flash it like any other app image
+visible over USB the moment the device is plugged in. Flash it like any other app image
 (signed bin via USB DFU, or `merged.hex` with a J-Link). Notes:
 
 - Log level follows the app's `prj.conf` (`CONFIG_CLIP_LOG_LEVEL`) — same as the debug build.
-- **Recording/transfer never blocked by USB:** when one starts, the MSC media is
-  reported ejected (host sees "no media") and the card is mounted in the app; when it
-  stops, the card is unmounted and the media comes back. The CDC serial port never
-  disappears, so console logs keep flowing through the whole recording.
-- The FS (SD) log backend is **disabled** in this variant (`CONFIG_LOG_BACKEND_FS=n`)
-  to fit the fixed app partition; `AT+LOG=info`/`debug` answers "FS log backend
-  unavailable". Logs live on the CDC console only.
+- While USB is up the SD card is exported to the host via MSC, so FS (SD) logging stays off.
 - Messages printed before USB enumeration are lost; with no host attached, console output
   is dropped (never blocks boot).
 - `FILE_SUFFIX` files are discovered only at configure time: if you add/remove suffixed
   files, rebuild with `--pristine` (a stale `DTC_OVERLAY_FILE` is cached otherwise).
-
-**Host-side conflicts (read before using this mode):**
-
-- **ModemManager** probes new CDC-ACM ports and can grab the Clip's port (AT
-  replies get eaten; `minicom`/scripts see a busy or garbled port). Ignore the
-  Clip by VID:
-  ```sh
-  sudo tee /etc/udev/rules.d/98-clip-mm-ignore.rules <<'EOF'
-  SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ENV{ID_MM_DEVICE_IGNORE}="1"
-  SUBSYSTEM=="tty", ATTRS{idVendor}=="2886", ENV{ID_MM_DEVICE_IGNORE}="1"
-  EOF
-  sudo udevadm control --reload-rules
-  ```
-- **Desktop storage daemons** (udisks2/automount) probe the SD card over MSC on
-  every plug, and again whenever the MSC media reappears (after a recording or
-  transfer ends). The probing interrupts the device and can disturb an active
-  session; during development stop udisks2 (`sudo systemctl stop udisks2`) or
-  add an ignore rule for the Clip's block device.
-- **Keep the CDC port free while flashing.** If a terminal (`minicom`,
-  `screen`, a leftover `clip.terminal`) holds `/dev/ttyACMx`, mcumgr DFU
-  uploads time out. Close every console on the port before entering DFU.
-- **MSC vs. recording (dynamic handoff, this build):** recording is never
-  refused — starting one ejects the MSC media and takes the card back. If the
-  host still had the card *mounted*, that mount hits I/O errors (same as
-  physically pulling the card); eject/unmount on the host first when possible.
-  After the recording stops the media reappears; file managers may need a
-  refresh/re-mount to see it again. Product builds use the static handoff
-  instead: enabling USB refuses while recording/transfer is active and vice
-  versa.
-
-**Logs during normal recording:** yes, unconditionally — the CDC console and
-the recording coexist by design. Logs keep flowing over CDC for the whole
-recording whether the cable was plugged before or during it (USB enable is
-never refused; the MSC media simply stays ejected while the app owns the
-card).
-
-**When USB is enabled / disabled (dev mode):**
-
-| Event | Action |
-|---|---|
-| Boot with cable plugged | CDC+MSC auto-enabled after enumeration (`CONFIG_CLIP_USB_AUTO_ENABLE`) |
-| Recording/transfer starts while USB up | MSC media ejected (host sees "no media"), card handed to the app, CDC untouched |
-| Recording/transfer stops while USB up | Card unmounted from the app, MSC media present again |
-| `AT+USB=ON` (any build) | Enabled; if no VBUS is detected a 10-min idle timer starts (`USB_NO_VBUS_TIMEOUT_MS`) |
-| VBUS droop while active (dev builds) | 3 s grace (`USB_VBUS_LOST_GRACE_MS`, `CONFIG_CLIP_USB_AUTO_ENABLE`) rides through load spikes (radio TX bursts, mic/DSP start); still gone afterwards -> disabled + `"usb":"off"` event. Product builds disable immediately on VBUS loss. |
-| VBUS returns while inactive (dev builds) | Auto re-enables the console (no reboot, no `AT+USB=ON` needed) |
-| No VBUS for 10 min | Auto-disabled |
-| `AT+USB=OFF` | Disabled manually |
-| After DFU `serial reset` | CDC re-enumerates automatically; requires the `udc_nrf` VBUS patch, see `patches/zephyr/` |
 
 > **Board identifier**: `clip/nrf5340/cpuapp` (NOT `respeaker/...`)
 

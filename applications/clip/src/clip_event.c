@@ -303,7 +303,7 @@ static bool clip_sd_busy(void)
     if (transfer_is_active() || audio_is_recording() || ota_in_progress) {
         return true;
     }
-    if (usb_msc_is_enabled()) {
+    if (usb_cdc_is_enabled()) {
         return true;   /* USB MSC exposes the SD — don't pull the rail */
     }
     if (clip_log_fs_active()) {
@@ -499,12 +499,11 @@ void clip_event_process(void)
             goto notify;
         }
 
-        /* Special case: recording blocked while USB MSC active (static
-         * handoff only; dynamic handoff ejects the media instead). RTC is
-         * exempt: it streams over BLE and never touches the SD, so it
-         * cannot conflict with MSC's exclusive SD access. */
-        if (usb_msc_blocks_recording() && item.event == CLIP_EVENT_START &&
-            !current_start_rtc) {
+		/* Special case: recording blocked while USB MSC active. RTC is
+		 * exempt: it streams over BLE and never touches the SD, so it
+		 * cannot conflict with MSC's exclusive SD access. */
+		if (usb_cdc_is_enabled() && item.event == CLIP_EVENT_START &&
+		    !current_start_rtc) {
             LOG_INF("Recording blocked: USB MSC active");
             display_post_event(UI_EVENT_USB_BLOCKED);
             if (item.result) {
@@ -593,18 +592,11 @@ static enum clip_event_result execute_transition(enum clip_event event,
             return CLIP_EVENT_OK;
         }
 
-        /* Dynamic MSC: take the SD card back from the USB host (media is
-         * reported ejected) before mounting it for recording. No-op in
-         * product builds and while USB is down. Released by the audio
-         * thread once the recording is fully stopped, or below on error. */
-        usb_msc_sd_acquire();
-
         /* SD may be idle-powered-off — bring it up before recording writes */
         err = storage_ensure_mounted();
         if (err) {
             LOG_ERR("storage_ensure_mounted failed: %d", err);
             display_post_error("SD Error");
-            usb_msc_sd_release();
             return CLIP_EVENT_ERROR;
         }
 
@@ -615,13 +607,11 @@ static enum clip_event_result execute_transition(enum clip_event event,
             LOG_WRN("Storage full, refusing recording");
             display_post_error("Storage Full");
             ble_notify_event("storage", "full");
-            usb_msc_sd_release();
             return CLIP_EVENT_ERROR;
         }
 
         err = audio_start_recording(AUDIO_MODE_MERGE);
         if (err) {
-            usb_msc_sd_release();
             if (err == -EBUSY) {
                 return CLIP_EVENT_BUSY;
             }

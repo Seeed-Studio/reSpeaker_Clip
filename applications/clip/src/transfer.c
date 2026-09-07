@@ -17,7 +17,6 @@
 #include "ble.h"
 #include "audio.h"
 #include "display.h"
-#include "usb_cdc.h"
 
 LOG_MODULE_REGISTER(transfer, LOG_LEVEL_WRN); /* chatty transfer-progress logs */
 
@@ -167,7 +166,6 @@ int transfer_init(void)
 int transfer_start(const char *session_id, const char *filename, struct transport *tp)
 {
     int err;
-    bool sd_acquired = false;
 
     if (!is_valid_session_id(session_id) ||
         (filename && !is_valid_chunk_filename(filename))) {
@@ -202,11 +200,6 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
         LOG_ERR("Transfer thread not idle after 3s");
         return -ETIMEDOUT;
     }
-
-    /* Dynamic MSC: take the SD card back from the USB host while the
-     * transfer reads it (no-op in product builds / while USB is down). */
-    usb_msc_sd_acquire();
-    sd_acquired = true;
 
     if (storage_ensure_mounted() != 0) {
         LOG_ERR("SD card not mounted");
@@ -311,9 +304,6 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
     return 0;
 
 fail:
-    if (sd_acquired) {
-        usb_msc_sd_release();
-    }
     clip_cpu_boost_release();
     k_sem_give(&transfer_trigger_sem);  /* Release thread from idle */
     return err;
@@ -322,7 +312,6 @@ fail:
 int transfer_resume_from(const char *session_id, const char *start_file, struct transport *tp)
 {
     int err;
-    bool sd_acquired = false;
 
     if (!is_valid_session_id(session_id) ||
         !is_valid_chunk_filename(start_file)) {
@@ -362,11 +351,6 @@ int transfer_resume_from(const char *session_id, const char *start_file, struct 
         err = -EBUSY;
         goto fail;
     }
-
-    /* Dynamic MSC: take the SD card back from the USB host while the
-     * transfer reads it (no-op in product builds / while USB is down). */
-    usb_msc_sd_acquire();
-    sd_acquired = true;
 
     if (storage_ensure_mounted() != 0) {
         LOG_ERR("SD card not mounted");
@@ -447,9 +431,6 @@ int transfer_resume_from(const char *session_id, const char *start_file, struct 
     return 0;
 
 fail:
-    if (sd_acquired) {
-        usb_msc_sd_release();
-    }
     clip_cpu_boost_release();
     k_sem_give(&transfer_trigger_sem);  /* Release thread from idle */
     return err;
@@ -1326,10 +1307,6 @@ static void transfer_cleanup(void)
 	atomic_set(&transfer_pause_requested, 0);
 	atomic_set(&transfer_cancel_requested, 0);
 	atomic_set(&transfer_complete_sent, 0);
-
-	/* Dynamic MSC: transfer is done reading — hand the SD card back to
-	 * the USB host (no-op in product builds / while USB is down). */
-	usb_msc_sd_release();
 
 	k_mutex_unlock(&transfer_cleanup_mutex);
 }

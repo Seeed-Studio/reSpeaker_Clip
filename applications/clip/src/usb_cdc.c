@@ -9,12 +9,8 @@
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/class/usbd_msc.h>
 #include <zephyr/drivers/uart.h>
-#include <nrfx_power.h>
 
 #include "usb_cdc.h"
-#if IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)
-#include "sd_share.h"
-#endif
 #include "storage.h"
 #include "audio.h"
 #include "at_server.h"
@@ -39,15 +35,8 @@ USBD_DESC_PRODUCT_DEFINE(clip_product, "reSpeaker Clip");
 USBD_DESC_CONFIG_DEFINE(clip_fs_cfg, "Default");
 USBD_CONFIGURATION_DEFINE(clip_fs_config, 0, 100, &clip_fs_cfg);
 
-#if IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)
-/* MSC LUN: SD card, attached through the sd_share proxy disk so the
- * media can be ejected/inserted at runtime without re-enumerating USB.
- */
-USBD_DEFINE_MSC_LUN(sd_lun, SD_SHARE_DISK_NAME, "Seeed", "Clip SD", "1.00");
-#else
-/* MSC LUN: SD card (static handoff: host owns it while USB is up) */
+/* MSC LUN: SD card */
 USBD_DEFINE_MSC_LUN(sd_lun, "SD", "Seeed", "Clip SD", "1.00");
-#endif
 
 /* CDC ACM UART device */
 static const struct device *const cdc_dev =
@@ -60,13 +49,6 @@ static uint16_t rx_line_pos;
 static bool usb_active;
 static bool usb_vbus_present;
 
-/* Dynamic MSC (CONFIG_CLIP_USB_MSC_DYNAMIC): number of app activities that
- * currently own the SD card (recording, file transfer). While >0 the MSC
- * media is reported ejected and the card stays mounted in the app.
- */
-static K_MUTEX_DEFINE(sd_handoff_mutex);
-static int sd_hold_count;
-
 /* Auto-disable timeout when USB enabled but no cable connected */
 #define USB_NO_VBUS_TIMEOUT_MS (10 * 60 * 1000) /* 10 minutes */
 static struct k_work_delayable usb_timeout_work;
@@ -74,46 +56,11 @@ static struct k_work_delayable usb_timeout_work;
 static void usb_timeout_handler(struct k_work *work)
 {
 	if (usb_active && !usb_vbus_present) {
-		LOG_WRN("USB auto-disable: no VBUS for 10min");
+		LOG_INF("USB auto-disable: no VBUS for 10min");
 		usb_cdc_disable();
 		ble_notify_event("usb", "off");
 	}
 }
-
-#if IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)
-/* Dev-mode hardening (CONFIG_CLIP_USB_AUTO_ENABLE):
- *
- * Grace period before disabling USB after VBUS loss. Brief droops happen
- * when load spikes (radio TX bursts at BLE connect, mic/DSP start), and an
- * instant disable would kill the console permanently for a transient dip.
- */
-#define USB_VBUS_LOST_GRACE_MS 3000
-static struct k_work_delayable usb_vbus_lost_work;
-
-static void usb_vbus_lost_handler(struct k_work *work)
-{
-	if (usb_active && !usb_vbus_present) {
-		LOG_WRN("USB auto-disable: VBUS gone for %dms",
-			USB_VBUS_LOST_GRACE_MS);
-		usb_cdc_disable();
-		ble_notify_event("usb", "off");
-	}
-}
-
-/* Bring the console back automatically when VBUS returns after a
- * droop/unplug-replug, instead of requiring a reboot or AT+USB=ON.
- */
-static struct k_work usb_reenable_work;
-
-static void usb_reenable_work_handler(struct k_work *work)
-{
-	int err = usb_cdc_enable();
-
-	if (err) {
-		LOG_WRN("USB re-enable after VBUS return failed: %d", err);
-	}
-}
-#endif /* CONFIG_CLIP_USB_AUTO_ENABLE */
 
 struct usbd_context *usb_cdc_get_usbd(void)
 {
@@ -193,32 +140,15 @@ static void usb_msg_cb(struct usbd_context *const ctx,
 
 	if (msg->type == USBD_MSG_VBUS_READY) {
 		usb_vbus_present = true;
-		/* VBUS present: cancel auto-disable timers */
+		/* VBUS present: cancel auto-disable timeout */
 		k_work_cancel_delayable(&usb_timeout_work);
-#if IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)
-		k_work_cancel_delayable(&usb_vbus_lost_work);
-		if (!usb_active) {
-			/* Dev mode: restore the console after a droop */
-			k_work_submit(&usb_reenable_work);
-		}
-#endif
 	} else if (msg->type == USBD_MSG_VBUS_REMOVED) {
 		usb_vbus_present = false;
-#if IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)
-		LOG_WRN("USB: VBUS removed (%dms grace before disable)",
-			USB_VBUS_LOST_GRACE_MS);
-		/* Dev mode: disable only after the grace period (debounce) */
-		if (usb_active) {
-			k_work_schedule(&usb_vbus_lost_work,
-					K_MSEC(USB_VBUS_LOST_GRACE_MS));
-		}
-#else
-		/* Product: disable USB immediately on VBUS loss */
+		/* VBUS removed: auto-disable USB immediately */
 		if (usb_active) {
 			usb_cdc_disable();
 			ble_notify_event("usb", "off");
 		}
-#endif
 	} else if (msg->type == USBD_MSG_CDC_ACM_CONTROL_LINE_STATE) {
 		uint32_t dtr = 0U;
 
@@ -239,11 +169,6 @@ int usb_cdc_init(void)
 		LOG_ERR("CDC ACM device not ready");
 		return -ENODEV;
 	}
-
-#if IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)
-	/* Proxy disk behind the MSC LUN (runtime media eject/insert) */
-	sd_share_init();
-#endif
 
 	/* Add USB descriptors */
 	usbd_add_descriptor(&clip_usbd, &clip_lang);
@@ -285,17 +210,9 @@ int usb_cdc_init(void)
 
 	/* Setup auto-disable work */
 	k_work_init_delayable(&usb_timeout_work, usb_timeout_handler);
-#if IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)
-	k_work_init_delayable(&usb_vbus_lost_work, usb_vbus_lost_handler);
-	k_work_init(&usb_reenable_work, usb_reenable_work_handler);
-#endif
 
 	/* USB starts disabled; use AT+USB=on to enable */
-#if IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)
-	LOG_INF("USB CDC+MSC initialized (disabled, dynamic handoff)");
-#else
 	LOG_INF("USB CDC+MSC initialized (disabled)");
-#endif
 	return 0;
 }
 
@@ -305,51 +222,23 @@ int usb_cdc_enable(void)
 		return 0;
 	}
 
-	/* Re-sync VBUS state from the regulator: USBREG events are
-	 * edge-triggered and can be missed (boot right after DFU exit, races
-	 * with driver init). Without this the 10-min auto-disable timer runs
-	 * even though the cable is plugged in.
-	 */
-	if (nrfx_power_usbstatus_get() != NRFX_POWER_USB_STATE_DISCONNECTED) {
-		usb_vbus_present = true;
-		k_work_cancel_delayable(&usb_timeout_work);
-#if IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)
-		k_work_cancel_delayable(&usb_vbus_lost_work);
-#endif
+	if (audio_is_recording()) {
+		LOG_WRN("USB blocked: recording");
+		return -EBUSY;
 	}
 
-	if (!IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)) {
-		/* Static handoff (product): the host gets the card exclusively,
-		 * so the app must not be using it.
-		 */
-		if (audio_is_recording()) {
-			LOG_WRN("USB blocked: recording");
-			return -EBUSY;
-		}
-
-		if (transfer_is_active()) {
-			LOG_WRN("USB blocked: transfer");
-			return -EBUSY;
-		}
+	if (transfer_is_active()) {
+		LOG_WRN("USB blocked: transfer");
+		return -EBUSY;
 	}
 
-	if (!IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC) || sd_hold_count == 0) {
-		/* Unmount SD card so host has exclusive access. With dynamic
-		 * handoff and an active recording/transfer the card stays
-		 * mounted in the app and the MSC media is already ejected.
-		 */
-		storage_cleanup();
-#if IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)
-		sd_share_set_media(true);
-#endif
-	}
+	/* Unmount SD card so host has exclusive access */
+	storage_cleanup();
 
 	int err = usbd_enable(&clip_usbd);
 	if (err) {
 		LOG_ERR("usbd enable: %d", err);
-		if (!IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC) || sd_hold_count == 0) {
-			storage_remount();
-		}
+		storage_remount();
 		return err;
 	}
 
@@ -373,17 +262,12 @@ int usb_cdc_disable(void)
 	}
 
 	k_work_cancel_delayable(&usb_timeout_work);
-#if IS_ENABLED(CONFIG_CLIP_USB_AUTO_ENABLE)
-	k_work_cancel_delayable(&usb_vbus_lost_work);
-#endif
 	usbd_disable(&clip_usbd);
 	usb_active = false;
 	LOG_INF("USB disabled");
 
-	if (!IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC) || sd_hold_count == 0) {
-		/* Remount SD card for app use (handles SD idle-powered-off case) */
-		storage_ensure_mounted();
-	}
+	/* Remount SD card for app use (handles SD idle-powered-off case) */
+	storage_ensure_mounted();
 	return 0;
 }
 
@@ -391,43 +275,3 @@ bool usb_cdc_is_enabled(void)
 {
 	return usb_active;
 }
-
-#if IS_ENABLED(CONFIG_CLIP_USB_MSC_DYNAMIC)
-
-bool usb_msc_is_enabled(void)
-{
-	/* True only while the host may actually access the SD card: the media
-	 * is ejected (reported NOT READY / MEDIUM NOT PRESENT) whenever a
-	 * recording or transfer holds it.
-	 */
-	return usb_active && sd_share_media_present();
-}
-
-bool usb_msc_blocks_recording(void)
-{
-	/* Dynamic handoff ejects the media instead of blocking */
-	return false;
-}
-
-void usb_msc_sd_acquire(void)
-{
-	k_mutex_lock(&sd_handoff_mutex, K_FOREVER);
-	if (sd_hold_count++ == 0 && usb_active) {
-		/* Take the card back from the host; the caller mounts it. */
-		sd_share_set_media(false);
-	}
-	k_mutex_unlock(&sd_handoff_mutex);
-}
-
-void usb_msc_sd_release(void)
-{
-	k_mutex_lock(&sd_handoff_mutex, K_FOREVER);
-	if (sd_hold_count > 0 && --sd_hold_count == 0 && usb_active) {
-		/* Hand the card back to the host */
-		storage_cleanup();
-		sd_share_set_media(true);
-	}
-	k_mutex_unlock(&sd_handoff_mutex);
-}
-
-#endif /* CONFIG_CLIP_USB_MSC_DYNAMIC */
