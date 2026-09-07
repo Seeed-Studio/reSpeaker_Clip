@@ -101,12 +101,10 @@ static void cdc_irq_handler(const struct device *dev, void *user_data)
 			int recv = uart_fifo_read(dev, &byte, 1);
 
 			if (recv > 0) {
-				/* Both CR and LF terminate a command: terminals send CR
-				 * on Enter, scripts and modems send LF or CRLF. */
-				if (byte == '\n' || byte == '\r') {
+				if (byte == '\n') {
 					submit_rx_line(rx_line_pos);
 					rx_line_pos = 0;
-				} else {
+				} else if (byte != '\r') {
 					if (rx_line_pos < sizeof(rx_line_buf) - 1) {
 						rx_line_buf[rx_line_pos++] = byte;
 					}
