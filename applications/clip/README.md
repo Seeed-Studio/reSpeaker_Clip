@@ -23,12 +23,13 @@ export ZEPHYR_EXTRA_MODULES=$(pwd)   # run from the repo root
 west build --build-dir build-clip --board clip/nrf5340/cpuapp applications/clip
 ```
 
-**Production build** (low power, console off — ~170µA idle): the snippet is
-auto-discovered from `applications/clip/snippets/`:
+**Production build** (low power, console off — ~170µA idle) — the snippet
+lives in `applications/clip/snippets/`; under sysbuild the app dir is not on
+the snippet search path, so `SNIPPET_ROOT` (absolute) must point at it:
 
 ```sh
 west build --build-dir build-clip-prod --board clip/nrf5340/cpuapp applications/clip \
-  -- -DSNIPPET=production
+  -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 ```
 
 ## Flash

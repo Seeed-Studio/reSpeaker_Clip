@@ -70,11 +70,11 @@ Snippets are in `applications/clip/snippets/`. Each snippet has a conf file, opt
 
 The default (no-snippet) build is the **debug** image: UART console on, FS log to `/SD:/LOG` at INF level (`CLIP_LOG_FS_DEFAULT_ON` defaults to `LOG_BACKEND_UART`). Use the `production` snippet for battery/production builds where the console leak matters.
 
-Build with snippet: `west build ... -- -DSNIPPET=production` (app-dir snippets are auto-discovered under NCS v3.3.0; no SNIPPET_ROOT needed).
+Build with snippet: `west build ... -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production` (under sysbuild the app dir is not searched for snippets — SNIPPET_ROOT must point at it, absolute path).
 
 ### Output Firmware
 
-Two images per release: **debug** (`build-clip`, console + SD log) and **production** (`build-clip-prod`, `-- -DSNIPPET=production`, console off); 8 artifacts each (merged/CPUNET hex, ota.zip, signed.bin per variant). Version: `applications/clip/VERSION` → `APP_VERSION_STRING`; release.yml derives the release version from the tag itself. Full artifact table, tag+push procedure, manual export block, and botched-release fix: **docs/release_process.md**.
+Two images per release: **debug** (`build-clip`, console + SD log) and **production** (`build-clip-prod`, `-- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production`, console off); 8 artifacts each (merged/CPUNET hex, ota.zip, signed.bin per variant). Version: `applications/clip/VERSION` → `APP_VERSION_STRING`; release.yml derives the release version from the tag itself. Full artifact table, tag+push procedure, manual export block, and botched-release fix: **docs/release_process.md**.
 
 **CI** — `firmware.yml` (push/PR to `main`): west + Zephyr SDK 0.17.0 + NCS v3.3.0, compile check only; SDK/requirements-install gotchas documented in docs/release_process.md ("CI internals" appendix). `mobile-ci.yml` (PR) and `mobile-verify.yml` (push+manual) cover the `mobile/` SDKs. `release.yml` is **tag-triggered**: builds both variants, exports the 8 artifacts, publishes a GitHub Release whose body is `docs/release_notes/vX.Y.Z.md` (must exist before tagging or the job fails).
 

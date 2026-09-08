@@ -32,7 +32,7 @@ west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applica
 # Production (app-dir snippets are auto-discovered under NCS v3.3.0;
 # CI additionally passes -DSNIPPET_ROOT="$(pwd)/applications/clip")
 west build --build-dir build-clip-prod --pristine --board clip/nrf5340/cpuapp applications/clip \
-  -- -DSNIPPET=production
+  -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 ```
 
 (`SNIPPET_ROOT` must be an absolute path.)

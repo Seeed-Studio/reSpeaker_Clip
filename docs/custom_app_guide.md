@@ -346,8 +346,9 @@ recovery mode, so keep a J-Link available.
   your `prj.conf`. NCS adds the WiFi firmware image automatically — no
   `sysbuild.conf` change needed (see `samples/http_server`).
 - **Low-power production variant**: build with a snippet — add
-  `-DSNIPPET=production` to the `west build` command. App-dir snippets are
-  auto-discovered in NCS v3.3.0 (no `SNIPPET_ROOT` needed). See
+  `-DSNIPPET_ROOT=<abs path to app dir> -DSNIPPET=production` to the `west build`
+  command (under sysbuild the app dir is not on the snippet search path, so
+  `SNIPPET_ROOT` must point at it, absolute). See
   `applications/clip/snippets/production` (disables the UART console/log
   backend for a much lower idle current) as the reference example.
 - **Console baud / other device-tree**: use a `boards/clip_nrf5340_cpuapp.overlay`.

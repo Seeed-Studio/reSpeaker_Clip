@@ -46,7 +46,7 @@ leak matters.
 ```sh
 # app-dir snippets are auto-discovered under NCS v3.3.0:
 west build --build-dir build-clip-prod --board clip/nrf5340/cpuapp applications/clip \
-  -- -DSNIPPET=production
+  -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 # (CI additionally passes -DSNIPPET_ROOT="$(pwd)/applications/clip"; equivalent.)
 ```
 

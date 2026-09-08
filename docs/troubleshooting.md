@@ -8,7 +8,7 @@ Symptoms → cause → fix, grouped by area. Each entry is deliberately short.
 |---------|-------|-----|
 | App/module Kconfig not found, board files missing | `ZEPHYR_EXTRA_MODULES` not set, or set as a CMake variable | `export ZEPHYR_EXTRA_MODULES=$(pwd)` — must be an **environment variable**; Kconfig module discovery happens before CMake configuration |
 | Mysterious Kconfig errors (e.g. WPA3 `..._WPA3_IMPLEMENTATION_NONE` missing) | Building against NCS v3.2.1 | `main` requires **NCS v3.3.0** (`source ~/ncs/v3.3.0/zephyr/zephyr-env.sh`); v3.2.1 is unsupported |
-| `snippet not found` / snippet ignored | Snippet name typo, or `SNIPPET_ROOT` passed with a relative path | Use `-- -DSNIPPET=production` — app-dir snippets (`applications/clip/snippets/`) are auto-discovered under NCS v3.3.0, no `SNIPPET_ROOT` needed; if you do pass `SNIPPET_ROOT`, it must be absolute |
+| `snippet not found` / snippet ignored | Under sysbuild the app dir is not on the snippet search path (or `SNIPPET_ROOT` was passed relative) | Use `-- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production` — `SNIPPET_ROOT` must be an absolute path |
 | MCUboot changes don't appear in the image | Incremental build | MCUboot changes require a **pristine** build (`--pristine`) |
 | Compiler warnings block commit | Repo rule | Fix all warnings before committing; zero-warning policy |
 

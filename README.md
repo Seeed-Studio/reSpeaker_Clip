@@ -84,7 +84,7 @@ west build --build-dir build-clip --board clip/nrf5340/cpuapp applications/clip
 **Production (low-power, console off):**
 ```sh
 west build --build-dir build-clip-prod --board clip/nrf5340/cpuapp applications/clip \
-  -- -DSNIPPET=production
+  -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 ```
 
 > **Board identifier**: `clip/nrf5340/cpuapp` (NOT `respeaker/...`)

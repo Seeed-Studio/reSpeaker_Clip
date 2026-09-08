@@ -14,7 +14,7 @@ west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applica
 
 # Production build (low-power, console off)
 west build --build-dir build-clip-prod --pristine --board clip/nrf5340/cpuapp applications/clip \
-  -- -DSNIPPET=production
+  -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 ```
 
 ## Commits
