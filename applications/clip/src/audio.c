@@ -46,7 +46,7 @@ static const struct device *mic_regulator =
 static const struct gpio_dt_spec pdm_en_gpio = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
 	.pin = 14,
-	.dt_flags = GPIO_OUTPUT | GPIO_ACTIVE_HIGH,
+	.dt_flags = GPIO_ACTIVE_HIGH,
 };
 
 /* PCM stream configuration for DMIC */

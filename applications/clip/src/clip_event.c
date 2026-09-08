@@ -352,7 +352,6 @@ int clip_event_init(void)
     mcumgr_dfu_cb_stopped.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED;
     mgmt_callback_register(&mcumgr_dfu_cb_stopped);
 
-    LOG_INF("Event dispatcher initialized");
     return 0;
 }
 
@@ -565,6 +564,14 @@ static enum clip_event_result execute_transition(enum clip_event event,
             return CLIP_EVENT_INVALID;
         }
 
+        /* Feedback FIRST: haptic (non-blocking, own thread) + UI flags post
+         * instantly at the button threshold, BEFORE the SD-bound file flush
+         * below — which can take hundreds of ms when a transfer is reading
+         * the card. The stop itself completes right after. */
+        haptic_play_pattern(HAPTIC_DOUBLE);  /* stop = 2 buzzes (button or AT) */
+        display_post_event(UI_EVENT_REC_STOP);
+        display_set_recording(false, false);
+
         err = audio_stop_recording();
         if (err == -ETIMEDOUT) {
             /* Stop was requested but the audio thread is slow to flush/close
@@ -578,9 +585,6 @@ static enum clip_event_result execute_transition(enum clip_event event,
             LOG_ERR("audio_stop_recording failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
-        haptic_play_pattern(HAPTIC_DOUBLE);  /* stop = 2 buzzes (button or AT) */
-        display_post_event(UI_EVENT_REC_STOP);
-        display_set_recording(false, false);
         {
             struct audio_stats stats;
             int dur = -1;

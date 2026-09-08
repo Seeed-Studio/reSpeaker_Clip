@@ -145,7 +145,6 @@ int clip_init(void)
 {
     int err;
 
-    LOG_INF("Initializing Clip...");
 
     /* Initialize context */
 
@@ -318,7 +317,6 @@ int clip_init(void)
     /* Transition to idle state */
     clip_event_get_state();  /* Already set by clip_event_init */
 
-    LOG_INF("Clip initialized successfully");
     LOG_INF("ready: normal=%u/%u enhanced=%u/%u",
            CONFIG_CLIP_NORMAL_BITRATE, CONFIG_CLIP_NORMAL_COMPLEXITY,
            CONFIG_CLIP_ENHANCED_BITRATE, CONFIG_CLIP_ENHANCED_COMPLEXITY);
@@ -352,7 +350,6 @@ static void thread_stack_stats_cb(const struct k_thread *thread, void *user_data
 
 void clip_main_loop(void)
 {
-    LOG_INF("Entering main loop");
 
     int stats_counter = 0;
 

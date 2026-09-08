@@ -49,9 +49,15 @@ static void button_event_callback(const struct device *dev, enum button_action a
 	if (state == CLIP_STATE_RECORDING) {
 		/* Stop recording immediately, vibrate to confirm.
 		 * User can continue holding for power-off (LEVEL_1/2/3).
+		 *
+		 * MUST be async: this runs in the button driver's polling
+		 * thread. A sync post blocks that thread for the whole SD
+		 * flush (hundreds of ms), freezing the 30 ms press-timer
+		 * loop while wall-clock time advances — on unblock the
+		 * accumulated press duration can jump past the 3 s
+		 * LEVEL_1 threshold and trigger an unintended power-off.
 		 */
-		struct clip_event_result_info info;
-		clip_post_event_sync(CLIP_EVENT_STOP, &info);  /* STOP event handler vibrates */
+		clip_post_event(CLIP_EVENT_STOP);  /* STOP handler vibrates */
 		atomic_set(&recording_stopped, 1);
 	} else if (state == CLIP_STATE_IDLE || state == CLIP_STATE_ERROR
 		   || state == CLIP_STATE_WIFI_SYNC) {
