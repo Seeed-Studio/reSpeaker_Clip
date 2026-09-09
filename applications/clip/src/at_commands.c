@@ -909,7 +909,6 @@ static int cmd_stop_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     if (audio_get_stats(&audio_stats) != 0) {
         char data[128];
         snprintf(data, sizeof(data), "{\"session\":\"%s\"}", session_id);
-        haptic_play_pattern(HAPTIC_SHORT);
         return create_json_response(true, NULL, data, response, len);
     }
 
@@ -925,7 +924,8 @@ static int cmd_stop_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             audio_stats.frames_encoded,
             audio_stats.total_bytes);
 
-    haptic_play_pattern(HAPTIC_SHORT);
+    /* No haptic here: the STOP event handler already gives the stop
+     * feedback (HAPTIC_DOUBLE) for both button and AT paths. */
 
     return create_json_response(true, NULL, data, response, len);
 }
