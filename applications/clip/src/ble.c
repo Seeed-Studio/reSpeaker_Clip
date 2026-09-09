@@ -790,7 +790,6 @@ int ble_notify_state_change(const char *state, const char *session_id, int durat
                        state, session_id);
     }
 
-    LOG_INF("Event: state=%s session=%s duration=%d", state, session_id, duration);
     return ble_send(buf, len);
 }
 

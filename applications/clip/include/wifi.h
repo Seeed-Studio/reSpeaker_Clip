@@ -64,7 +64,6 @@ bool wifi_is_interface_up(void);
  * @return true if AP is running, false otherwise
  */
 bool wifi_ap_is_running(void);
-bool wifi_ap_sta_connected(void);
 
 /**
  * @brief Get AP SSID

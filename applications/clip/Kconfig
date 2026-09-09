@@ -383,24 +383,36 @@ config CLIP_BATTERY_WIFI_LOAD_COMPENSATION
 	  charge and discharge states. Disable only for an uncompensated baseline.
 
 config CLIP_BATTERY_WIFI_AP_LOAD_MA
-	int "Estimated unseen nRF70 current with AP up, no transfer (mA)"
+	int "Measured unseen nRF70 current with AP up, idle (mA)"
 	default 59
 	help
-	  Estimated nRF7002 current (mA) drawn from VBAT-direct while the WiFi AP
-	  is up but no file transfer is active. Added to the discharge side of the
-	  fuel-gauge current. Calibrate by measuring total battery current (PPK on
-	  the VBAT rail, upstream of the NPM1300) and the NPM1300 IBAT logged at
-	  state transitions: unseen = total - |IBAT|. Default is an upper bound
-	  (total - WiFi-off baseline); over-compensating is safer than under-.
-	  Trim to (total - |IBAT|) once IBAT is measured.
+	  nRF7002 current (mA) drawn from VBAT-direct while the WiFi AP is up
+	  but no file transfer is active (beaconing + radio standby). This is a
+	  REAL draw the NPM1300 IBAT cannot see, so it must be billed to the
+	  fuel gauge. Calibrate on the VBAT rail (upstream of the NPM1300):
+	  unseen = total - |IBAT| with the AP up.
 
 config CLIP_BATTERY_WIFI_TX_LOAD_MA
-	int "Estimated unseen nRF70 current during active UDP transfer (mA)"
+	int "Measured unseen nRF70 current during active UDP transfer (mA)"
 	default 99
 	help
-	  Estimated nRF7002 current (mA) drawn from VBAT-direct while a WiFi UDP
-	  file transfer is active (AP up + transfer). See CLIP_BATTERY_WIFI_AP_LOAD_MA
-	  for the calibration method. Default is an upper bound; trim to (total - |IBAT|).
+	  nRF7002 current (mA) drawn from VBAT-direct while a WiFi UDP file
+	  transfer is active (AP up + transfer). Calibrate the same way as
+	  CLIP_BATTERY_WIFI_AP_LOAD_MA during an active transfer.
+
+config CLIP_BATTERY_IDLE_CURRENT_UA
+	int "Average battery current while idle, fed to the fuel gauge (uA)"
+	default 400
+	help
+	  At idle the PMIC's one-shot IBAT sample is taken while the CPU runs the
+	  60 s poll itself (mA-level draw, ~1.09 mA LSB) and integrating that
+	  single sample over the whole 60 s delta over-counts discharge (~3%/h
+	  phantom). Nordic's guidance for low-power periods is that the idle
+	  current is known ahead of time: when not charging/recording/
+	  transferring, this value is fed to nrf_fuel_gauge_process instead of
+	  the measurement (and passed to nrf_fuel_gauge_idle_set). Calibrate from
+	  the idle power budget (production ~170 uA + BLE advertising + OLED
+	  wakeups).
 
 config CLIP_BATTERY_DISPLAY_MAX_STEP
 	int "Max displayed SoC change per poll (%)"

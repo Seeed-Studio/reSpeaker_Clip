@@ -26,6 +26,7 @@
 #include "ble.h"
 #include "transfer.h"
 #include "wifi.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 
@@ -45,22 +46,19 @@ LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 /* Low-battery warning threshold (displayed % = actual SoC; no reserve). */
 #define BATTERY_LOW_WARNING_THRESHOLD  15
 
-/* Display re-anchor gap (%) and boot-seed floor margin (%).
+/* Display re-anchor gap (%) and stale-state heal threshold.
  *
  * The directional display latch intentionally holds small upward gauge
- * corrections while discharging (anti-churn). But a seed that is far below
- * reality must not be latched forever: if the battery was charged while the
- * device was off (or re-flashed), the coulomb counter never saw the charge,
- * the gauge SoC stays near 0, and the persisted display seed (0) would show
- * "0% at 4.0 V" with no way up until the next charge session.
+ * corrections while discharging (anti-churn). But a value far below reality
+ * must not be latched forever: if the persisted state was phantom-drained
+ * (e.g. 0% shown at 4.0 V), it would stay wrong until the next charge.
  *
- * - REANCHOR_THRESHOLD: while discharging, an upward gap this large is a
- *   re-anchor, not churn — catch up at MAX_STEP instead of holding.
- * - SEED_FLOOR_MARGIN: on the first poll after boot, a persisted seed more
- *   than REANCHOR_THRESHOLD below the voltage-curve estimate is raised to
- *   (curve estimate - margin), one-shot. */
+ * While discharging, an upward gap to the gauge >= this threshold is a
+ * re-anchor, not churn — catch up at MAX_STEP instead of holding. At boot,
+ * a persisted display seed >= this threshold below the voltage-curve
+ * estimate invalidates the restored coulomb-counter state (see the heal in
+ * battery_init). */
 #define BATTERY_DISPLAY_REANCHOR_THRESHOLD  20
-#define BATTERY_SEED_FLOOR_MARGIN           10
 
 /* High-temperature charge cutoff. The NPM1300 hot threshold
  * (thermistor-hot-millidegrees=45C in DTS) is the autonomous HW safety net
@@ -203,7 +201,6 @@ static void read_and_update(void);
 void battery_poll(void)
 {
 	read_and_update();
-	LOG_INF("Battery poll: %u%%, charging=%d", last_percent, last_charging);
 }
 
 /* Save the fuel gauge state to settings (LittleFS). Call on SoC change + on
@@ -327,18 +324,14 @@ static float wifi_load_estimate_a(void)
 		return 0.0f;
 	}
 
+	/* Two calibrated tiers — both are REAL current the PMIC IBAT cannot
+	 * see (nRF7002 is fed from VBAT upstream of the sense resistor), so
+	 * both must be billed while the AP is up:
+	 * AP idle (beaconing/standby) and active UDP transfer. */
 	int ma = 0;
 	if (wifi_ap_is_running()) {
-		if (transfer_is_active()) {
-			ma = CONFIG_CLIP_BATTERY_WIFI_TX_LOAD_MA;
-		} else if (wifi_ap_sta_connected()) {
-			ma = CONFIG_CLIP_BATTERY_WIFI_AP_LOAD_MA;
-		}
-		/* AP beaconing with no station associated: the unseen nRF70
-		 * current is far below the AP_LOAD_MA upper bound. Counting
-		 * it anyway phantom-drains the coulomb counter (an AP left on
-		 * overnight reads the pack empty while the voltage is still
-		 * high), so an idle client-less AP contributes nothing. */
+		ma = transfer_is_active() ? CONFIG_CLIP_BATTERY_WIFI_TX_LOAD_MA
+					  : CONFIG_CLIP_BATTERY_WIFI_AP_LOAD_MA;
 	}
 	return (float)ma / 1000.0f;
 }
@@ -451,22 +444,42 @@ static void read_and_update_locked(void)
 		/* Calculate time delta */
 		float delta = (float)k_uptime_delta(&fg_ref_time) / 1000.f;
 
-		/* WiFi compensation: fold in the nRF70 current GAUGE_AVG_CURRENT
-		 * cannot see (it bypasses the PMIC on VBAT-direct). Added as extra
-		 * discharge (positive in the lib convention) in both charge and
-		 * discharge states. current is in amperes (sensor_value_from_micro). */
-		float wifi_load_a = wifi_load_estimate_a();
-		if (wifi_load_a != last_wifi_load_a) {
-			last_wifi_load_a = wifi_load_a;
-			LOG_INF("Battery fg: ibat=%d mA, wifi_comp=%d mA",
-				(int)(current * 1000.0f), (int)(wifi_load_a * 1000.0f));
+		/* Feed the gauge a current it can trust.
+		 *
+		 * ACTIVE (charging / recording / transfer): the one-shot IBAT
+		 * sample is representative — use it, plus the transfer-only WiFi
+		 * compensation for the nRF70 current that bypasses the PMIC
+		 * sense resistor.
+		 *
+		 * IDLE: the single IBAT snapshot is taken while the CPU runs this
+		 * very poll (mA-level, ~1.09 mA LSB — true idle reads 0), and
+		 * integrating that one sample over the whole 60 s delta wildly
+		 * over-counts discharge (~3%/h phantom at 1%/20min scale).
+		 * Nordic's guidance for low-power periods is that the idle
+		 * current is known ahead of time: feed the configured average
+		 * instead, keep V/T real, and mirror it into idle_set() so the
+		 * library's predictions agree. */
+		bool fg_active = charger_connected || audio_is_recording() ||
+				 transfer_is_active();
+		float i_feed;
+		if (fg_active) {
+			/* nrf_fuel_gauge lib expects negative = charging;
+			 * GAUGE_AVG_CURRENT is negative = discharging, so negate.
+			 * Without this the coulomb count runs backwards. */
+			float wifi_load_a = wifi_load_estimate_a();
+			if (wifi_load_a != last_wifi_load_a) {
+				last_wifi_load_a = wifi_load_a;
+				LOG_INF("Battery fg: ibat=%d mA, wifi_comp=%d mA",
+					(int)(current * 1000.0f),
+					(int)(wifi_load_a * 1000.0f));
+			}
+			i_feed = -current + wifi_load_a;
+		} else {
+			i_feed = (float)CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA / 1000000.0f;
+			nrf_fuel_gauge_idle_set(voltage, temp, i_feed);
 		}
 
-		/* nrf_fuel_gauge lib expects negative = charging; GAUGE_AVG_CURRENT
-		 * is negative = discharging, so negate. Without this the Coulomb
-		 * count runs backwards and SoC jumps (voltage correction fights it). */
-		float soc = nrf_fuel_gauge_process(voltage, -current + wifi_load_a,
-						  temp, delta, NULL);
+		float soc = nrf_fuel_gauge_process(voltage, i_feed, temp, delta, NULL);
 		percent = (uint8_t)soc;
 
 		/* Determine charging status for display/BLE:
@@ -658,12 +671,17 @@ static void battery_delayed_update_handler(struct k_work *work)
 static void battery_level_handler(struct k_work *work)
 {
 	read_and_update();
-	/* Persist the fuel-gauge state when its displayed integer SoC changes.
-	 * The SoC moves slowly, so this writes infrequently — not every poll —
-	 * to avoid wearing the LittleFS settings flash. The graceful shutdown/
-	 * reboot paths also save (a fresh copy) via battery_save_fg_state(). */
-	if (last_percent != last_saved_soc) {
-		battery_save_fg_state_unlocked();  /* already under battery_mutex */
+	/* Persist the fuel-gauge state when its displayed integer SoC changes,
+	 * and at least every 10 polls (~10 min) so a reboot never loses more
+	 * than ~10 min of coulomb counting. read_and_update() has already
+	 * released battery_mutex, so take it here — the save reads the library
+	 * state, which must not race a concurrent poll. */
+	static uint32_t fg_save_polls;
+	if (last_percent != last_saved_soc || ++fg_save_polls >= 10) {
+		fg_save_polls = 0;
+		k_mutex_lock(&battery_mutex, K_FOREVER);
+		battery_save_fg_state_unlocked();
+		k_mutex_unlock(&battery_mutex);
 		last_saved_soc = last_percent;
 	}
 	k_work_schedule(&battery_level_work, K_SECONDS(60));
@@ -717,32 +735,33 @@ int battery_init(void)
 		max_charge_current = (float)value.val1 + ((float)value.val2 / 1000000);
 		term_charge_current = max_charge_current / 10.f;
 
+		/* Stale-state heal — MUST run before nrf_fuel_gauge_init():
+		 * once init consumes the restored blob there is no way to
+		 * discard it. If the persisted display seed is far below what
+		 * the boot-time (near-relaxed) voltage says, the restored
+		 * coulomb counter was phantom-drained (idle-sampling bias,
+		 * WiFi over-compensation, or the pack charged while the device
+		 * was off). Drop the blob so init re-estimates from voltage,
+		 * and leave the display unseeded so the first poll adopts the
+		 * fresh estimate. */
+		if (fg_state_loaded &&
+		    (int)voltage_soc_estimate(init_params.v0) -
+			    (int)fg_state_record.displayed_soc >=
+			    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
+			LOG_WRN("stale fg state: %.3fV vs seed %u%% -> new estimate",
+				init_params.v0,
+				(unsigned int)fg_state_record.displayed_soc);
+			fg_state_loaded = false;
+			init_params.state = NULL;
+			displayed_percent = 0xFF;
+		}
+
 		/* Initialize fuel gauge */
 		ret = nrf_fuel_gauge_init(&init_params, NULL);
 		if (ret < 0) {
 			LOG_WRN("fuel gauge init %d, using voltage SoC", ret);
 		} else {
 			fg_initialized = true;
-
-			/* Stale-state heal: if the persisted display seed is far
-			 * below what the boot-time (near-relaxed) voltage says,
-			 * the restored coulomb counter was phantom-drained (WiFi
-			 * over-compensation while the AP ran, bad wake-time
-			 * voltage samples ratcheting the model down, or the pack
-			 * charged while the device was off). Discard the restored
-			 * state — the gauge re-estimates from voltage and the
-			 * display seeds from the gauge, consistently. */
-			if (fg_state_loaded &&
-			    (int)voltage_soc_estimate(init_params.v0) -
-					    (int)fg_state_record.displayed_soc >=
-				    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
-				LOG_WRN("stale fg state: %.3fV vs seed %u%% -> new estimate",
-					init_params.v0,
-					(unsigned int)fg_state_record.displayed_soc);
-				fg_state_loaded = false;
-				init_params.state = NULL;
-				displayed_percent = 0xFF;
-			}
 
 			LOG_INF("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
 
