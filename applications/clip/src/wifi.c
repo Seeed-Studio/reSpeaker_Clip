@@ -495,6 +495,11 @@ bool wifi_ap_is_running(void)
 	return ap_running;
 }
 
+bool wifi_ap_sta_connected(void)
+{
+	return sta_connected;
+}
+
 const char *wifi_get_ssid(void)
 {
 	return ap_ssid;

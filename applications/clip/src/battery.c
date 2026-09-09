@@ -45,6 +45,23 @@ LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 /* Low-battery warning threshold (displayed % = actual SoC; no reserve). */
 #define BATTERY_LOW_WARNING_THRESHOLD  15
 
+/* Display re-anchor gap (%) and boot-seed floor margin (%).
+ *
+ * The directional display latch intentionally holds small upward gauge
+ * corrections while discharging (anti-churn). But a seed that is far below
+ * reality must not be latched forever: if the battery was charged while the
+ * device was off (or re-flashed), the coulomb counter never saw the charge,
+ * the gauge SoC stays near 0, and the persisted display seed (0) would show
+ * "0% at 4.0 V" with no way up until the next charge session.
+ *
+ * - REANCHOR_THRESHOLD: while discharging, an upward gap this large is a
+ *   re-anchor, not churn — catch up at MAX_STEP instead of holding.
+ * - SEED_FLOOR_MARGIN: on the first poll after boot, a persisted seed more
+ *   than REANCHOR_THRESHOLD below the voltage-curve estimate is raised to
+ *   (curve estimate - margin), one-shot. */
+#define BATTERY_DISPLAY_REANCHOR_THRESHOLD  20
+#define BATTERY_SEED_FLOOR_MARGIN           10
+
 /* High-temperature charge cutoff. The NPM1300 hot threshold
  * (thermistor-hot-millidegrees=45C in DTS) is the autonomous HW safety net
  * (trips even if the MCU hangs, within the 60s poll window). Because the NTC
@@ -312,10 +329,38 @@ static float wifi_load_estimate_a(void)
 
 	int ma = 0;
 	if (wifi_ap_is_running()) {
-		ma = transfer_is_active() ? CONFIG_CLIP_BATTERY_WIFI_TX_LOAD_MA
-					  : CONFIG_CLIP_BATTERY_WIFI_AP_LOAD_MA;
+		if (transfer_is_active()) {
+			ma = CONFIG_CLIP_BATTERY_WIFI_TX_LOAD_MA;
+		} else if (wifi_ap_sta_connected()) {
+			ma = CONFIG_CLIP_BATTERY_WIFI_AP_LOAD_MA;
+		}
+		/* AP beaconing with no station associated: the unseen nRF70
+		 * current is far below the AP_LOAD_MA upper bound. Counting
+		 * it anyway phantom-drains the coulomb counter (an AP left on
+		 * overnight reads the pack empty while the voltage is still
+		 * high), so an idle client-less AP contributes nothing. */
 	}
 	return (float)ma / 1000.0f;
+}
+
+/* Piecewise-linear voltage-to-SoC estimate for the HSZ 362123 Li-Po.
+ * Coarse (no load/temperature correction) — used as the fallback SoC
+ * source and as a sanity reference for the persisted fuel-gauge state. */
+static uint8_t voltage_soc_estimate(float voltage)
+{
+	if (voltage >= 4.15f) {
+		return 100;
+	} else if (voltage >= 3.75f) {
+		/* 3.75-4.15V: 50-100% (upper plateau) */
+		return (uint8_t)(50.0f + (voltage - 3.75f) / (4.15f - 3.75f) * 50.0f);
+	} else if (voltage >= 3.45f) {
+		/* 3.45-3.75V: 10-50% (mid plateau, relatively flat) */
+		return (uint8_t)(10.0f + (voltage - 3.45f) / (3.75f - 3.45f) * 40.0f);
+	} else if (voltage > 3.3f) {
+		/* 3.3-3.45V: 0-10% (steep drop at end) */
+		return (uint8_t)((voltage - 3.3f) / (3.45f - 3.3f) * 10.0f);
+	}
+	return 0;
 }
 
 static void read_and_update_locked(void)
@@ -438,20 +483,7 @@ static void read_and_update_locked(void)
 		}
 	} else {
 		/* Fallback: piecewise-linear voltage-SoC curve for HSZ 362123 Li-Po */
-		if (voltage >= 4.15f) {
-			percent = 100;
-		} else if (voltage >= 3.75f) {
-			/* 3.75-4.15V: 50-100% (upper plateau) */
-			percent = (uint8_t)(50.0f + (voltage - 3.75f) / (4.15f - 3.75f) * 50.0f);
-		} else if (voltage >= 3.45f) {
-			/* 3.45-3.75V: 10-50% (mid plateau, relatively flat) */
-			percent = (uint8_t)(10.0f + (voltage - 3.45f) / (3.75f - 3.45f) * 40.0f);
-		} else if (voltage > 3.3f) {
-			/* 3.3-3.45V: 0-10% (steep drop at end) */
-			percent = (uint8_t)((voltage - 3.3f) / (3.45f - 3.3f) * 10.0f);
-		} else {
-			percent = 0;
-		}
+		percent = voltage_soc_estimate(voltage);
 		bool battery_full = (percent >= BATTERY_FULL_THRESHOLD);
 		charging = charger_connected && (!charger_complete || !battery_full);
 	}
@@ -494,7 +526,14 @@ static void read_and_update_locked(void)
 		if (diff < -CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP) {
 			diff = -CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP;
 		} else if (diff > 0) {
-			diff = 0;  /* don't increase while discharging */
+			/* Re-anchor escape: a LARGE upward gap is the gauge
+			 * recovering from a phantom-drained counter (e.g. the
+			 * old WiFi over-compensation), not display churn. Let it
+			 * catch up at MAX_STEP; small corrections (<= the
+			 * threshold) stay held per the anti-churn design. */
+			diff = (diff >= BATTERY_DISPLAY_REANCHOR_THRESHOLD)
+				       ? CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP
+				       : 0;
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
@@ -684,6 +723,27 @@ int battery_init(void)
 			LOG_WRN("fuel gauge init %d, using voltage SoC", ret);
 		} else {
 			fg_initialized = true;
+
+			/* Stale-state heal: if the persisted display seed is far
+			 * below what the boot-time (near-relaxed) voltage says,
+			 * the restored coulomb counter was phantom-drained (WiFi
+			 * over-compensation while the AP ran, bad wake-time
+			 * voltage samples ratcheting the model down, or the pack
+			 * charged while the device was off). Discard the restored
+			 * state — the gauge re-estimates from voltage and the
+			 * display seeds from the gauge, consistently. */
+			if (fg_state_loaded &&
+			    (int)voltage_soc_estimate(init_params.v0) -
+					    (int)fg_state_record.displayed_soc >=
+				    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
+				LOG_WRN("stale fg state: %.3fV vs seed %u%% -> new estimate",
+					init_params.v0,
+					(unsigned int)fg_state_record.displayed_soc);
+				fg_state_loaded = false;
+				init_params.state = NULL;
+				displayed_percent = 0xFF;
+			}
+
 			LOG_INF("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
 
 			/* Seed the directional-smoothed display from the persisted value so
