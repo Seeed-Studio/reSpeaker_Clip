@@ -65,6 +65,11 @@ enum ui_event {
 	UI_EVENT_OTA_DONE,             /**< OTA update completed */
 	UI_EVENT_TIMEOUT,              /**< State timeout */
 	UI_EVENT_ERROR_SHOW,           /**< Show error message */
+	UI_EVENT_STATUS_REFRESH,       /**< Re-render current state (posted by
+	                                       * non-display threads; rendering must
+	                                       * stay single-writer on the display
+	                                       * thread — cross-thread render+flush
+	                                       * races tear the frame) */
 	UI_EVENT_LOW_BATTERY,          /**< Low battery warning */
 	UI_EVENT_BLE_DISCONNECTED,     /**< BLE disconnected */
 	UI_EVENT_WIFI_BLOCKED,         /**< WiFi active, cannot record */
