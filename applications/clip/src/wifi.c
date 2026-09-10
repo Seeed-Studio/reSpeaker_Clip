@@ -462,7 +462,6 @@ int wifi_off(void)
 	/* Power down interface to save power (required when CONFIG_NRF_WIFI_IF_AUTO_START=n) */
 	if (net_if_is_admin_up(iface))
 	{
-		LOG_INF("wifi_off: calling net_if_down");
 		ret = net_if_down(iface);
 		if (ret)
 		{
@@ -470,7 +469,6 @@ int wifi_off(void)
 		}
 		else
 		{
-			LOG_INF("wifi_off: net_if_down done");
 		}
 	}
 

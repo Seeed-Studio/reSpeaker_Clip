@@ -393,7 +393,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
     if (ble_ctx.notify_enabled) {
         /* CCC already enabled - set transport as ready */
         transport_ble_update_connection(conn, true);
-        LOG_INF("BLE transport ready (CCC pre-enabled)");
     } else {
         /* CCC not yet written - set transport but not ready */
         transport_ble_update_connection(conn, false);
@@ -807,7 +806,6 @@ int ble_notify_mark(const char *session_id, int mark_count)
                    "\"mark_count\":%d}",
                    session_id, mark_count);
 
-    LOG_INF("Event: mark session=%s count=%d", session_id, mark_count);
     return ble_send(buf, len);
 }
 
