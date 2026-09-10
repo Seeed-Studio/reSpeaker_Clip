@@ -1533,9 +1533,14 @@ int storage_format_card(void)
 {
     int rc;
 
-    if (!sd_mounted)
+    /* The idle power-gate unmounts the SD after 45 s of inactivity — a
+     * format request arriving over BLE while idle must lazily remount
+     * first, or it fails -ENODEV and (previously) the AT response still
+     * claimed success while every recording survived the "factory reset". */
+    rc = storage_ensure_mounted();
+    if (rc != 0)
     {
-        return -ENODEV;
+        return rc;
     }
 
     /* 1. Unmount */
@@ -1573,7 +1578,6 @@ int storage_format_card(void)
     /* 4. Recreate REC directory */
     fs_mkdir(STORAGE_BASE_PATH);
 
-    LOG_INF("SD card formatted and remounted");
     return 0;
 }
 

@@ -668,14 +668,33 @@ static int cmd_factory_handler(struct at_cmd_ctx *ctx, char *response, size_t le
         return create_json_response(false, "Factory reset failed", NULL, response, len);
     }
 
-    /* Format SD card (clear FATFS recordings) */
-    err = storage_format_card();
-    if (err) {
-        LOG_WRN("SD format fail (factory) %d", err);
+    /* Release the SD log file BEFORE formatting: the FS log backend holds
+     * /SD:/LOG open, storage_format_card()'s unmount then fails -EBUSY
+     * (its rc is ignored) and f_mkfs on the still-mounted volume fails —
+     * the AT response said success while every recording survived and the
+     * "unsynced audio" indicator came back after the reboot. */
+    if (log_fs_active) {
+        log_fs_active = false;
+        const struct log_backend *fs_be = log_backend_get_by_name("log_backend_fs");
+        if (fs_be) {
+            log_backend_deactivate(fs_be);
+        }
+        /* Give the backend a moment to close its file. */
+        k_sleep(K_MSEC(100));
     }
 
+    /* Format SD card (clear FATFS recordings) */
+    err = storage_format_card();
+
     /* Send response before clearing bonds (which may drop BLE link) */
-    int ret = create_json_response(true, "Factory reset complete, rebooting...", NULL, response, len);
+    char msg[64];
+    if (err) {
+        LOG_WRN("SD format fail (factory) %d", err);
+        snprintf(msg, sizeof(msg), "Factory reset (SD format failed: %d), rebooting...", err);
+    } else {
+        snprintf(msg, sizeof(msg), "Factory reset complete, rebooting...");
+    }
+    int ret = create_json_response(true, msg, NULL, response, len);
 
     /* Schedule: clear bonds then reboot */
     schedule_reboot(500, true);
@@ -846,6 +865,10 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         rec_mode = c->config.mode;
     }
 
+    /* Buzz BEFORE starting capture: the motor noise couples into the
+     * mics (audio also waits for haptic quiet before powering them on). */
+    haptic_play_pattern(HAPTIC_SHORT);
+
     struct clip_event_result_info info;
     int ret = clip_post_event_sync(CLIP_EVENT_START, &info);
 
@@ -869,8 +892,6 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         return create_json_response(false, "Failed to start recording",
                                    NULL, response, len);
     }
-
-    haptic_play_pattern(HAPTIC_SHORT);
 
     const char *session_id = audio_get_session_id();
     char data[64];
