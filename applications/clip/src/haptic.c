@@ -100,6 +100,17 @@ int haptic_set_motor(bool enable)
 #endif
 }
 
+bool haptic_is_busy(void)
+{
+#ifdef CONFIG_CLIP_HAPTIC_MOTOR_ENABLED
+	/* A queued or running pattern counts: the motor's mechanical noise
+	 * couples into the PDM mics, so audio capture must wait it out. */
+	return k_msgq_num_used_get(&haptic_msgq) > 0 || motor_is_on;
+#else
+	return false;
+#endif
+}
+
 bool haptic_is_running(void)
 {
 #ifdef CONFIG_CLIP_HAPTIC_MOTOR_ENABLED

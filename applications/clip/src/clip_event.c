@@ -616,12 +616,14 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_RESUME:
     {
+        /* Buzz first: the audio thread waits for haptic quiet before
+         * re-powering the mics, so the motor noise is not recorded. */
+        haptic_play_pattern(HAPTIC_SHORT);
         err = audio_resume_recording();
         if (err) {
             LOG_ERR("audio_resume_recording failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
-        haptic_play_pattern(HAPTIC_SHORT);
         display_post_event(UI_EVENT_REC_RESUME);
         display_set_recording(true, c->config.mode == MODE_ENHANCED);
         ble_notify_state_change("RECORDING", audio_get_session_id(), -1);

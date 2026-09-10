@@ -54,4 +54,13 @@ int haptic_play_pattern(enum haptic_pattern pattern);
  */
 bool haptic_is_running(void);
 
+/**
+ * @brief True while a haptic pattern is queued or the motor is running.
+ *
+ * Audio capture waits for this to clear before opening the mics: the
+ * motor's mechanical noise couples into the PDM microphones and would be
+ * recorded at the start of the session.
+ */
+bool haptic_is_busy(void);
+
 #endif /* CLIP_HAPTIC_H */
