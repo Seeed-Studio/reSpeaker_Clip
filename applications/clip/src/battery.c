@@ -60,6 +60,27 @@ LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
  * battery_init). */
 #define BATTERY_DISPLAY_REANCHOR_THRESHOLD  20
 
+/* Display rate limiting is TIME-based: MAX_STEP applies per this window,
+ * not per call — UI refreshes and VBUS events trigger extra
+ * read_and_update() calls, and a per-call cap let those bursts step the
+ * display several times within seconds (e.g. 68%->78% "instantly" on
+ * charger plug-in). */
+#define BATTERY_DISPLAY_RATE_WINDOW_MS  60000
+
+/* On charger plug-in the terminal voltage instantly rises by I*R (~+10%
+ * on the OCV curve at CC currents) and the fuel-gauge model re-anchors
+ * upward — no real charge has flowed yet. Hold the display for this long
+ * after the VBUS rising edge before following the gauge again. */
+#define BATTERY_PLUGIN_HOLD_MS  120000
+
+/* Post-full hold: charge completion forces the display to 100% (the
+ * gauge model itself plateaus at ~99), so on unplug the display would
+ * drop to 99 within one poll — visibly wrong. Hold 100% briefly after
+ * unplugging from a completed charge; keep it SHORT (the gap to the
+ * gauge grows with hold time, and a long hold would later show a cliff).
+ * 10 min of real discharge is ~0.2% idle / ~1-2% recording. */
+#define BATTERY_POST_FULL_HOLD_MS  (10 * 60 * MSEC_PER_SEC)
+
 /* High-temperature charge cutoff. The NPM1300 hot threshold
  * (thermistor-hot-millidegrees=45C in DTS) is the autonomous HW safety net
  * (trips even if the MCU hangs, within the 60s poll window). Because the NTC
@@ -113,6 +134,13 @@ static uint8_t last_saved_soc = 255U;  /* last SoC% persisted (255 = force first
  * the value shown before reboot (no cross-reboot lag accumulation). 0xFF means
  * "not seeded yet" — the first poll seeds it from the gauge. */
 static uint8_t displayed_percent = 0xFF;
+
+/* Time-based display rate limiting and plug-in hold (see
+ * BATTERY_DISPLAY_RATE_WINDOW_MS / BATTERY_PLUGIN_HOLD_MS). */
+static int64_t last_display_change_ms = -BATTERY_DISPLAY_RATE_WINDOW_MS;
+static int64_t vbus_plugin_ms = -1;
+static bool charger_complete_seen;   /* charge completed this VBUS session */
+static int64_t post_full_until_ms;    /* hold 100% until this (unplug from full) */
 
 static uint32_t fg_model_crc(void)
 {
@@ -514,42 +542,84 @@ static void read_and_update_locked(void)
 	 * cross-reboot lag accumulation. The raw gauge value (percent) is still
 	 * logged as "actual" for calibration. */
 	uint8_t display_percent;
+	int64_t now_ms = k_uptime_get();
+
+	/* VBUS rising/falling edge tracking for the plug-in hold and the
+	 * post-full hold. */
+	if (vbus_connected) {
+		if (vbus_plugin_ms < 0) {
+			vbus_plugin_ms = now_ms;
+		}
+	} else {
+		if (vbus_plugin_ms >= 0 && charger_complete_seen) {
+			/* Unplugged from a completed charge: hold 100% briefly. */
+			post_full_until_ms = now_ms + BATTERY_POST_FULL_HOLD_MS;
+		}
+		vbus_plugin_ms = -1;
+		charger_complete_seen = false;
+	}
+
+	/* Time-based rate limit: MAX_STEP per RATE_WINDOW since the last
+	 * DISPLAYED change — however many polls fire in between. */
+	int since_change_ms = (int)(now_ms - last_display_change_ms);
+	int allowed_step = (int)((int64_t)CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP *
+				 since_change_ms / BATTERY_DISPLAY_RATE_WINDOW_MS);
+	/* Plug-in hold: right after VBUS appears, the gauge re-anchors up on
+	 * the I*R-elevated charging voltage; don't follow it yet. */
+	bool plugin_hold = vbus_plugin_ms >= 0 &&
+			   now_ms - vbus_plugin_ms < BATTERY_PLUGIN_HOLD_MS;
+
 	if (vbus_connected && charger_complete) {
 		/* Charge complete: force 100% immediately (gauge plateaus ~99%). */
 		display_percent = 100;
 		displayed_percent = 100;
+		charger_complete_seen = true;
+		last_display_change_ms = now_ms;
 	} else if (displayed_percent == 0xFF) {
 		/* First poll with no persisted seed: start at the gauge value. */
 		display_percent = percent;
 		displayed_percent = percent;
+		last_display_change_ms = now_ms;
 	} else if (charging) {
-		/* Charging: catch up toward the gauge, upward only, rate-limited. */
+		/* Charging: catch up toward the gauge, upward only, time-limited. */
 		int diff = (int)percent - (int)displayed_percent;
-		if (diff > CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP) {
-			diff = CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP;
+		if (diff > allowed_step) {
+			diff = allowed_step;
 		} else if (diff < 0) {
 			diff = 0;  /* don't decrease while charging */
+		}
+		if (plugin_hold && diff > 0) {
+			diff = 0;
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
 	} else {
-		/* Discharging/idle: track depletion, downward only, rate-limited.
+		/* Discharging/idle: track depletion, downward only, time-limited.
 		 * An upward gauge correction is held until the next charge. */
 		int diff = (int)percent - (int)displayed_percent;
-		if (diff < -CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP) {
-			diff = -CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP;
+		if (now_ms < post_full_until_ms && diff < 0) {
+			/* Briefly hold 100% after unplugging from a completed
+			 * charge (the ~99 is the termination plateau, not real
+			 * discharge). Short by design: afterwards the gap to
+			 * the gauge is 1-2% and tracking resumes stepwise. */
+			diff = 0;
+		}
+		if (diff < -allowed_step) {
+			diff = -allowed_step;
 		} else if (diff > 0) {
 			/* Re-anchor escape: a LARGE upward gap is the gauge
-			 * recovering from a phantom-drained counter (e.g. the
-			 * old WiFi over-compensation), not display churn. Let it
-			 * catch up at MAX_STEP; small corrections (<= the
-			 * threshold) stay held per the anti-churn design. */
+			 * recovering from a phantom-drained counter, not
+			 * display churn. Let it catch up at the time-limited
+			 * rate; small corrections stay held (anti-churn). */
 			diff = (diff >= BATTERY_DISPLAY_REANCHOR_THRESHOLD)
-				       ? CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP
+				       ? allowed_step
 				       : 0;
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
+	}
+	if (display_percent != last_percent) {
+		last_display_change_ms = now_ms;
 	}
 
 	/* Update battery percent (display value) */
