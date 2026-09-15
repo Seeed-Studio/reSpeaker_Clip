@@ -21,6 +21,7 @@ target_sources(app PRIVATE
     src/audio.c
     src/storage.c
     src/transfer.c
+    src/rtc_stream.c
     src/haptic.c
     src/button.c
     src/display.c

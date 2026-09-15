@@ -32,6 +32,7 @@
 #include "display.h"
 #include "haptic.h"
 #include "usb_cdc.h"
+#include "rtc_stream.h"
 
 LOG_MODULE_REGISTER(at_commands, CONFIG_CLIP_LOG_LEVEL);
 
@@ -819,6 +820,7 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
     struct clip_context *c = clip_get_context();
     enum recording_mode rec_mode;
+    bool rtc_request = false;
 
     /* Parse mode parameter if provided */
     if (ctx->args && strlen(ctx->args) > 0) {
@@ -836,8 +838,13 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             rec_mode = MODE_NORMAL;
         } else if (strcmp(mode_str, "enhanced") == 0 || strcmp(mode_str, "merge") == 0) {
             rec_mode = MODE_ENHANCED;
+        } else if (strcmp(mode_str, "rtc") == 0) {
+            /* RTC: live Opus stream over BLE, nothing written to SD.
+             * The persistent recording mode config is left untouched. */
+            rtc_request = true;
+            rec_mode = c->config.mode;
         } else {
-            return create_json_response(false, "invalid mode (normal/stereo/enhanced/merge)", NULL, response, len);
+            return create_json_response(false, "invalid mode (normal/stereo/enhanced/merge/rtc)", NULL, response, len);
         }
 
         /* Apply mode for this session */
@@ -846,8 +853,18 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         rec_mode = c->config.mode;
     }
 
+    if (rtc_request) {
+        /* RTC streams over BLE: require the link and a subscribed data
+         * characteristic before starting the mic pipeline. */
+        if (!ble_is_connected() || !ble_is_file_data_notify_enabled()) {
+            return create_json_response(false,
+                "RTC requires BLE connected and file data notify enabled",
+                NULL, response, len);
+        }
+    }
+
     struct clip_event_result_info info;
-    int ret = clip_post_event_sync(CLIP_EVENT_START, &info);
+    int ret = clip_post_start_event_sync(rtc_request, &info);
 
     if (ret != 0 || info.result != CLIP_EVENT_OK) {
         if (info.result == CLIP_EVENT_INVALID) {
@@ -858,6 +875,11 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             if (usb_cdc_is_enabled()) {
                 return create_json_response(false, "USB MSC active, disable USB first",
                                            NULL, response, len);
+            }
+            if (rtc_request) {
+                return create_json_response(false,
+                    "RTC start refused (already recording or BLE not ready)",
+                    NULL, response, len);
             }
             return create_json_response(false, "Already recording or invalid state",
                                        NULL, response, len);
@@ -873,9 +895,14 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     haptic_play_pattern(HAPTIC_SHORT);
 
     const char *session_id = audio_get_session_id();
-    char data[64];
+    char data[96];
     if (session_id) {
-        snprintf(data, sizeof(data), "{\"session\":\"%s\"}", session_id);
+        if (rtc_request) {
+            snprintf(data, sizeof(data),
+                     "{\"session\":\"%s\",\"mode\":\"rtc\"}", session_id);
+        } else {
+            snprintf(data, sizeof(data), "{\"session\":\"%s\"}", session_id);
+        }
     } else {
         snprintf(data, sizeof(data), "{}");
     }
@@ -933,6 +960,15 @@ static int cmd_stop_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 /* PAUSE Command Handler - Pause recording */
 static int cmd_pause_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+    /* RTC: pause the stream (audio pipeline keeps running). The state
+     * machine stays in RECORDING because nothing on-card changes. */
+    if (rtc_stream_session_active()) {
+        rtc_stream_pause();
+        return create_json_response(true, NULL,
+                                    "{\"paused\":true,\"stream\":true}",
+                                    response, len);
+    }
+
     struct clip_event_result_info info;
     int ret = clip_post_event_sync(CLIP_EVENT_PAUSE, &info);
 
@@ -950,6 +986,16 @@ static int cmd_pause_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 /* RESUME Command Handler - Resume recording */
 static int cmd_resume_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+    if (rtc_stream_session_active()) {
+        if (!rtc_stream_is_paused()) {
+            return create_json_response(false, "Not paused", NULL, response, len);
+        }
+        rtc_stream_resume();
+        return create_json_response(true, NULL,
+                                    "{\"resumed\":true,\"stream\":true}",
+                                    response, len);
+    }
+
     struct clip_event_result_info info;
     int ret = clip_post_event_sync(CLIP_EVENT_RESUME, &info);
 
@@ -970,6 +1016,12 @@ static int cmd_mark_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     const char *session_id = audio_get_session_id();
     if (!session_id) {
         return create_json_response(false, "No active session", NULL, response, len);
+    }
+
+    if (rtc_stream_session_active()) {
+        LOG_WRN("MARK not supported in RTC mode");
+        return create_json_response(false, "MARK not supported in RTC mode",
+                                   NULL, response, len);
     }
 
     struct audio_stats audio_stats;
@@ -1400,6 +1452,38 @@ static int cmd_download_handler(struct at_cmd_ctx *ctx, char *response, size_t l
 
     if (!is_valid_session_id(session_id)) {
         return create_json_response(false, "Invalid session ID", NULL, response, len);
+    }
+
+    /* RTC live stream: the session lives in RAM, not on the SD card.
+     * Check before any storage access. */
+    if (rtc_stream_session_active()) {
+        if (ctx->transport_type != TRANSPORT_TYPE_BLE) {
+            return create_json_response(false, "RTC streaming requires BLE",
+                                       NULL, response, len);
+        }
+        if (strcmp(session_id, rtc_stream_session_id()) != 0) {
+            return create_json_response(false, "Session not found",
+                                       NULL, response, len);
+        }
+        if (filename) {
+            return create_json_response(false, "RTC session has no files",
+                                       NULL, response, len);
+        }
+        if (!ble_is_file_data_notify_enabled()) {
+            return create_json_response(false, "File data notification not enabled",
+                                       NULL, response, len);
+        }
+
+        int rtc_err = rtc_stream_start();
+        if (rtc_err) {
+            return create_json_response(false, "Failed to start RTC stream",
+                                       NULL, response, len);
+        }
+
+        char rtc_data[128];
+        snprintf(rtc_data, sizeof(rtc_data),
+                 "{\"state\":\"streaming\",\"session\":\"%s\"}", session_id);
+        return create_json_response(true, NULL, rtc_data, response, len);
     }
 
     /* Check if SD card is mounted */

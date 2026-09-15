@@ -632,7 +632,7 @@ Kconfig step to 0 restores the raw gauge value.
 | Single click | RECORDING / PAUSED | `CLIP_EVENT_MARK` (bookmark) |
 | Single click | IDLE / ERROR / WIFI_SYNC | `CLIP_EVENT_STATUS_SHOW` |
 | Long press | RECORDING | `CLIP_EVENT_STOP` |
-| Long press | IDLE / ERROR | `CLIP_EVENT_START` |
+| Long press + release | IDLE | RTC-marked `CLIP_EVENT_START` (requires BLE File Data notify) |
 | Long press level 1/2/3 | Any | `CLIP_EVENT_POWER_OFF_SHOW` |
 | Release (after power-off show) | Any | `CLIP_EVENT_POWER_OFF_EXEC` |
 

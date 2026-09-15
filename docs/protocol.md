@@ -136,6 +136,9 @@ Frame types sent on this characteristic:
 - `0x10` FILE_START — begin file transfer
 - `0x11` FILE_END — end file (with CRC32)
 - `0x12` TRANSFER_DONE — all files complete
+- `0x13` STREAM_START — begin RTC live stream
+- `0x14` STREAM_DATA — RTC live Opus frame
+- `0x15` STREAM_END — end RTC live stream
 
 #### 2.2.4 Audio Visualization (Notify)
 
@@ -513,14 +516,28 @@ AT+START=normal
 }
 ```
 
+RTC sessions additionally report the mode:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "session": "20240203100000",
+    "mode": "rtc"
+  }
+}
+```
+
 > `data` contains only the `session` id (an empty object if the id isn't ready yet).
 
 **Error Cases:**
 - `{"ok":false,"msg":"invalid mode (normal/stereo/enhanced/merge)"}` (bad mode argument)
 - `{"ok":false,"msg":"Already recording or invalid state"}` / `"Audio module busy"` / `"Failed to start recording"`
 - `"WiFi active, cannot record"` / `"USB MSC active, disable USB first"` (recording blocked while WiFi/USB active)
+- `"RTC requires BLE connected and file data notify enabled"` (RTC preconditions not met)
 
-**State Change:** IDLE → RECORDING
+**State Change:** IDLE → RECORDING (state broadcast: `"RECORDING"`, or
+`"STREAMING"` for RTC sessions)
 
 **Side Effects:**
 - Creates new session directory
@@ -601,6 +618,7 @@ AT+MARK
 
 **Error Cases:**
 - `{"ok":false,"msg":"No active session"}` / `"Not recording"` (can only bookmark while recording)
+- `{"ok":false,"msg":"MARK not supported in RTC mode"}` (RTC sessions store nothing on-card)
 
 **Side Effects:**
 - Writes bookmark to marks.bin
@@ -852,6 +870,23 @@ AT+DOWNLOAD=20250225143000:0016.opus
 > Only the `:` separator is parsed. A `/` separator (`session/file`) is **not**
 > supported — use `:` for single-file / resume mode.
 
+**RTC Session Case:**
+
+If the requested session is the active RTC session (`AT+START=RTC`), the
+command starts the live stream instead of a file transfer (see Section 4.8):
+
+```json
+{
+  "ok": true,
+  "data": { "state": "streaming", "session": "20250225143000" }
+}
+```
+
+followed by `STREAM_START` / `STREAM_DATA` frames on the File Data
+characteristic. The `session:filename` form is rejected for RTC sessions
+(`"RTC session has no files"`), and RTC streaming is only available when the
+command arrives over BLE (`"RTC streaming requires BLE"` otherwise).
+
 **Resume Logic:**
 1. Client queries session details: `AT+LIST=<session_id>`
 2. Response includes `synced` count (e.g., 15 files already transferred)
@@ -936,6 +971,10 @@ AT+PAUSE
 - Keeps session open
 - Recording can be resumed with `AT+RESUME`
 
+> **RTC sessions:** pause stops the BLE stream and discards all buffered
+> frames, but the microphone pipeline keeps running. Response carries
+> `{"paused":true,"stream":true}` and the device state stays RECORDING.
+
 **Error Cases:**
 - `{"ok":false,"msg":"Not recording"}` / `"Failed to pause recording"`
 
@@ -964,6 +1003,9 @@ AT+RESUME
 - Creates new file with incremented index
 - Resumes DMIC capture
 - Continues in same session
+
+> **RTC sessions:** resume restarts the BLE stream from the current frame.
+> Response carries `{"resumed":true,"stream":true}`.
 
 **Error Cases:**
 - `{"ok":false,"msg":"Not paused"}` / `"Failed to resume recording"`
@@ -1617,11 +1659,15 @@ File transfer uses a binary frame protocol over the File Data characteristic (`0
 | FILE_START | `0x10` | Device→App | Begin file transfer |
 | FILE_END | `0x11` | Device→App | End file (with full-file CRC32) |
 | TRANSFER_DONE | `0x12` | Device→App | All files complete |
+| STREAM_START | `0x13` | Device→App | Begin RTC live stream (BLE only) |
+| STREAM_DATA | `0x14` | Device→App | RTC live Opus frame (BLE only) |
+| STREAM_END | `0x15` | Device→App | End RTC live stream (BLE only) |
 
 **BLE-specific behavior:**
 - No per-frame CRC (BLE link layer guarantees reliable delivery)
 - No FILE_ACK (no retransmission needed)
 - No HEARTBEAT (BLE connection management handles keepalive)
+- `STREAM_*` frames exist on BLE only (RTC over WiFi/UDP is not supported)
 
 ### 4.3 Frame Formats
 
@@ -1687,6 +1733,56 @@ Signals that all files in the session have been transferred.
 | 1 | 1 | sid_len | Session ID length |
 | 2 | N | session_id | Session ID string (e.g., `"20260326120000"`) |
 | 2+N | 4 | file_count | Total files transferred (uint32 LE) |
+
+#### STREAM_START Frame
+
+Signals the beginning of an RTC live stream (sent once after `AT+DOWNLOAD`
+on an RTC session).
+
+```
+[type:1][sid_len:1][session_id:sid_len]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x13` |
+| 1 | 1 | sid_len | Session ID length |
+| 2 | N | session_id | Session ID string (e.g., `"20260326120000"`) |
+
+#### STREAM_DATA Frame
+
+One live Opus frame (20 ms of audio). Same layout as the DATA frame but on
+an independent sequence space. Frames are emitted in capture order; when the
+device is under BLE backpressure it **drops frames instead of blocking**.
+Note that `seq` advances only after a frame is successfully handed to the
+BLE link, so dropped frames do **not** consume sequence numbers: loss shows
+up as missing frames, not as `seq` jumps. Receivers should still treat a
+`seq` discontinuity as a protocol-drift indicator (defensive), not as a
+device-side loss count.
+
+```
+[type:1][seq_lo:1][seq_hi:1][len_lo:1][len_hi:1][payload:N]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x14` |
+| 1 | 2 | seq | Stream sequence number (uint16 LE, starts at 0) |
+| 3 | 2 | len | Payload length (uint16 LE) |
+| 5 | N | payload | One Opus packet |
+
+#### STREAM_END Frame
+
+Signals the end of the RTC stream.
+
+```
+[type:1][reason:1]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x15` |
+| 1 | 1 | reason | `0`=stopped by AT+STOP, `1`=start timeout, `2`=BLE disconnect |
 
 ### 4.4 Transfer Flow
 
@@ -1787,6 +1883,43 @@ When the device is actively recording, the client can start a transfer that cont
 - `clip-web.py` — background sync task when recording starts
 - Both use `SessionSync(continuous=True)`
 
+### 4.8 RTC Live Streaming
+
+RTC mode streams microphone audio live over BLE without writing anything to
+the SD card. It favors low latency over completeness: the device keeps only a
+small bounded queue of encoded frames and drops the oldest ones when the
+consumer is absent or too slow.
+
+**Preconditions:** BLE connected **and** the File Data characteristic CCCD
+subscribed (notify enabled) before `AT+START=RTC`.
+
+**Flow:**
+1. Client connects and subscribes to File Data notifications
+2. `AT+START=RTC` → response carries the session id, mic pipeline starts
+   (device state broadcast: `"STREAMING"`). Frames are encoded immediately
+   but only buffered (bounded, drop-oldest).
+3. `AT+DOWNLOAD=<session_id>` → device **discards** whatever was queued
+   before this point (RTC delivers "now" — pre-DOWNLOAD audio is never
+   sent), sends `STREAM_START`, then `STREAM_DATA` frames in real time
+4. `AT+STOP` → `STREAM_END` (reason 0), session torn down
+
+**Pause/resume:** `AT+PAUSE` discards all buffered data and stops emission
+(the mic pipeline keeps running); `AT+RESUME` continues from the current
+frame. `AT+MARK` is rejected in RTC mode.
+
+**Automatic teardown:** the session aborts itself (event `rtc`/`timeout`) if
+`AT+DOWNLOAD` does not arrive within 5 s of `AT+START=RTC`, or immediately on
+BLE disconnect.
+
+**Notes:**
+- RTC sessions never appear in `AT+LIST` (nothing is stored)
+- The stream shares the File Data characteristic with file transfer; the two
+  are mutually exclusive (a file download cannot run while streaming)
+- Backpressure policy: dropped frames are counted, never retried. Because
+  `seq` only advances on successful send, frame loss appears as missing
+  frames (sequence discontinuities should not occur under current firmware
+  and the reliable BLE link; treat any as protocol drift)
+
 ## 5. State Machines
 
 ### 5.1 Device State Machine
@@ -1801,7 +1934,7 @@ When the device is actively recording, the client can start a transfer that cont
 │  └───────┬──────┘                                          │
 │          │ boot complete                                    │
 │          ▼                                                  │
-│  ┌──────────────┐  AT+START/Long press  ┌──────────┐       │
+│  ┌──────────────┐  AT+START/button RTC   ┌──────────┐       │
 │  │     IDLE     │<────────────────────────│RECORDING │       │
 │  └──┬───┬──────┘                        └─────┬────┘       │
 │     │   │                                      │            │
@@ -1852,7 +1985,7 @@ When the device is actively recording, the client can start a transfer that cont
 │                    Recording State                       │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│   ┌──────────┐   Long press (1s) / AT+START   ┌────────┐│
+│   ┌──────────┐   Button RTC / AT+START        ┌────────┐│
 │   │   IDLE   │ ─────────────────────────────> │RECORDING│
 │   └──────────┘                                  └────┬───┘
 │        ▲                                             │   │
@@ -1865,7 +1998,7 @@ When the device is actively recording, the client can start a transfer that cont
 ```
 
 **Transitions:**
-- IDLE → RECORDING: Long button press OR `AT+START`
+- IDLE → RECORDING: `AT+START`, or long button press starting an RTC session
 - RECORDING → IDLE: Long button press OR `AT+STOP`
 
 **Recording-Specific Actions:**
@@ -2093,7 +2226,8 @@ Sent when recording state changes (start, stop, pause, resume). Uses `"event":"s
 {"event":"state","state":"RECORDING","session":"20240203100000"}
 ```
 
-**Trigger:** Recording starts (AT+START or button long press)
+**Trigger:** Persistent recording starts with `AT+START`; RTC streaming starts
+with `AT+START=rtc` or a button long press from IDLE.
 
 ```json
 {"event":"state","state":"IDLE","session":"20240203100000","duration":600}
@@ -2483,6 +2617,9 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | TRANSFER_DONE | `0x12` | Device→Client | All files complete |
 | AT_RESP | `0x20` | Device→Client | AT command response (JSON) |
 | HEARTBEAT | `0x30` | Client→Device | Keepalive (client-originated) |
+
+> RTC live-stream frames (`0x13`–`0x15`, Section 4.3) are BLE-only and are
+> not defined for the UDP transport.
 
 ### D.3 BLE vs WiFi UDP Comparison
 

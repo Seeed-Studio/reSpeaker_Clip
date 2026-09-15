@@ -79,6 +79,18 @@ void audio_cleanup(void);
 int audio_start_recording(enum audio_mode mode);
 
 /**
+ * @brief Start an RTC (real-time streaming) audio session
+ *
+ * Runs the same pipeline as recording (PDM -> DSP -> Opus) but encoded
+ * frames are only delivered through the registered data callback. Nothing
+ * is written to storage and no session is created on the SD card, so RTC
+ * works even on a full card.
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int audio_start_rtc(void);
+
+/**
  * @brief Stop audio recording
  *
  * @return 0 on success, negative error code on failure
@@ -116,6 +128,13 @@ bool audio_is_paused(void);
  * @return true if recording, false otherwise
  */
 bool audio_is_recording(void);
+
+/**
+ * @brief Check if the active session is an RTC (non-persisted) session
+ *
+ * @return true if recording and the session does not persist to SD
+ */
+bool audio_session_is_rtc(void);
 
 /**
  * @brief Get audio statistics
@@ -168,5 +187,13 @@ int audio_get_energy_level(void);
  * @return 0 on success, negative error code on failure
  */
 int audio_add_bookmark(void);
+
+/**
+ * @brief Free stack bytes of the audio recording thread
+ *
+ * Diagnostic helper: returns the unused stack space of the audio thread,
+ * or 0 if the thread is not running.
+ */
+uint32_t audio_thread_stack_free(void);
 
 #endif /* AUDIO_H */

@@ -105,6 +105,10 @@ static struct storage_file current_storage_file = {0};
 static uint32_t current_file_index = 1;
 static uint32_t file_start_frame_count = 0;
 
+/* False for RTC sessions: the pipeline runs but nothing is written to the
+ * SD card (no session dir, no segment files, no session.json on stop). */
+static bool session_persists = true;
+
 /* Transfer state tracking for dynamic segment duration */
 static bool was_transferring = false;
 
@@ -254,7 +258,10 @@ void audio_cleanup(void)
     audio_stop_recording();
 }
 
-int audio_start_recording(enum audio_mode mode)
+/* Common start path for recording and RTC sessions. Recording persists
+ * segments to the SD card; RTC delivers encoded frames through the data
+ * callback only and never touches storage. */
+static int audio_start_common(enum audio_mode mode, bool persists)
 {
     struct clip_context *c = clip_get_context();
     uint16_t year;
@@ -269,6 +276,8 @@ int audio_start_recording(enum audio_mode mode)
         LOG_WRN("Recording already active");
         return -EBUSY;
     }
+
+    session_persists = persists;
 
     /* Store mode for audio thread */
     current_mode = mode;
@@ -303,6 +312,17 @@ int audio_start_recording(enum audio_mode mode)
 
     LOG_INF("rec start (mode=%d, %s)", mode, current_session_id);
     return 0;
+}
+
+int audio_start_recording(enum audio_mode mode)
+{
+    return audio_start_common(mode, true);
+}
+
+int audio_start_rtc(void)
+{
+    /* RTC: encoded frames go to the stream queue, never to the SD card */
+    return audio_start_common(AUDIO_MODE_MERGE, false);
 }
 
 int audio_stop_recording(void)
@@ -379,6 +399,15 @@ bool audio_is_recording(void)
     return is_active;
 }
 
+bool audio_session_is_rtc(void)
+{
+    k_mutex_lock(&audio_state_mutex, K_FOREVER);
+    bool is_rtc = recording_active && !session_persists;
+    k_mutex_unlock(&audio_state_mutex);
+
+    return is_rtc;
+}
+
 int audio_add_bookmark(void)
 {
     uint32_t recording_sec;
@@ -420,6 +449,17 @@ void audio_register_data_callback(audio_data_callback_t callback, void *user_dat
 {
     data_callback = callback;
     data_callback_user_data = user_data;
+}
+
+uint32_t audio_thread_stack_free(void)
+{
+    size_t unused = 0;
+
+    if (audio_thread_id == NULL ||
+        k_thread_stack_space_get(audio_thread_id, &unused) != 0) {
+        return 0;
+    }
+    return (uint32_t)unused;
 }
 
 const char *audio_get_session_id(void)
@@ -533,7 +573,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
     /* Create storage session + first file — done AFTER mic/opus/dmic init
      * so a failure in those steps doesn't leak an orphan session. */
-    {
+    if (session_persists) {
         uint8_t channels = (mode == AUDIO_MODE_STEREO) ? 2 : 1;
         const char *mode_str = (mode == AUDIO_MODE_STEREO) ? "stereo" : "mono";
         ret = storage_create_session(current_session_id, channels,
@@ -549,6 +589,9 @@ static int audio_start_recording_internal(enum audio_mode mode)
         } else {
             LOG_DBG("Recording to: %s", current_storage_file.filename);
         }
+    } else {
+        /* RTC: no on-card session/file */
+        memset(&current_storage_file, 0, sizeof(current_storage_file));
     }
 
     recording_active = true;
@@ -596,11 +639,16 @@ static int audio_stop_recording_internal(void)
     }
 
     /* Close storage session */
-    duration_sec = stats.recording_time_ms / 1000;
-    ret = storage_close_session(current_session_id, duration_sec, current_file_index);
-    if (ret != 0) {
-        LOG_WRN("Failed to close storage session: %d", ret);
+    if (session_persists) {
+        duration_sec = stats.recording_time_ms / 1000;
+        ret = storage_close_session(current_session_id, duration_sec, current_file_index);
+        if (ret != 0) {
+            LOG_WRN("Failed to close storage session: %d", ret);
+        }
     }
+
+    /* Restore default for the next session */
+    session_persists = true;
 
     /* Sync time baseline so reboot doesn't lose accumulated uptime */
     config_sync_time();
@@ -821,6 +869,14 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                         avg_dsp, stats.frames_encoded);
             }
 
+            /* Deliver the encoded frame to the realtime consumer (RTC).
+             * Runs in this top-priority thread: the callback must be O(1)
+             * (queue push only, never block). */
+            if (data_callback) {
+                data_callback(opus_packet, (size_t)encoded_bytes,
+                              data_callback_user_data);
+            }
+
             /* Calculate energy level for visualization.
              * Skip when BLE vis not subscribed AND display is in REC_DOT
              * (no display animation needs the data). Always calculate when
@@ -849,62 +905,66 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
              * Use different segment durations based on transfer state:
              * - When transferring: shorter segments (CLIP_AUDIO_SEGMENT_DURATION_SYNC)
              * - When not transferring: longer segments (CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC)
+             * Segment management applies only to SD-persisted sessions; RTC
+             * sessions have no files to slice.
              */
-            bool is_transferring = transfer_is_active();
-            uint32_t segment_duration_sec;
+            if (session_persists) {
+                bool is_transferring = transfer_is_active();
+                uint32_t segment_duration_sec;
 
-            if (is_transferring) {
-                segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_SYNC;
-            } else {
-                segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC;
-            }
-
-            /* Calculate frames per file based on current segment duration */
-            uint32_t frames_per_file = segment_duration_sec * (1000 / AUDIO_FRAME_MS);
-
-            /* Check for state transition: not transferring -> transferring
-             * If current file duration exceeds sync segment duration, slice immediately
-             */
-            if (was_transferring == false && is_transferring == true && recording_frame_count > 1) {
-                uint32_t current_file_frames = recording_frame_count - file_start_frame_count;
-                uint32_t sync_frames_per_file = CLIP_AUDIO_SEGMENT_DURATION_SYNC * (1000 / AUDIO_FRAME_MS);
-
-                if (current_file_frames >= sync_frames_per_file) {
-                    /* File exceeds sync duration, slice immediately */
-                    goto create_new_segment;
+                if (is_transferring) {
+                    segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_SYNC;
+                } else {
+                    segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC;
                 }
-            }
 
-            /* Update transfer state tracking */
-            was_transferring = is_transferring;
+                /* Calculate frames per file based on current segment duration */
+                uint32_t frames_per_file = segment_duration_sec * (1000 / AUDIO_FRAME_MS);
 
-            /* Regular segment check based on current segment duration */
-            if (recording_frame_count > 1 && (recording_frame_count - file_start_frame_count) >= frames_per_file) {
+                /* Check for state transition: not transferring -> transferring
+                 * If current file duration exceeds sync segment duration, slice immediately
+                 */
+                if (was_transferring == false && is_transferring == true && recording_frame_count > 1) {
+                    uint32_t current_file_frames = recording_frame_count - file_start_frame_count;
+                    uint32_t sync_frames_per_file = CLIP_AUDIO_SEGMENT_DURATION_SYNC * (1000 / AUDIO_FRAME_MS);
+
+                    if (current_file_frames >= sync_frames_per_file) {
+                        /* File exceeds sync duration, slice immediately */
+                        goto create_new_segment;
+                    }
+                }
+
+                /* Update transfer state tracking */
+                was_transferring = is_transferring;
+
+                /* Regular segment check based on current segment duration */
+                if (recording_frame_count > 1 && (recording_frame_count - file_start_frame_count) >= frames_per_file) {
 create_new_segment:
-                /* Close current file */
-                if (current_storage_file.is_open) {
-                    uint32_t segment_frames = recording_frame_count - file_start_frame_count;
-                    uint32_t segment_bytes = current_storage_file.bytes_written;
+                    /* Close current file */
+                    if (current_storage_file.is_open) {
+                        uint32_t segment_frames = recording_frame_count - file_start_frame_count;
+                        uint32_t segment_bytes = current_storage_file.bytes_written;
 
-                    ret = storage_close_file(&current_storage_file);
-                    if (ret != 0) {
-                        LOG_WRN("Failed to close segment file: %d", ret);
+                        ret = storage_close_file(&current_storage_file);
+                        if (ret != 0) {
+                            LOG_WRN("Failed to close segment file: %d", ret);
+                        }
+
+                        LOG_INF("seg #%u: %u frm %uB %us",
+                                current_file_index, segment_frames, segment_bytes,
+                                segment_duration_sec);
                     }
 
-                    LOG_INF("seg #%u: %u frm %uB %us",
-                            current_file_index, segment_frames, segment_bytes,
-                            segment_duration_sec);
-                }
-
-                /* Create new file */
-                current_file_index++;
-                ret = storage_create_file(&current_storage_file, current_session_id, current_file_index);
-                if (ret != 0) {
-                    LOG_ERR("Failed to create new segment file: %d", ret);
-                    current_file_index--;
-                    /* Continue recording without storage */
-                } else {
-                    file_start_frame_count = recording_frame_count;
+                    /* Create new file */
+                    current_file_index++;
+                    ret = storage_create_file(&current_storage_file, current_session_id, current_file_index);
+                    if (ret != 0) {
+                        LOG_ERR("Failed to create new segment file: %d", ret);
+                        current_file_index--;
+                        /* Continue recording without storage */
+                    } else {
+                        file_start_frame_count = recording_frame_count;
+                    }
                 }
             }
 

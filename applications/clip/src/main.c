@@ -36,6 +36,7 @@
 #include "battery.h"
 #include "haptic.h"
 #include "usb_cdc.h"
+#include "rtc_stream.h"
 
 LOG_MODULE_REGISTER(main, CONFIG_CLIP_LOG_LEVEL);
 
@@ -266,6 +267,13 @@ int clip_init(void)
     if (err) {
         LOG_WRN("Transfer init failed: %d", err);
         /* Continue anyway - transfer is optional */
+    }
+
+    /* Initialize RTC streaming (registers the audio data callback) */
+    err = rtc_stream_init();
+    if (err) {
+        LOG_WRN("RTC stream init failed: %d", err);
+        /* Continue anyway - RTC is optional */
     }
 
     /* Initialize WiFi subsystem */
