@@ -68,6 +68,12 @@ async with ClipClient(UdpTransport()) as clip:
     print(await clip.storage())
 ```
 
-More detail is in [docs/architecture.md](docs/architecture.md) and
-[docs/api.md](docs/api.md).  Direct-run utilities are in
-[tools/README.md](tools/README.md).
+## Documentation
+
+- [Quick start](docs/quickstart.md) — install, first connection, record & download
+- [API reference](docs/api.md) — every client method, model, and exception
+- [File transfers](docs/transfers.md) — streaming, CRC32, resume, cancel
+- [Wi-Fi AP](docs/wifi.md) — credentials, channel/regdomain, BLE → Wi-Fi handoff
+- [Troubleshooting](docs/troubleshooting.md) — desync, pairing, UDP, recovery
+- [Architecture](docs/architecture.md) — design notes; direct-run utilities in
+  [tools/README.md](tools/README.md)
