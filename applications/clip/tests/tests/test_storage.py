@@ -102,14 +102,6 @@ class TestDeleteSession:
 class TestPurgeSessions:
     """Test purging all sessions."""
 
-    async def test_purge_all_sessions(self, commands: ClipCommands):
-        """Should delete all sessions."""
-        # WARNING: This is destructive!
-        # Only run this if we have test sessions
-
-        # For safety, we'll skip this in automated tests
-        pytest.skip("Destructive operation - requires manual testing")
-
     async def test_purge_empty_storage(self, commands: ClipCommands):
         """Should handle purge when storage is empty."""
         # If we purge twice, the second should succeed but do nothing

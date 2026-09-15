@@ -293,14 +293,11 @@ async def cmd_config(device, args):
     if args.action == "get":
         if args.key:
             cmd_map = {
-                "bitrate": "AT+BITRATE?",
                 "mode": "AT+MODE?",
-                "complexity": "AT+COMPLEXITY?",
-                "chunk_size": "AT+CHUNKSIZE?",
-                "noise": "AT+NOISE?",
-                "agc": "AT+AGC?",
-                "dereverb": "AT+DEREVERB?",
                 "autodel": "AT+AUTODEL?",
+                "brightness": "AT+BRIGHTNESS?",
+                "wificfg": "AT+WIFICFG?",
+                "log": "AT+LOG?",
             }
             cmd = cmd_map.get(args.key)
             if not cmd:
@@ -321,14 +318,11 @@ async def cmd_config(device, args):
             return 1
         key, _, value = args.key_value.partition("=")
         cmd_map = {
-            "bitrate": f"AT+BITRATE={value}",
             "mode": f"AT+MODE={value}",
-            "complexity": f"AT+COMPLEXITY={value}",
-            "chunk_size": f"AT+CHUNKSIZE={value}",
-            "noise": f"AT+NOISE={value}",
-            "agc": f"AT+AGC={value}",
-            "dereverb": f"AT+DEREVERB={value}",
             "autodel": f"AT+AUTODEL={value}",
+            "brightness": f"AT+BRIGHTNESS={value}",
+            "name": f"AT+NAME={value}",
+            "log": f"AT+LOG={value}",
         }
         cmd = cmd_map.get(key)
         if not cmd:

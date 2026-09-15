@@ -308,7 +308,7 @@ class TestMyFeature:
         """Test with state restoration."""
         async with saved_state:
             # Modify config here
-            await commands.set_bitrate(48000)
+            await commands.set_mode("enhanced")
             # Config is automatically restored
 ```
 

@@ -98,14 +98,8 @@ def mock_commands(mock_device):
     mock.get_state = AsyncMock()
     mock.get_time = AsyncMock(return_value=1700000000)
     mock.set_time = AsyncMock(return_value=True)
-    mock.get_bitrate = AsyncMock(return_value=32000)
-    mock.set_bitrate = AsyncMock(return_value=True)
     mock.get_mode = AsyncMock(return_value="normal")
     mock.set_mode = AsyncMock(return_value=True)
-    mock.get_complexity = AsyncMock(return_value=5)
-    mock.set_complexity = AsyncMock(return_value=True)
-    mock.get_chunk_size = AsyncMock(return_value=500)
-    mock.set_chunk_size = AsyncMock(return_value=True)
     mock.ensure_idle = AsyncMock()
     mock.wait_for_recording_to_start = AsyncMock(return_value=True)
     mock.wait_for_recording_to_stop = AsyncMock(return_value=True)
@@ -183,7 +177,7 @@ async def saved_state(commands: ClipCommands) -> SavedState:
         async def test_something(commands, saved_state):
             async with saved_state:
                 # Modify config here
-                await commands.set_bitrate(64000)
+                await commands.set_mode("enhanced")
             # Config is automatically restored
     """
     return SavedState(commands)
