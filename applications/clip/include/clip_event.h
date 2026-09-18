@@ -71,6 +71,16 @@ int clip_post_event_sync(enum clip_event event,
 enum clip_state clip_event_get_state(void);
 
 /**
+ * @brief True while an MCUmgr DFU upload is in progress (set at DFU
+ *        STARTED, cleared only by reboot after the swap).
+ *
+ * NOTE: the state machine stays in its current state during OTA —
+ * CLIP_STATE_OTA is not entered via the transition table — so input
+ * gating must use this flag, not the state.
+ */
+bool clip_event_ota_in_progress(void);
+
+/**
  * @brief Initialize the event dispatcher
  */
 int clip_event_init(void);

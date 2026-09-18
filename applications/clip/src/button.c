@@ -29,17 +29,46 @@ static atomic_t poweroff_screen_active = ATOMIC_INIT(0);
 /* Track if recording was stopped by long press (skip RELEASE action) */
 static atomic_t recording_stopped = ATOMIC_INIT(0);
 
+/* Shutdown in progress (set at POWER_OFF_EXEC entry): ignore ALL input.
+ * The shutdown sequence runs hundreds of ms; presses during it used to
+ * pop the status bar over the power-off screen or even race a START
+ * before ship mode cut power. Cleared only by reboot. */
+static atomic_t shutdown_lockout = ATOMIC_INIT(0);
+
 static void button_event_callback(const struct device *dev, enum button_action action)
 {
     ARG_UNUSED(dev);
     enum clip_state state = clip_event_get_state();
+
+    /* Firmware upgrade in progress: ignore ALL button input. NOTE: the
+     * state machine does NOT enter CLIP_STATE_OTA during upload (the
+     * transition table keeps the current state), so this must check the
+     * DFU flag — a state check here never fires. Blocks the unguarded
+     * 3 s power-off path (would abort the update mid-upload/swap) and
+     * UI switches away from the progress screen. */
+    if (clip_event_ota_in_progress()) {
+        return;
+    }
+
+    /* Shutdown committed: ignore everything. */
+    if (atomic_get(&shutdown_lockout)) {
+        return;
+    }
+
+    /* Power-off screen pending (3 s hold reached, waiting for the
+     * confirming release): ignore everything except that RELEASE, so
+     * noise during the hold can't switch the UI away from the
+     * confirmation screen. */
+    if (atomic_get(&poweroff_screen_active) && action != BUTTON_RELEASE) {
+        return;
+    }
 
     switch (action) {
     case BUTTON_SINGLE_CLICK:
         if (state == CLIP_STATE_RECORDING || state == CLIP_STATE_PAUSED) {
             clip_post_event(CLIP_EVENT_MARK);  /* MARK event handler vibrates */
         } else if (state == CLIP_STATE_IDLE || state == CLIP_STATE_ERROR
-                   || state == CLIP_STATE_WIFI_SYNC || state == CLIP_STATE_OTA) {
+                   || state == CLIP_STATE_WIFI_SYNC) {
             clip_post_event(CLIP_EVENT_STATUS_SHOW);
         }
         break;
@@ -81,7 +110,6 @@ static void button_event_callback(const struct device *dev, enum button_action a
 	break;
 
     case BUTTON_RELEASE:
-	LOG_INF("RELEASE, state=%d, poweroff=%ld", state, atomic_get(&poweroff_screen_active));
 	if (atomic_cas(&poweroff_screen_active, 1, 0)) {
 	    clip_post_event(CLIP_EVENT_POWER_OFF_EXEC);
 	} else if (atomic_cas(&recording_stopped, 1, 0)) {
@@ -107,6 +135,11 @@ static void button_event_callback(const struct device *dev, enum button_action a
     if (button_cb) {
         button_cb(action, button_user_data);
     }
+}
+
+void button_shutdown_lockout(void)
+{
+    atomic_set(&shutdown_lockout, 1);
 }
 
 int button_init(void)

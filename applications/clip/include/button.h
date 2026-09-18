@@ -30,6 +30,13 @@ typedef void (*button_callback_t)(enum button_action action, void *user_data);
 int button_init(void);
 
 /**
+ * @brief Ignore all button input from now on (shutdown committed).
+ *
+ * Called at POWER_OFF_EXEC entry; only a reboot clears it.
+ */
+void button_shutdown_lockout(void);
+
+/**
  * @brief Register button event callback
  *
  * @param callback Callback function
