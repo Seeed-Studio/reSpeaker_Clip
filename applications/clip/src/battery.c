@@ -129,6 +129,7 @@ struct fg_state_record {
 static struct fg_state_record fg_state_record;
 static bool fg_state_loaded;
 static uint8_t last_saved_soc = 255U;  /* last SoC% persisted (255 = force first save) */
+static atomic_t last_fg_save_ms = ATOMIC_INIT(INT_MIN); /* 0.1s ticks, see battery_fg_state_age_ms */
 
 /* Directional-smoothed display SoC. Persisted across reboot so it resumes from
  * the value shown before reboot (no cross-reboot lag accumulation). 0xFF means
@@ -268,12 +269,28 @@ static void battery_save_fg_state_unlocked(void)
 		LOG_WRN("fg_state save failed: %d", ret);
 	} else {
 		fg_state_loaded = true;
+		/* Stamp in 0.1 s ticks (atomic_t is 32-bit; raw uptime ms would
+		 * overflow it). battery_fg_state_age_ms() uses this to skip
+		 * redundant synchronous saves. */
+		atomic_set(&last_fg_save_ms, (int32_t)(k_uptime_get_32() / 100));
 	}
 }
 
 /* Public: serializes against the battery poll (battery_mutex) so the gauge
  * state_get here can't race nrf_fuel_gauge_process() on another thread. Safe
  * to call from any context (e.g. the power-off work item). */
+int64_t battery_fg_state_age_ms(void)
+{
+	/* Time since the last completed fg-state save (INT64_MAX-ish when
+	 * never). Callers use this to skip a redundant synchronous save
+	 * when a recent one already persisted the state. */
+	int32_t stamp = atomic_get(&last_fg_save_ms);
+	if (stamp == (int32_t)INT_MIN) {
+		return INT64_MAX;
+	}
+	return (int64_t)(k_uptime_get_32() - (uint32_t)stamp * 100U);
+}
+
 void battery_save_fg_state(void)
 {
 	k_mutex_lock(&battery_mutex, K_FOREVER);

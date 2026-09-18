@@ -19,6 +19,12 @@
 int battery_init(void);
 
 /**
+ * @brief Milliseconds since the fuel-gauge state was last persisted
+ *        (INT64_MAX when never). Lets shutdown skip a redundant save.
+ */
+int64_t battery_fg_state_age_ms(void);
+
+/**
  * @brief Poll battery status immediately
  *
  * Reads sensors, updates fuel gauge SoC, and refreshes display/BLE.
