@@ -210,7 +210,6 @@ int usb_cdc_init(void)
 	k_work_init_delayable(&usb_timeout_work, usb_timeout_handler);
 
 	/* USB starts disabled; use AT+USB=on to enable */
-	LOG_INF("USB CDC+MSC initialized (disabled)");
 	return 0;
 }
 
