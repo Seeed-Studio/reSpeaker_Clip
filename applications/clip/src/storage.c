@@ -268,23 +268,40 @@ int storage_init(void)
     const struct device *ldo2 = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldo2));
     if (device_is_ready(ldo2)) {
         regulator_enable(ldo2);
-        k_msleep(10);
+        k_msleep(20);
     }
 
     LOG_INF("SD init");
 
-    /* Initialize SD card */
-    rc = disk_access_init("SD");
-    if (rc != 0)
-    {
-        LOG_WRN("SD init failed: %d", rc);
-        return rc;
-    }
+    /* Card power-up race: the LDO2 ramp plus the card's internal init
+     * can exceed the settle delay on some cards / temperatures. A boot
+     * mount failure here is expensive — recording must then lazily
+     * remount, and the one-shot boot-time unsynced-audio check in
+     * main() is skipped entirely (the UI then misses existing
+     * recordings until the next reboot). Retry with a growing delay. */
+    for (int attempt = 1;; attempt++) {
+        /* Initialize SD card */
+        rc = disk_access_init("SD");
+        if (rc != 0) {
+            if (attempt < 4) {
+                LOG_WRN("SD init failed: %d (attempt %d)", rc, attempt);
+                k_msleep(100 * attempt);
+                continue;
+            }
+            LOG_WRN("SD init failed: %d", rc);
+            return rc;
+        }
 
-    /* Mount filesystem */
-    rc = fs_mount(&mp);
-    if (rc != 0)
-    {
+        /* Mount filesystem */
+        rc = fs_mount(&mp);
+        if (rc == 0) {
+            break;
+        }
+        if (attempt < 4) {
+            LOG_WRN("SD mount failed: %d (attempt %d)", rc, attempt);
+            k_msleep(100 * attempt);
+            continue;
+        }
         LOG_WRN("SD mount failed: %d", rc);
         sd_mounted = false;
         return rc;
