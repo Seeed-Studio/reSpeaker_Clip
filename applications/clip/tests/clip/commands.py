@@ -107,18 +107,24 @@ class BookmarkInfo:
 
 @dataclass
 class BatteryStatus:
-    """Battery status information."""
+    """Battery status information (AT+BATT)."""
     percent: int
     charging: bool
     voltage: Optional[float] = None
+    voltage_mv: Optional[int] = None
+    temp_c: Optional[int] = None
 
     @classmethod
     def from_response(cls, response: dict) -> 'BatteryStatus':
         data = response.get('data', response)
+        voltage_mv = data.get('voltage')
+        temp_c = data.get('temp')
         return cls(
-            percent=data.get('percent', data.get('battery', 0)),
+            percent=data.get('battery', data.get('percent', 0)),
             charging=data.get('charging', False),
-            voltage=data.get('voltage'),
+            voltage=(voltage_mv / 1000.0) if isinstance(voltage_mv, (int, float)) else None,
+            voltage_mv=voltage_mv,
+            temp_c=temp_c,
         )
 
 
@@ -248,29 +254,6 @@ class ClipCommands:
 
     # ==================== Configuration Commands ====================
 
-    async def get_bitrate(self) -> int:
-        """
-        Get current Opus bitrate.
-
-        Returns:
-            Bitrate in bps
-        """
-        response = await self._send_and_check("AT+BITRATE?")
-        return response.get('value', 32000)
-
-    async def set_bitrate(self, bitrate: int) -> bool:
-        """
-        Set Opus bitrate.
-
-        Args:
-            bitrate: Bitrate in bps (typically 16000-64000)
-
-        Returns:
-            True if successful
-        """
-        await self._send_and_check(f"AT+BITRATE={bitrate}")
-        return True
-
     async def get_mode(self) -> str:
         """
         Get current audio mode.
@@ -299,146 +282,6 @@ class ClipCommands:
         await self._send_and_check(f"AT+MODE={mode}")
         return True
 
-    async def get_complexity(self) -> int:
-        """
-        Get Opus complexity setting.
-
-        Returns:
-            Complexity value (0-10)
-        """
-        response = await self._send_and_check("AT+COMPLEXITY?")
-        return response.get('value', 5)
-
-    async def set_complexity(self, complexity: int) -> bool:
-        """
-        Set Opus complexity.
-
-        Args:
-            complexity: Complexity value (0-10)
-
-        Returns:
-            True if successful
-        """
-        if not 0 <= complexity <= 10:
-            raise ValueError("Complexity must be 0-10")
-        await self._send_and_check(f"AT+COMPLEXITY={complexity}")
-        return True
-
-    async def get_chunk_size(self) -> int:
-        """
-        Get BLE transfer chunk size.
-
-        Returns:
-            Chunk size in bytes
-        """
-        response = await self._send_and_check("AT+CHUNKSIZE?")
-        return response.get('value', 500)
-
-    async def set_chunk_size(self, size: int) -> bool:
-        """
-        Set BLE transfer chunk size.
-
-        Args:
-            size: Chunk size in bytes (typically 200-1000)
-
-        Returns:
-            True if successful
-        """
-        await self._send_and_check(f"AT+CHUNKSIZE={size}")
-        return True
-
-    # Noise suppression (if supported)
-    async def get_noise_suppression(self) -> int:
-        """
-        Get noise suppression level.
-
-        Returns:
-            Noise suppression level in dB (0-60)
-        """
-        response = await self._send_and_check("AT+NOISE?")
-        # Firmware returns {"ok":true,"data":{"value":N}}
-        data = response.get('data', {})
-        return data.get('value', response.get('value', 0))
-
-    async def set_noise_suppression(self, level: int) -> bool:
-        """
-        Set noise suppression level.
-
-        Args:
-            level: Noise suppression level in dB (0-60)
-
-        Returns:
-            True if successful
-        """
-        await self._send_and_check(f"AT+NOISE={level}")
-        return True
-
-    # AGC (if supported)
-    async def get_agc(self) -> bool:
-        """
-        Get AGC enabled state.
-
-        Returns:
-            True if AGC is enabled
-        """
-        response = await self._send_and_check("AT+AGC?")
-        # Firmware returns {"ok":true,"data":{"enabled":true/false,"target":N}}
-        data = response.get('data', {})
-        enabled = data.get('enabled', response.get('value', False))
-        # Handle string boolean from JSON
-        if isinstance(enabled, str):
-            return enabled.lower() == 'true'
-        return bool(enabled)
-
-    async def set_agc(self, enabled: bool, target: int = 0) -> bool:
-        """
-        Enable/disable AGC.
-
-        Args:
-            enabled: True to enable AGC
-            target: Target level in dB (0-30, default 0)
-
-        Returns:
-            True if successful
-        """
-        value = "on" if enabled else "off"
-        await self._send_and_check(f"AT+AGC={value},{target}")
-        return True
-
-    # Dereverb (if supported)
-    async def get_dereverb(self) -> bool:
-        """
-        Get dereverb enabled state.
-
-        Returns:
-            True if dereverb is enabled
-        """
-        response = await self._send_and_check("AT+DEREVERB?")
-        # Firmware returns {"ok":true,"data":{"enabled":true/false,"level":N,"decay":M}}
-        data = response.get('data', {})
-        enabled = data.get('enabled', response.get('value', False))
-        # Handle string boolean from JSON
-        if isinstance(enabled, str):
-            return enabled.lower() == 'true'
-        return bool(enabled)
-
-    async def set_dereverb(self, enabled: bool, level: int = 5, decay: int = 0) -> bool:
-        """
-        Enable/disable dereverb.
-
-        Args:
-            enabled: True to enable dereverb
-            level: Dereverb level (0-10, default 5)
-            decay: Decay value (0-5, default 0)
-
-        Returns:
-            True if successful
-        """
-        value = "on" if enabled else "off"
-        await self._send_and_check(f"AT+DEREVERB={value},{level},{decay}")
-        return True
-
-    # Auto-delete (if supported)
     async def get_auto_delete(self) -> bool:
         """
         Get auto-delete enabled state.
@@ -775,16 +618,6 @@ class ClipCommands:
         await self._send_and_check(f"AT+DELETE={session_id}")
         return True
 
-    async def purge_all_sessions(self) -> bool:
-        """
-        Delete all recording sessions.
-
-        Returns:
-            True if successful
-        """
-        await self._send_and_check("AT+PURGE")
-        return True
-
     async def format_sd_card(self) -> bool:
         """
         Format the SD card.
@@ -806,40 +639,10 @@ class ClipCommands:
         Returns:
             BatteryStatus with percent, charging, and voltage
         """
-        response = await self._send_and_check("AT+BATTERY?")
+        response = await self._send_and_check("AT+BATT?")
         return BatteryStatus.from_response(response)
 
     # ==================== Transfer Control ====================
-
-    async def get_progress(self) -> Dict[str, Any]:
-        """
-        Get file transfer progress.
-
-        Returns:
-            Dict with progress information
-        """
-        response = await self._send_and_check("AT+PROGRESS")
-        return response.get('data', {})
-
-    async def pause_transfer(self) -> bool:
-        """
-        Pause current file transfer.
-
-        Returns:
-            True if successful
-        """
-        await self._send_and_check("AT+PAUSE")
-        return True
-
-    async def resume_transfer(self) -> bool:
-        """
-        Resume paused file transfer.
-
-        Returns:
-            True if successful
-        """
-        await self._send_and_check("AT+RESUME")
-        return True
 
     async def cancel_transfer(self) -> bool:
         """
@@ -983,13 +786,7 @@ class ClipCommands:
             Dict with all configuration values
         """
         return {
-            'bitrate': await self.get_bitrate(),
             'mode': await self.get_mode(),
-            'complexity': await self.get_complexity(),
-            'chunk_size': await self.get_chunk_size(),
-            'noise_suppression': await self.get_noise_suppression(),
-            'agc': await self.get_agc(),
-            'dereverb': await self.get_dereverb(),
             'auto_delete': await self.get_auto_delete(),
             'brightness': await self.get_brightness(),
         }
@@ -1003,15 +800,10 @@ class ClipCommands:
             ignore_errors: If True, continue on individual errors (useful for restore)
 
         Note:
-            - agc: Use boolean (True/False) to enable/disable
-            - dereverb: Use boolean (True/False) to enable/disable
             - auto_delete: Use boolean (True/False) to enable/disable, or integer for days
-            - Mode is set FIRST before bitrate (bitrate range depends on mode)
+            - Unknown keys (from older SDK saves) are ignored
         """
-        # Order matters: set mode before bitrate (bitrate range depends on mode)
-        order = ['mode', 'bitrate', 'complexity', 'chunk_size',
-                 'noise_suppression', 'agc', 'dereverb', 'auto_delete',
-                 'brightness', 'name']
+        order = ['mode', 'auto_delete', 'brightness', 'name']
 
         for key in order:
             if key not in config:
@@ -1021,25 +813,6 @@ class ClipCommands:
             try:
                 if key == 'mode':
                     await self.set_mode(value)
-                elif key == 'bitrate':
-                    await self.set_bitrate(value)
-                elif key == 'complexity':
-                    await self.set_complexity(value)
-                elif key == 'chunk_size':
-                    await self.set_chunk_size(value)
-                elif key == 'noise_suppression':
-                    await self.set_noise_suppression(value)
-                elif key == 'agc':
-                    # value can be boolean or integer (for target level)
-                    if isinstance(value, bool):
-                        await self.set_agc(value)
-                    elif isinstance(value, int):
-                        await self.set_agc(True, target=value)
-                    else:
-                        await self.set_agc(value[0], target=value[1])
-                elif key == 'dereverb':
-                    # value is boolean to enable/disable
-                    await self.set_dereverb(bool(value))
                 elif key == 'auto_delete':
                     # value can be boolean (True=7 days, False=off) or integer (days)
                     if isinstance(value, bool):
@@ -1147,6 +920,98 @@ class ClipCommands:
             'ssid': data.get('ssid', ''),
             'clients': data.get('clients', 0),
         }
+
+    async def get_wifi_config(self) -> Dict[str, Any]:
+        """
+        Get the stored WiFi AP channel and regulatory domain (AT+WIFICFG?).
+
+        Returns:
+            Dict with 'channel' (int) and 'reg_domain' (2-letter country code)
+        """
+        response = await self._send_and_check("AT+WIFICFG?")
+        data = response.get('data', {})
+        return {
+            'channel': data.get('channel', 0),
+            'reg_domain': data.get('reg_domain', ''),
+        }
+
+    async def set_wifi_config(self, channel: int, reg_domain: str) -> bool:
+        """
+        Set the WiFi AP channel and regulatory domain (AT+WIFICFG=<ch>:<CC>).
+
+        Persisted immediately; applied on the next WiFi start (turn the AP
+        off/on to take effect).
+
+        Args:
+            channel: 1-13 (2.4 GHz) or 36-165 (5 GHz)
+            reg_domain: 2-letter country code, e.g. "US", "CN"
+
+        Returns:
+            True on success
+        """
+        if not ((1 <= channel <= 13) or (36 <= channel <= 165)):
+            raise ValueError(f"invalid channel {channel}: 1-13 (2.4G) or 36-165 (5G)")
+        reg_domain = reg_domain.upper()
+        if len(reg_domain) != 2 or not reg_domain.isalpha():
+            raise ValueError(f"invalid reg_domain {reg_domain!r}: 2-letter country code")
+        await self._send_and_check(f"AT+WIFICFG={channel}:{reg_domain}")
+        return True
+
+    # ==================== System / Power / Maintenance ====================
+
+    async def power_off(self) -> None:
+        """Power the device off (AT+POWEROFF). The BLE link drops."""
+        await self._send_and_check("AT+POWEROFF")
+
+    async def enter_dfu(self) -> None:
+        """Reboot into MCUboot serial-recovery / DFU mode (AT+DFU).
+
+        The BLE link drops; the device re-enumerates on USB with PID 0x8069.
+        """
+        await self._send_and_check("AT+DFU")
+
+    async def factory_reset(self) -> bool:
+        """Factory reset (AT+FACTORY=confirm).
+
+        Clears app config, formats the SD card (all recordings), clears BLE
+        bonds, then reboots. A failed SD format is reported by the firmware
+        in the response message.
+        """
+        response = await self._send_and_check("AT+FACTORY=confirm")
+        return bool(response.get('ok', False))
+
+    async def pair_reset(self) -> bool:
+        """Clear BLE bonds and the SD card (AT+PAIR=reset), then reboot."""
+        response = await self._send_and_check("AT+PAIR=reset")
+        return bool(response.get('ok', False))
+
+    async def get_storage_info(self) -> Dict[str, Any]:
+        """SD storage statistics (AT+STORAGE?).
+
+        Returns dict with mounted, total_mb, free_mb, used_mb, used_pct,
+        recorded_mb. Values are live when mounted, last-known (cached) while
+        the idle power-gate has the card unmounted.
+        """
+        response = await self._send_and_check("AT+STORAGE?")
+        return response.get('data', {})
+
+    async def get_log_level(self) -> str:
+        """SD log backend level (AT+LOG?) -> 'off' | 'info' | 'debug'."""
+        response = await self._send_and_check("AT+LOG?")
+        return response.get('data', {}).get('log', 'off')
+
+    async def set_log_level(self, mode: str) -> bool:
+        """Set SD log backend level (AT+LOG=off|info|debug)."""
+        mode = mode.lower()
+        if mode not in ('off', 'info', 'debug'):
+            raise ValueError(f"invalid log mode {mode!r}: off, info or debug")
+        await self._send_and_check(f"AT+LOG={mode}")
+        return True
+
+    async def get_user_name(self) -> str:
+        """User-defined device name (AT+NAME?), '' if unset."""
+        response = await self._send_and_check("AT+NAME?")
+        return response.get('data', {}).get('name', '')
 
     # ==================== USB Commands ====================
 

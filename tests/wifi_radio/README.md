@@ -14,7 +14,7 @@ Based on the Nordic WiFi radio test sample, this firmware provides shell command
 ## Build
 
 ```sh
-source ~/ncs/v3.2.1/zephyr/zephyr-env.sh
+source ~/ncs/v3.3.0/zephyr/zephyr-env.sh
 export ZEPHYR_EXTRA_MODULES=$(pwd)
 west build --build-dir build-wifi-radio --pristine --board clip/nrf5340/cpuapp tests/wifi_radio
 ```
@@ -24,6 +24,12 @@ west build --build-dir build-wifi-radio --pristine --board clip/nrf5340/cpuapp t
 ```sh
 west flash --build-dir build-wifi-radio && nrfutil device reset
 ```
+
+> **No MCUboot**: this is factory/cert firmware. `sysbuild.conf` sets
+> `SB_CONFIG_BOOTLOADER_NONE=y` (plus `SB_CONFIG_SECURE_BOOT_NETCORE=n`,
+> `SB_CONFIG_NETCORE_NONE=y`, and `SB_CONFIG_PARTITION_MANAGER=n`, so the
+> image links at 0x0), which means the image is flashed **directly via
+> J-Link** — no bootloader, no OTA slots, no signing.
 
 ## Shell Access
 
@@ -123,7 +129,7 @@ uart:~$ wifi_radio_ficr_prog write <address> <val>  # Write OTP register
 - **Build errors**: Ensure `ZEPHYR_EXTRA_MODULES` points to the Clip project root
 - **Flash fails**: Try `nrfutil device recover` to unlock the device
 - **Radio init fails ("Configuration init failed")**: Board without OTP MAC address needs `CONFIG_WIFI_RANDOM_MAC_ADDRESS=y`
-- **OTP not ready**: Use `tests/otp` tool to program nRF70 OTP MAC address first
+- **OTP not ready**: the `wifi_radio_ficr_prog` shell commands in this firmware (see [FICR Programming](#ficr-programming) above) program the nRF70 OTP MAC address
 
 ## References
 

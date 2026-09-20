@@ -79,4 +79,5 @@ asyncio.run(main())
 ## See Also
 
 - [EXAMPLES.md](EXAMPLES.md) - Detailed usage examples
-- [docs/protocol.md](../../docs/protocol.md) - AT command protocol
+- [docs/testing.md](docs/testing.md) - Testing guide (pytest, markers, fixtures)
+- [docs/protocol.md](../../../docs/protocol.md) - AT command protocol

@@ -201,7 +201,7 @@ class TestDataClasses:
             'data': {
                 'percent': 75,
                 'charging': True,
-                'voltage': 4.1,
+                'voltage': 4100,
             }
         }
 
@@ -209,7 +209,7 @@ class TestDataClasses:
 
         assert battery.percent == 75
         assert battery.charging is True
-        assert battery.voltage == 4.1
+        assert battery.voltage == 4.1      # volts (firmware reports mV)
 
     def test_battery_status_from_flat_response(self):
         """Should handle flat response structure."""

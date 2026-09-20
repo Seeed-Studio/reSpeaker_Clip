@@ -41,12 +41,6 @@ class TestFileTransfer:
         for f in files:
             assert f.endswith('.opus')
 
-    async def test_get_progress(self, commands: ClipCommands):
-        """Should get transfer progress."""
-        progress = await commands.get_progress()
-
-        assert isinstance(progress, dict)
-
     async def test_transfer_with_files(self, commands: ClipCommands, output_dir):
         """Should download a file when sessions exist."""
         sessions = await commands.list_sessions()
@@ -132,17 +126,6 @@ class TestSessionDownload:
 @pytest.mark.slow
 class TestTransferControl:
     """Test transfer pause/resume/cancel."""
-
-    async def test_pause_transfer(self, commands: ClipCommands):
-        """Should pause active transfer."""
-        # This requires an active transfer
-        # Hard to test in isolation
-        pass
-
-    async def test_resume_transfer(self, commands: ClipCommands):
-        """Should resume paused transfer."""
-        # This requires a paused transfer
-        pass
 
     async def test_cancel_transfer(self, commands: ClipCommands):
         """Should cancel active transfer."""

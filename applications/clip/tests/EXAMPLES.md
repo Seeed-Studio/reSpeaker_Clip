@@ -173,12 +173,10 @@ if sync.connect():
 ```python
 # Individual getters/setters
 await cmds.set_mode("enhanced")
-await cmds.set_bitrate(32000)
-await cmds.set_complexity(5)
-await cmds.set_noise_suppression(30)
+await cmds.set_mode("enhanced")   # normal | enhanced (governs bitrate/complexity)
 
 mode = await cmds.get_mode()
-bitrate = await cmds.get_bitrate()
+mode = await cmds.get_mode()
 
 # Batch get/set
 config = await cmds.get_config_dict()
@@ -365,7 +363,7 @@ async def record_and_sync():
 
         # Configure
         await cmds.set_mode("normal")
-        await cmds.set_bitrate(32000)
+        await cmds.set_mode("enhanced")
 
         # Record for 30 seconds
         session_id = await cmds.start_recording("normal")

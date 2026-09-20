@@ -13,7 +13,7 @@ WiFi AP Configuration:
 
 Usage:
     # Connect to WiFi AP first, then:
-    python tests/tools/udp_terminal.py [--host 192.168.4.1] [--port 8080]
+    python tests/tools/udp_terminal.py [--host 192.168.4.1] [--port 8089]
 """
 
 import asyncio
@@ -26,7 +26,7 @@ from pathlib import Path
 class UDPTerminal:
     """Interactive UDP terminal for AT commands."""
 
-    def __init__(self, host: str = "192.168.4.1", port: int = 8080, timeout: float = 2.0):
+    def __init__(self, host: str = "192.168.4.1", port: int = 8089, timeout: float = 2.0):
         self.host = host
         self.port = port
         self.timeout = timeout
