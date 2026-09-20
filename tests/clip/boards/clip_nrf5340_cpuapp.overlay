@@ -24,6 +24,20 @@
 	regulator-always-on;
 };
 
+/* SPI flash power (P0.27). With CONFIG_PM_DEVICE_RUNTIME the boot-on regulator
+ * gets runtime-suspended before spi_nor probes the chip -> JEDEC read fails ->
+ * "SPI flash not ready" + LittleFS mount fails (-19). Keep it asserted for the
+ * whole test session. */
+&flash_vdd {
+	regulator-always-on;
+	/* Unlike applications/clip (which runs under MCUboot, and MCUboot reads
+	 * the app image from this flash so the chip is already powered/settled by
+	 * the time the app probes it), this no-MCUboot image probes the flash at
+	 * boot within microseconds of asserting VDD -> JEDEC read returns 00 00 00
+	 * (chip still in power-on reset, tPUW ~10 ms). Wait it out. */
+	startup-delay-us = <10000>;
+};
+
 / {
 	/* Point the generic filesystem shell at the external LittleFS partition.
 	 * The test image has Partition Manager disabled, so its partition node is

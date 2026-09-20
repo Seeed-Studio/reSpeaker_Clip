@@ -593,11 +593,30 @@ int pmic_charger_set(bool enable)
 	return ret;
 }
 
+int pmic_display_work_stop(void)
+{
+	struct k_work_sync sync;
+
+	/* Stop the 1 s battery/OLED refresh so it stops waking the CPU every
+	 * second and stops writing to a suspended I2C2 / unpowered OLED.
+	 * Same cancellation pmic_enter_ship_mode() uses. */
+	return k_work_cancel_delayable_sync(&battery_display_work, &sync);
+}
+
 static int pmic_enter_ship_mode(void)
 {
+	struct k_work_sync sync;
+
 	if (!device_is_ready(pmic_regulators)) {
 		return -ENODEV;
 	}
+
+	/* Stop the 1 s battery/OLED refresh so it stops reading the dying fuel
+	 * gauge ("Battery sensor read failed: -5" spam) and stops writing garbage
+	 * to the OLED as I2C2 loses power. Mirrors the app's clean power-off
+	 * (applications/clip clip_event.c POWER_OFF_EXEC). */
+	(void)k_work_cancel_delayable_sync(&battery_display_work, &sync);
+	oled_test_clear();
 
 	(void)pmic_battery_state_save();
 	LOG_INF("Entering ship mode (power off)...");

@@ -7,5 +7,6 @@
 #define USB_H_
 
 int usb_msc_init(void);
+int usb_msc_disable(void); /* Disable the USB device (no SD remount); for SYSTEM OFF */
 
 #endif /* USB_H_ */

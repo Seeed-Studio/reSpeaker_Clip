@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "wifi.h"
+#include "identity.h"
 
 #ifdef CONFIG_NRF70_SR_COEX
 #include <coex.h>
@@ -68,19 +69,10 @@ static void wifi_ready_callback(bool ready)
 
 static void generate_ap_ssid(void)
 {
-	uint8_t chip_id[16];
-	ssize_t len = hwinfo_get_device_id(chip_id, sizeof(chip_id));
-
-	if (len > 0) {
-		uint32_t suffix = 0;
-		int off = len > 4 ? len - 4 : 0;
-
-		for (int i = 0; i < 4 && (off + i) < len; i++) {
-			suffix = (suffix << 8) | chip_id[off + i];
-		}
-		snprintf(ap_ssid, sizeof(ap_ssid), "%s%04X",
-			 WIFI_AP_SSID_PREFIX, (unsigned)(suffix & 0xFFFF));
-	}
+	/* AP SSID shares the per-device chip suffix with the BLE name
+	 * (see identity.c) so a产测 host can lock a board by either. */
+	strncpy(ap_ssid, identity_ap_ssid_get(), sizeof(ap_ssid) - 1);
+	ap_ssid[sizeof(ap_ssid) - 1] = '\0';
 }
 
 #ifdef CONFIG_NRF70_SR_COEX
@@ -547,7 +539,7 @@ static int cmd_udp_test(const struct shell *sh, size_t argc, char **argv)
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(IPERF_PORT);
-	ret = inet_pton(AF_INET, iperf_server_ip, &addr.sin_addr);
+	ret = net_addr_pton(AF_INET, iperf_server_ip, &addr.sin_addr);
 	if (ret != 1) {
 		shell_print(sh, "Invalid IP address");
 		return -EINVAL;

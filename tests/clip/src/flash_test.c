@@ -133,8 +133,60 @@ cleanup:
 	return 0;
 }
 
+/* Quick PASS/FAIL test: erase a 4 KiB block, write a 256 B pattern, read back,
+ * verify. Result goes to the shell (not the OLED). Uses FLASH_TEST_OFFSET
+ * (the unused OTA app slot in this no-MCUboot image) — the fuel-gauge
+ * LittleFS at 0x130000 is left intact. */
+static int cmd_flash_test(const struct shell *sh, size_t argc, char **argv)
+{
+	const struct device *flash_dev;
+	uint8_t write_buf[256];
+	uint8_t read_buf[256];
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	flash_dev = DEVICE_DT_GET(DT_NODELABEL(spi_flash));
+	if (!device_is_ready(flash_dev)) {
+		shell_print(sh, "FAIL: SPI flash not ready");
+		return -ENODEV;
+	}
+
+	for (int i = 0; i < sizeof(write_buf); i++) {
+		write_buf[i] = (uint8_t)(i ^ 0xAA);
+	}
+
+	rc = flash_erase(flash_dev, FLASH_TEST_OFFSET, 4096);
+	if (rc != 0) {
+		shell_print(sh, "FAIL: erase %d", rc);
+		return rc;
+	}
+
+	rc = flash_write(flash_dev, FLASH_TEST_OFFSET, write_buf, sizeof(write_buf));
+	if (rc != 0) {
+		shell_print(sh, "FAIL: write %d", rc);
+		return rc;
+	}
+
+	rc = flash_read(flash_dev, FLASH_TEST_OFFSET, read_buf, sizeof(read_buf));
+	if (rc != 0) {
+		shell_print(sh, "FAIL: read %d", rc);
+		return rc;
+	}
+
+	if (memcmp(write_buf, read_buf, sizeof(write_buf)) != 0) {
+		shell_print(sh, "FAIL: verify mismatch");
+		return -EIO;
+	}
+
+	shell_print(sh, "PASS: flash erase/write/read/verify OK");
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_flash,
 	SHELL_CMD_ARG(speed, NULL, "Flash speed test [size_kb]", cmd_flash_speed, 1, 1),
+	SHELL_CMD_ARG(test, NULL, "Flash PASS/FAIL test", cmd_flash_test, 1, 0),
 	SHELL_SUBCMD_SET_END
 );
 
