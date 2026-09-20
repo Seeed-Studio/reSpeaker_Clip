@@ -13,6 +13,7 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/mgmt/mcumgr/mgmt/callbacks.h>
@@ -153,6 +154,15 @@ static uint32_t g_ota_chunk_count = 0;
 static enum clip_event_result execute_transition(enum clip_event event,
                                                  enum clip_state from,
                                                  enum clip_state to);
+
+/* Still alive 8 s after POWER_OFF_EXEC started: the shutdown hung —
+ * force a clean reboot instead of a frozen power-off screen. */
+static void shutdown_failsafe_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	LOG_ERR("shutdown hung >8 s, forcing reboot");
+	sys_reboot(SYS_REBOOT_COLD);
+}
 
 /* ========================================================================== */
 /* Init                                                                        */
@@ -700,6 +710,20 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_POWER_OFF_EXEC:
     {
+        /* Failsafe: ship mode must follow within seconds. If anything
+         * below blocks longer than expected (a stuck SD flush, a
+         * settings write that never completes), the device would sit
+         * on the power-off screen with dead buttons forever — a forced
+         * reboot is strictly better than that freeze. */
+        static struct k_work_delayable shutdown_failsafe;
+        static bool failsafe_inited;
+        if (!failsafe_inited) {
+            k_work_init_delayable(&shutdown_failsafe,
+					  shutdown_failsafe_fn);
+            failsafe_inited = true;
+        }
+        k_work_reschedule(&shutdown_failsafe, K_SECONDS(8));
+
         /* Ignore all button input from here on: the cleanup below runs
          * for hundreds of ms and presses during it used to pop the
          * status bar over the power-off screen (or race a START before

@@ -117,13 +117,20 @@ static void button_event_callback(const struct device *dev, enum button_action a
 
     case BUTTON_RELEASE:
 	if (atomic_cas(&poweroff_screen_active, 1, 0)) {
-	    /* Lock input HERE, atomically with the confirmation: the
-	     * handler-side lockout alone leaves a window between this post
-	     * and POWER_OFF_EXEC running (SD flush can block it for
-	     * hundreds of ms) in which another press queues an event that
-	     * executes after the shutdown sequence. */
-	    atomic_set(&shutdown_lockout, 1);
-	    clip_post_event(CLIP_EVENT_POWER_OFF_EXEC);
+	    /* Lock input HERE, atomically with the confirmation — but ONLY
+	     * if the POWER_OFF_EXEC event actually lands in the queue:
+	     * clip_post_event is K_NO_WAIT and DROPS on a full queue (8
+	     * deep). A dropped EXEC with the lockout already set is the
+	     * "stuck on the power-off screen, buttons dead, never powers
+	     * off" freeze. Posting from this driver thread is safe: the
+	     * driver loop is done with this press. */
+	    if (clip_post_event(CLIP_EVENT_POWER_OFF_EXEC) == 0) {
+		atomic_set(&shutdown_lockout, 1);
+	    } else {
+		/* Queue full: leave the latch SET so the user can retry —
+		 * the screen is already on the power-off page. */
+		atomic_set(&poweroff_screen_active, 1);
+	    }
 	} else if (atomic_cas(&recording_stopped, 1, 0)) {
 	    /* Recording was stopped by long press, ignore this release */
 	} else if (state == CLIP_STATE_RECORDING) {

@@ -841,11 +841,8 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 
             /* Print encode stats every 10 seconds (500 frames at 20ms/frame) */
             if (stats.frames_encoded % 500 == 0) {
-                uint32_t avg_enc = (uint32_t)(encode_time_total_us / stats.frames_encoded);
-                uint32_t avg_dsp = (uint32_t)(dsp_time_total_us / stats.frames_encoded);
-                LOG_INF("enc: avg=%u min=%u max=%u dsp=%u (%u)",
-                        avg_enc, stats.encode_time_min_us, stats.encode_time_max_us,
-                        avg_dsp, stats.frames_encoded);
+                (void)(encode_time_total_us / stats.frames_encoded);
+                (void)(dsp_time_total_us / stats.frames_encoded);
             }
 
             /* Calculate energy level for visualization.

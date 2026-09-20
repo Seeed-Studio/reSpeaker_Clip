@@ -28,6 +28,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.35.7
           cache: true
       - name: Example — build debug APK
         working-directory: mobile/sdk/flutter/example
@@ -44,7 +45,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Build sample
         working-directory: mobile/sdk/android
         run: ./gradlew :sample:assembleDebug --no-daemon
