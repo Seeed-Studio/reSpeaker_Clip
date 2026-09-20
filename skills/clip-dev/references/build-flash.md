@@ -21,7 +21,7 @@ west build --build-dir build-clip --pristine --board clip/nrf5340/cpuapp applica
 
 # Production image, console/log backend disabled
 west build --build-dir build-clip-prod --pristine --board clip/nrf5340/cpuapp \
-  applications/clip -- -DSNIPPET_ROOT="$PWD/applications/clip" -DSNIPPET=production
+  applications/clip -- -DSNIPPET_ROOT=$(pwd)/applications/clip -DSNIPPET=production
 ```
 
 Flash with `west flash --build-dir <dir> && nrfutil device reset`. Use

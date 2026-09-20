@@ -27,7 +27,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 - High-quality audio processing (SpeexDSP + Opus encoding)
 - Dual transport: BLE for mobile app, WiFi UDP for high-speed local sync
 - Simple single-button operation with OLED display feedback
-- Long battery life (>8 hours recording)
+- Long battery life (recording duration target TBD with the 240 mAh cell; production idle measured at ~170µA)
 
 ## 2. User Stories
 
@@ -90,13 +90,13 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 **FR-1.2.1**: The system shall apply noise suppression using SpeexDSP (configurable 0-60 dB)
 
-**FR-1.2.2**: The system shall apply dereverberation using SpeexDSP (enable/disable, fixed level=40, decay=20)
+**FR-1.2.2**: The system shall apply dereverberation using SpeexDSP (enable/disable, default on; fixed level=40, decay=30)
 
-**FR-1.2.3**: **NOT SUPPORTED** -- Automatic Gain Control (AGC) is not available. The SpeexDSP library is built with FIXED_POINT, which does not support AGC. AGC is commented out in the preprocessor initialization.
+**FR-1.2.3**: Automatic Gain Control: the SpeexDSP AGC is not available (the library is built with FIXED_POINT, which does not support AGC). Instead, a custom lightweight integer AGC + high-pass filter runs in Enhanced/MERGE mode alongside the SpeexDSP preprocessor.
 
 **FR-1.2.4**: The system shall provide two recording mode presets:
-- **Normal mode**: Stereo capture, no DSP processing, 16 kbps/channel
-- **Enhanced mode**: Mono (merged L+R), noise suppression + dereverb, 32 kbps
+- **Normal mode**: Stereo capture, no DSP processing, 32 kbps/channel (64 kbps total)
+- **Enhanced mode**: Mono (merged L+R), noise suppression + dereverb + integer AGC, 32 kbps
 
 **FR-1.2.5**: Audio processing shall be applied only in Enhanced (merge) mode; Normal (stereo) mode passes PCM data directly to the encoder
 
@@ -107,11 +107,11 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 **FR-1.3.1**: The system shall encode audio using the Opus codec
 
 **FR-1.3.2**: Bitrate is mode-specific, set at compile time via Kconfig (not user-configurable at runtime):
-- Normal mode: 16 kbps per channel (CONFIG_CLIP_NORMAL_BITRATE=16000), stereo = 32 kbps total
+- Normal mode: 32 kbps per channel (CONFIG_CLIP_NORMAL_BITRATE=32000; stereo encoder runs at 2x = 64 kbps total)
 - Enhanced mode: 32 kbps (CONFIG_CLIP_ENHANCED_BITRATE=32000), mono
 
 **FR-1.3.3**: Encoding complexity is mode-specific, set at compile time via Kconfig (not user-configurable at runtime):
-- Normal mode: complexity 0 (CONFIG_CLIP_NORMAL_COMPLEXITY=0)
+- Normal mode: complexity 1 (CONFIG_CLIP_NORMAL_COMPLEXITY=1)
 - Enhanced mode: complexity 1 (CONFIG_CLIP_ENHANCED_COMPLEXITY=1)
 
 **FR-1.3.4**: The encoder shall use VBR enabled, unconstrained quality, voice-optimized signal, 16-bit LSB depth, DTX/FEC/packet loss compensation disabled
@@ -126,9 +126,9 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 #### 3.1.4 Recording Modes
 
-**FR-1.4.1**: Normal mode: stereo recording, no DSP, 16 kbps/channel (32 kbps total)
+**FR-1.4.1**: Normal mode: stereo recording, no DSP, 32 kbps/channel (64 kbps total)
 
-**FR-1.4.2**: Enhanced mode: mono (merged L+R), SpeexDSP noise suppression + dereverb, 32 kbps
+**FR-1.4.2**: Enhanced mode: mono (merged L+R), SpeexDSP noise suppression + dereverb + custom integer AGC, 32 kbps
 
 **FR-1.4.3**: Recording mode shall be stored in NVS and configurable via AT+MODE command
 
@@ -146,7 +146,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 **FR-2.1.5**: The system shall handle SD card write errors gracefully (close file, continue recording without storage)
 
-**FR-2.1.6**: The system shall persist warning and error level logs to the SD card for field debugging (`CONFIG_LOG_BACKEND_FS=y`, stored in `/SD:/LOG/`, WRN+ERR level only, 64KB files x10 max, circular overwrite)
+**FR-2.1.6**: The system shall persist logs to the SD card for field debugging (`CONFIG_LOG_BACKEND_FS=y`, stored in `/SD:/LOG/`, rotating 128 KiB files x20 max, circular overwrite; default INF level in the debug build, runtime-switchable via `AT+LOG=off|info|debug`)
 
 #### 3.2.2 Session Organization
 
@@ -192,9 +192,9 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 #### 3.3.1 Transport Abstraction
 
-**FR-3.1.1**: The system shall implement a transport abstraction layer supporting BLE and UDP transports
+**FR-3.1.1**: The system shall implement a transport abstraction layer supporting BLE, UDP, and USB CDC transports
 
-**FR-3.1.2**: Transport priority: BLE > UDP for active transport selection
+**FR-3.1.2**: Transport priority: UDP > BLE for active transport selection (UDP preferred for large transfers); USB CDC is a third AT-command channel with responses routed directly back over USB
 
 **FR-3.1.3**: The transport layer shall support send, send_file_data, send_file_start, send_file_end, send_transfer_done, is_connected operations
 
@@ -220,7 +220,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 #### 3.3.3 WiFi UDP Communication
 
-**FR-3.3.1**: The system shall support WiFi AP mode via nRF7002 (SSID: `ClipAP_XXXX`, password: `12345678`)
+**FR-3.3.1**: The system shall support WiFi AP mode via nRF7002 (SSID: `ClipAP_XXXX`, default password `12345678`; a random 8-character password is generated on first BLE pairing). Channel and regulatory domain are runtime settings (`AT+WIFICFG=channel:CC`)
 
 **FR-3.3.2**: WiFi AP shall use static IP `192.168.4.1` with DHCP server
 
@@ -250,13 +250,16 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-3.4.6**: The system shall return error response: `{"ok": false, "error": "message"}`
 
-**FR-3.4.7**: AT commands shall be accepted from both BLE and UDP transports
+**FR-3.4.7**: AT commands shall be accepted from BLE, UDP, and USB CDC transports
 
 #### 3.3.5 AT Command Reference
 
 | Command | Type | Description |
 |---------|------|-------------|
 | `AT+GSTAT` | EXEC | Get device status (state, recording, battery, mode, bitrate, free space) |
+| `AT+BATT` | QUERY/EXEC | Get battery status (%, charging, voltage, temperature) |
+| `AT+STORAGE` | QUERY/EXEC | Get SD card storage info (total/free/used MB, used %) |
+| `AT+DFU` | EXEC | Reboot into MCUboot recovery mode |
 | `AT+DEVICE` | QUERY/EXEC | Get device name |
 | `AT+VERSION` | EXEC | Get firmware version |
 | `AT+TIME` | SET/GET/EXEC | Set time (Unix timestamp) or get current time (ISO 8601) |
@@ -279,8 +282,10 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 | `AT+DELETE` | SET | Delete a specific session |
 | `AT+FORMAT` | EXEC | Format SD card (delete all data) |
 | `AT+WIFI` | SET/GET/EXEC | Start/stop WiFi AP, query status |
+| `AT+WIFICFG` | SET/GET | Set/get WiFi AP channel + regulatory domain (channels 1-13 or 36-165) |
 | `AT+USB` | SET/GET | Enable/disable USB CDC (default: off, auto-off on disconnect) |
 | `AT+NAME` | SET/GET | Set/get custom BLE device name |
+| `AT+LOG` | SET/GET/EXEC | SD log backend level: off \| info \| debug |
 
 #### 3.3.6 File Transfer Protocol
 
@@ -326,7 +331,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-4.1.5**: Button input shall work even when BLE is connected
 
-**FR-4.1.6**: The system shall use a custom GPIO button driver (CONFIG_INPUT_CLIP) with dedicated thread
+**FR-4.1.6**: The system shall use a custom GPIO button driver (CONFIG_GPIO_BUTTON) with dedicated thread
 
 #### 3.4.2 OLED Display
 
@@ -334,7 +339,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-4.2.2**: Display shall use an event-driven UI state machine with dedicated UI thread
 
-**FR-4.2.3**: UI states: OFF, PAIRING_GUIDE, STATUS_BAR, REC_WAVE, REC_DOT, MARKING, PAUSED, POWER_OFF, USB_CONNECTED, OTA
+**FR-4.2.3**: UI states: OFF, PAIRING_GUIDE, STATUS_BAR, REC_WAVE, REC_DOT, MARKING, PAUSED, POWER_OFF, USB_CONNECTED, OTA, LOW_BATTERY (one-shot fullscreen warning until recharged)
 
 **FR-4.2.4**: Display shall show recording state with wave/dot animation during recording
 
@@ -350,7 +355,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-4.2.10**: Display brightness shall be configurable via AT+BRIGHTNESS (0-255, stored in NVS)
 
-**FR-4.2.11**: Display shall show fullscreen low battery warning when battery level falls below 10%
+**FR-4.2.11**: Display shall show fullscreen low battery warning when displayed battery level falls to 15% or below while discharging (one-shot until recharged; no automatic shutdown)
 
 **FR-4.2.12**: Display shall update every 50ms for animation (DISPLAY_ANIMATION_PERIOD)
 
@@ -372,7 +377,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-5.1.1**: The system shall monitor battery via NPM1300 PMIC with nRF Fuel Gauge for accurate State of Charge estimation
 
-**FR-5.1.2**: The system shall report the nRF Fuel Gauge's integer SoC estimate directly, without application-level rate limiting or directional clamping
+**FR-5.1.2**: The system shall report a directionally rate-limited view of the nRF Fuel Gauge SoC: the displayed % moves at most `CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP` (default 3 points) per 60s poll, is persisted across reboot, and setting the step to 0 restores the raw gauge value
 
 **FR-5.1.3**: The system shall report battery level in AT+GSTAT response
 
@@ -481,7 +486,7 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 **NFR-1.3**: File transfer speed over WiFi UDP shall be significantly faster than BLE
 
-**NFR-1.4**: Battery life shall be > 8 hours continuous recording
+**NFR-1.4**: Battery life for continuous recording: TBD — to be re-measured against the actual 240 mAh cell (the earlier ">8 hours" figure was derived from a wrong 500 mAh assumption; production idle is ~170µA)
 
 **NFR-1.5**: Button response time shall be < 100ms
 
@@ -525,7 +530,7 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 **NFR-4.4**: The system shall support SDHC cards
 
-**NFR-4.5**: WiFi AP shall use 5GHz channel 36 (US regulatory domain)
+**NFR-4.5**: WiFi AP default: 5GHz channel 36, US regulatory domain (runtime-configurable via AT+WIFICFG, channels 1-13 or 36-165)
 
 ### 5.5 Maintainability Requirements
 
@@ -533,7 +538,7 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 **NFR-5.2**: The system shall log errors for debugging (configurable log level via Kconfig)
 
-**NFR-5.2a**: The system shall persist warning and error level logs to the SD card (`/SD:/LOG/`) for field debugging. Logs are stored in rotating files (64KB each, max 10 files) with circular overwrite. This enables post-mortem analysis of issues that occur in the field without requiring a live serial connection.
+**NFR-5.2a**: The system shall persist logs to the SD card (`/SD:/LOG/`) for field debugging. Logs are stored in rotating files (128 KiB each, max 20 files) with circular overwrite; the debug build defaults to INF level and the level is runtime-controlled by `AT+LOG=off|info|debug`. This enables post-mortem analysis of issues that occur in the field without requiring a live serial connection.
 
 **NFR-5.3**: The system shall provide version information via AT+VERSION
 
@@ -553,11 +558,11 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 ### 6.2 Memory Constraints
 
-**HC-2.1**: Secure Flash: 268KB for application image (slot0, after 84KB MCUboot bootloader)
+**HC-2.1**: Internal flash (1 MB): 88 KB MCUboot bootloader + 936 KB application (single primary slot, overwrite-only — no A/B swap)
 
-**HC-2.2**: Non-secure Flash: 192KB available (network core + WiFi)
+**HC-2.2**: Network-core image runs from RAM (`ram_flash`), not internal flash
 
-**HC-2.2a**: OTA slot: 256KB secure + 192KB non-secure for firmware update staging
+**HC-2.2a**: External SPI flash OTA staging: 960 KB app-core secondary slot + 256 KB network-core secondary slot (MCUboot overwrite-only); remainder ~6.8 MB LittleFS
 
 **HC-2.3**: External SPI Flash: 8MB total (PY25Q64H), ~6.8MB LittleFS for settings
 
@@ -565,7 +570,7 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 ### 6.3 Power Constraints
 
-**HC-3.1**: Battery: 3.7V 500mAh LiPo
+**HC-3.1**: Battery: 4.20V-rated 240 mAh LiPo ("240" / HSZ 362123 cell)
 
 **HC-3.2**: PMIC: NPM1300 with multiple regulators
 
@@ -659,10 +664,10 @@ Binary format (little-endian):
 | Key | Settings Path | Type | Default | Description |
 |-----|--------------|------|---------|-------------|
 | mode | config/mode | uint8 | 0 (Normal) | Recording mode |
-| noise_suppress | config/noise_suppress | uint8 | 15 | Noise suppression level (dB) |
+| noise_suppress | config/noise_suppress | uint8 | 12 | Noise suppression level (dB) |
 | auto_delete_days | config/auto_delete_days | int8 | -1 (off) | Auto-delete policy |
-| dereverb_enabled | config/dereverb_enabled | bool | false | Dereverberation enabled |
-| oled_brightness | config/oled_brightness | uint8 | 128 | OLED brightness (0-255) |
+| dereverb_enabled | config/dereverb_enabled | bool | true | Dereverberation enabled |
+| oled_brightness | config/oled_brightness | uint8 | 32 | OLED brightness (0-255) |
 
 **DR-5.4**: Time persistence: `time/unix_timestamp` (int64, saved/restored on boot)
 
@@ -684,10 +689,10 @@ Binary format (little-endian):
 
 | Mode | Channels | Bitrate (total) | Storage per Hour | Notes |
 |------|----------|-----------------|-------------------|-------|
-| Normal | Stereo | 32 kbps (16k x 2) | ~14.4 MB/hour | No DSP processing |
-| Enhanced | Mono | 32 kbps | ~14.4 MB/hour | SpeexDSP noise suppress + dereverb |
+| Normal | Stereo | 64 kbps (32k x 2) | ~28.8 MB/hour | No DSP processing |
+| Enhanced | Mono | 32 kbps | ~14.4 MB/hour | SpeexDSP noise suppress + dereverb + integer AGC |
 
-Both modes produce approximately the same storage consumption (~14.4 MB/hour).
+The capacity examples below are computed against the Enhanced-mode rate (~14.4 MB/hour); Normal (stereo) mode consumes about twice as much.
 
 ### 8.2 Capacity Examples
 
@@ -726,7 +731,7 @@ Both modes produce approximately the same storage consumption (~14.4 MB/hour).
 
 **UI-3.7**: OTA update progress screen
 
-**UI-3.8**: Low battery fullscreen warning (<10%)
+**UI-3.8**: Low battery fullscreen warning (<=15%, discharging; one-shot until recharged)
 
 ### 9.3 Audio Visualization
 
@@ -751,7 +756,7 @@ Both modes produce approximately the same storage consumption (~14.4 MB/hour).
 | Session | A complete recording event with metadata |
 | Bookmark | User-marked timestamp within a recording |
 | Chunk | Segment file (time-based split of a recording) |
-| Transport | Abstraction layer for BLE and UDP communication |
+| Transport | Abstraction layer for BLE, UDP, and USB CDC communication |
 | UDP | User Datagram Protocol (WiFi file transfer) |
 
 ## 11. References
