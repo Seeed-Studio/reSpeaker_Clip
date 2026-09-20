@@ -630,13 +630,23 @@ static int cmd_brightness_handler(struct at_cmd_ctx *ctx, char *response, size_t
 /* POWEROFF Command Handler - Shutdown the device */
 static int cmd_poweroff_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+    /* The PMIC will not enter ship mode while VBUS/charging is present:
+     * the EXEC handler would fail, recover and notify "failed". Refuse
+     * up-front with a clear message instead. (The button path already
+     * gates on battery_charging.) */
+    if (clip_get_context()->status.battery_charging) {
+        return create_json_response(false, "Charging — unplug USB first",
+                                    NULL, response, len);
+    }
+
     /* Send success response first */
     int ret = create_json_response(true, NULL, "{\"poweroff\":\"shutting down\"}", response, len);
 
     k_sleep(K_MSEC(500));
 
-    struct clip_event_result_info info;
-    clip_post_event_sync(CLIP_EVENT_POWER_OFF_EXEC, &info);
+    /* Direct wake of the dedicated shutdown thread — bypasses the
+     * event queue entirely (no drop, no retry needed). */
+    clip_request_shutdown();
 
     return ret;
 }

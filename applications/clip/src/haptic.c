@@ -27,12 +27,34 @@ static volatile bool motor_is_on = false;
 
 static int execute_pattern(enum haptic_pattern pattern);
 
+/* Motor guard: no legal pattern drives the motor longer than ~1 s
+ * (ALERT = 4x150 + 400 = 1000 ms). If the motor is still on ~1.2 s
+ * after it was enabled, the haptic thread is stuck or dead (starved,
+ * stack overflow, ...) and without this the motor runs away until the
+ * device is powered off. The timer callback cuts the GPIO directly —
+ * it must not depend on any thread being scheduled. */
+#define HAPTIC_MOTOR_GUARD_MS 1200
+
+static void haptic_motor_guard_fn(struct k_timer *tmr)
+{
+	ARG_UNUSED(tmr);
+	if (motor_is_on) {
+		/* ISR context: raw GPIO write + printk (log backend not
+		 * guaranteed here). */
+		gpio_port_set_masked_raw(gpio1_dev,
+					 BIT(HAPTIC_MOTOR_GPIO_PIN), 0);
+		motor_is_on = false;
+		printk("haptic: motor guard tripped\n");
+	}
+}
+static K_TIMER_DEFINE(haptic_motor_guard, haptic_motor_guard_fn, NULL);
+
 /* Pattern execution moved to a dedicated low-priority thread: patterns are
  * on/off timing loops (100-500 ms of k_sleep), and callers (button driver
  * thread, clip event handler) must not be stalled while the motor runs. */
-K_MSGQ_DEFINE(haptic_msgq, sizeof(enum haptic_pattern), 2, 1);
+K_MSGQ_DEFINE(haptic_msgq, sizeof(enum haptic_pattern), 4, 1);
 
-#define HAPTIC_THREAD_STACK_SIZE 512
+#define HAPTIC_THREAD_STACK_SIZE 1024
 static K_THREAD_STACK_DEFINE(haptic_stack, HAPTIC_THREAD_STACK_SIZE);
 static struct k_thread haptic_thread;
 
@@ -73,7 +95,7 @@ int haptic_init(void)
 	k_thread_create(&haptic_thread, haptic_stack,
 			K_THREAD_STACK_SIZEOF(haptic_stack),
 			haptic_thread_fn, NULL, NULL, NULL,
-			K_PRIO_PREEMPT(10), 0, K_NO_WAIT);
+			K_PRIO_PREEMPT(4), 0, K_NO_WAIT);
 	k_thread_name_set(&haptic_thread, "haptic");
 	return 0;
 #else
@@ -89,6 +111,14 @@ int haptic_set_motor(bool enable)
 					   enable ? BIT(HAPTIC_MOTOR_GPIO_PIN) : 0);
 	if (ret == 0) {
 		motor_is_on = enable;
+		if (enable) {
+			/* (Re)arm the runaway guard; a harmless one-shot
+			 * expiry when the pattern turns the motor off in
+			 * time. */
+			k_timer_start(&haptic_motor_guard,
+				      K_MSEC(HAPTIC_MOTOR_GUARD_MS),
+				      K_NO_WAIT);
+		}
 		LOG_DBG("Motor %s via GPIO1.%d", enable ? "ON" : "OFF", HAPTIC_MOTOR_GPIO_PIN);
 	} else {
 		LOG_ERR("Failed to set motor state: %d", ret);

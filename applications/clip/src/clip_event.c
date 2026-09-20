@@ -91,6 +91,19 @@ struct clip_event_item {
 };
 
 #define EVENT_QUEUE_SIZE 8
+
+/* Dedicated shutdown path — bypasses the event queue entirely.
+ * Rapid button spam fills the 8-deep event queue with STATUS_SHOW
+ * events; a POWER_OFF_EXEC posted through it can be dropped (K_NO_WAIT)
+ * or delayed behind the backlog, freezing the device on the power-off
+ * screen with locked input. The confirming release instead gives this
+ * semaphore directly; a dedicated thread with its own stack runs the
+ * shutdown sequence without depending on the event thread. */
+static K_SEM_DEFINE(shutdown_sem, 0, 1);
+#define SHUTDOWN_THREAD_STACK 2048
+static K_THREAD_STACK_DEFINE(shutdown_thread_stack, SHUTDOWN_THREAD_STACK);
+static struct k_thread shutdown_thread_data;
+static void shutdown_thread_fn(void);
 K_MSGQ_DEFINE(clip_ev_msgq, sizeof(struct clip_event_item),
               EVENT_QUEUE_SIZE, 4);
 
@@ -114,6 +127,11 @@ static atomic_t ota_in_progress = ATOMIC_INIT(0);
 bool clip_event_ota_in_progress(void)
 {
 	return atomic_get(&ota_in_progress) != 0;
+}
+
+void clip_request_shutdown(void)
+{
+	k_sem_give(&shutdown_sem);
 }
 
 static void ota_progress_work_handler(struct k_work *work)
@@ -156,13 +174,17 @@ static enum clip_event_result execute_transition(enum clip_event event,
                                                  enum clip_state to);
 
 /* Still alive 8 s after POWER_OFF_EXEC started: the shutdown hung —
- * force a clean reboot instead of a frozen power-off screen. */
-static void shutdown_failsafe_fn(struct k_work *work)
+ * force a clean reboot instead of a frozen power-off screen. A k_timer,
+ * NOT a work item: the system workqueue may itself be part of the hang
+ * (e.g. the fg-save work blocked on a mutex), and a timer expiry does
+ * not depend on any thread being scheduled. */
+static void shutdown_failsafe_fn(struct k_timer *tmr)
 {
-	ARG_UNUSED(work);
-	LOG_ERR("shutdown hung >8 s, forcing reboot");
+	ARG_UNUSED(tmr);
+	printk("shutdown hung >8 s, forcing reboot\n");
 	sys_reboot(SYS_REBOOT_COLD);
 }
+static K_TIMER_DEFINE(shutdown_failsafe, shutdown_failsafe_fn, NULL);
 
 /* ========================================================================== */
 /* Init                                                                        */
@@ -348,6 +370,13 @@ int clip_event_init(void)
 
     k_work_init_delayable(&ota_progress_work, ota_progress_work_handler);
     k_work_init_delayable(&sd_idle_poweroff_work, sd_idle_poweroff_work_handler);
+    k_thread_create(&shutdown_thread_data, shutdown_thread_stack,
+                    K_THREAD_STACK_SIZEOF(shutdown_thread_stack),
+                    (k_thread_entry_t)shutdown_thread_fn,
+                    NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
+    k_thread_name_set(&shutdown_thread_data, "shutdown");
+
     k_work_init(&fg_save_work, fg_save_work_handler);
     storage_set_activity_cb(clip_storage_activity_notify);
     storage_set_busy_cb(clip_sd_busy);
@@ -523,6 +552,86 @@ notify:
         if (item.done_sem) {
             k_sem_give(item.done_sem);
         }
+    }
+}
+
+
+/* ========================================================================== */
+/* Dedicated shutdown thread                                                    */
+/* ========================================================================== */
+
+static void shutdown_thread_fn(void)
+{
+    struct clip_event_result_info discard;
+    int err;
+
+    while (true) {
+        k_sem_take(&shutdown_sem, K_FOREVER);
+
+        /* Failsafe armed FIRST: everything below is best-effort. If ship
+         * mode has not killed us within 8 s, force a clean reboot. */
+        k_timer_start(&shutdown_failsafe, K_SECONDS(8), K_NO_WAIT);
+
+        /* Ignore all button input from here on. */
+        button_shutdown_lockout();
+
+        /* Confirmation buzz plays on the haptic thread WHILE we clean up. */
+        haptic_play_pattern(HAPTIC_DOUBLE);
+        int64_t power_cut_earliest = k_uptime_get() + 800;
+
+        /* Stop recording first — file integrity is the one thing worth
+         * waiting for. */
+        if (audio_is_recording()) {
+            LOG_INF("Stopping recording before power off");
+            int stop_rc = audio_stop_recording();
+            if (stop_rc != 0) {
+                LOG_WRN("audio_stop %d (slow SD) grace", stop_rc);
+                k_sleep(K_MSEC(500));
+            }
+        }
+
+        /* Signal the transfer to stop (flag only). */
+        if (transfer_is_active()) {
+            LOG_INF("Cancelling transfer before power off");
+            transfer_cancel();
+        }
+
+        const struct device *regulators =
+            DEVICE_DT_GET(DT_NODELABEL(npm1300_regulators));
+
+        if (device_is_ready(regulators) &&
+            battery_fg_state_age_ms() > 60000) {
+            battery_save_fg_state();
+        }
+
+        int64_t left = power_cut_earliest - k_uptime_get();
+        if (left > 0) {
+            k_sleep(K_MSEC(left));
+        }
+
+        if (device_is_ready(regulators)) {
+            for (int i = 0; i < 3; i++) {
+                err = regulator_parent_ship_mode(regulators);
+                if (err == 0) {
+                    k_sleep(K_SECONDS(9));
+                    err = -ETIMEDOUT;
+                    break;
+                }
+                LOG_WRN("ship mode try %d failed: %d", i + 1, err);
+                k_sleep(K_MSEC(100));
+            }
+        } else {
+            LOG_ERR("Regulators not ready for ship mode");
+            err = -ENODEV;
+        }
+
+        /* Still alive: ship mode could not be entered. Recover. */
+        LOG_ERR("power-off failed (%d), recovering", err);
+        k_timer_stop(&shutdown_failsafe);
+        button_shutdown_unlock();
+        display_post_event(UI_EVENT_STATUS_SHOW);
+        ble_notify_event("poweroff", "failed");
+        (void)discard;
     }
 }
 
@@ -710,93 +819,10 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_POWER_OFF_EXEC:
     {
-        /* Failsafe: ship mode must follow within seconds. If anything
-         * below blocks longer than expected (a stuck SD flush, a
-         * settings write that never completes), the device would sit
-         * on the power-off screen with dead buttons forever — a forced
-         * reboot is strictly better than that freeze. */
-        static struct k_work_delayable shutdown_failsafe;
-        static bool failsafe_inited;
-        if (!failsafe_inited) {
-            k_work_init_delayable(&shutdown_failsafe,
-					  shutdown_failsafe_fn);
-            failsafe_inited = true;
-        }
-        k_work_reschedule(&shutdown_failsafe, K_SECONDS(8));
-
-        /* Ignore all button input from here on: the cleanup below runs
-         * for hundreds of ms and presses during it used to pop the
-         * status bar over the power-off screen (or race a START before
-         * ship mode cut power). */
-        button_shutdown_lockout();
-
-        /* Keep the POWER OFF screen lit until power is actually cut: a
-         * blank-but-alive device with dead buttons reads as "already
-         * off", and a user pressing the button to wake it gets no
-         * response. The screen dies together with ship mode. */
-        /* Confirmation buzz plays on the haptic thread WHILE we clean
-         * up below — only wait out the REMAINING pattern time just
-         * before power is cut, instead of a serial 400 ms sleep. */
-        haptic_play_pattern(HAPTIC_DOUBLE);
-        /* Cut power no sooner than this: buzz (300 ms) finishes with a
-         * short beat after it — killing BUCK mid-spin chops the buzz
-         * and the whole shutdown reads as abrupt. */
-        int64_t power_cut_earliest = k_uptime_get() + 800;
-
-        /* Cancel any active transfer so it stops reading the SD before
-         * we cut power. Bounded (1 s) so a stuck transfer can't drag
-         * the shutdown out. */
-        if (transfer_is_active()) {
-            LOG_INF("Cancelling transfer before power off");
-            transfer_cancel();
-            for (int i = 0; i < 10 && transfer_is_active(); i++) {
-                k_sleep(K_MSEC(100));   /* up to ~1s */
-            }
-        }
-
-        /* Stop recording if active, to save the file before shutdown.
-         * audio_stop_recording() already waits for the audio thread's
-         * close+fs_sync, so no extra settle on success. */
-        if (audio_is_recording()) {
-            LOG_INF("Stopping recording before power off");
-            int stop_rc = audio_stop_recording();
-            if (stop_rc != 0) {
-                LOG_WRN("audio_stop %d (slow SD) grace", stop_rc);
-                k_sleep(K_MSEC(500));
-            }
-        }
-
-        const struct device *regulators =
-            DEVICE_DT_GET(DT_NODELABEL(npm1300_regulators));
-        if (!device_is_ready(regulators)) {
-            /* Still alive: restore input so the device stays usable. */
-            LOG_ERR("Regulators not ready for ship mode");
-            button_shutdown_unlock();
-            return CLIP_EVENT_ERROR;
-        }
-
-        /* Persist fuel gauge state before power-off so the SoC is
-         * continuous on the next boot — but SKIP it when a fresh copy
-         * already exists: POWER_OFF_SHOW queued a save at the 3 s hold,
-         * and the settings-file rewrite (whole-file, incl. BLE bonds)
-         * costs ~1 s on LittleFS, which was doubling the shutdown
-         * delay for no benefit. */
-        if (battery_fg_state_age_ms() > 60000) {
-            battery_save_fg_state();
-        }
-
-        /* Hold the minimum shutdown window (buzz + a short beat). */
-        int64_t left = power_cut_earliest - k_uptime_get();
-        if (left > 0) {
-            k_sleep(K_MSEC(left));
-        }
-
-        err = regulator_parent_ship_mode(regulators);
-        if (err) {
-            LOG_ERR("Failed to enter ship mode: %d", err);
-            button_shutdown_unlock();
-            return CLIP_EVENT_ERROR;
-        }
+        /* Route to the dedicated shutdown thread (see shutdown_thread_fn):
+         * rapid button spam can fill the event queue and delay or drop
+         * this event; the direct semaphore path has no such dependency. */
+        k_sem_give(&shutdown_sem);
         return CLIP_EVENT_OK;
     }
 

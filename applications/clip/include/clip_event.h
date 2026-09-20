@@ -82,6 +82,15 @@ enum clip_state clip_event_get_state(void);
 bool clip_event_ota_in_progress(void);
 
 /**
+ * @brief Wake the dedicated shutdown thread (bypasses the event queue).
+ *
+ * Called from the button callback on the confirming release. Safe from
+ * any thread context; the semaphore has capacity 1 so repeat calls
+ * coalesce.
+ */
+void clip_request_shutdown(void);
+
+/**
  * @brief Initialize the event dispatcher
  */
 int clip_event_init(void);
