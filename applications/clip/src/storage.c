@@ -1620,7 +1620,6 @@ static void delete_dir_contents(const char *dir_path)
 
         if (storage_path_format(filepath, sizeof(filepath), "%s/%s", dir_path,
                                 entry.name) != 0) {
-            LOG_WRN("Skipping overlong path while deleting %s", entry.name);
             continue;
         }
 

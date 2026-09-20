@@ -1190,11 +1190,6 @@ static int transfer_send_chunk(void)
         return ret;
     }
 
-    /* Log timing for first few chunks and every 64th chunk */
-    if (chunk_count < 3 || chunk_count % 64 == 0) {
-        LOG_INF("chunk %d: read=%dms, send=%dms, size=%d",
-                chunk_count, (int)t_read, (int)t_send, (int)bytes_read);
-    }
     chunk_count++;
 
     /* Only increment bytes_transferred if send actually succeeded */
@@ -1211,7 +1206,6 @@ static void send_file_ready_event(const char *session_id, const char *filename, 
     }
 
     if (!filename || filename[0] == '\0') {
-        LOG_WRN("Cannot send file_ready: empty filename");
         return;
     }
 

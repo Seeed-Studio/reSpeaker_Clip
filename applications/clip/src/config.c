@@ -586,9 +586,6 @@ void config_sync_time(void)
     ctx->time.base_uptime_ms = k_uptime_get();
 
     settings_save_one(SETTING_TIME_UNIX, &unix_time, sizeof(unix_time));
-    LOG_INF("Time synced: %04u-%02u-%02u %02u:%02u:%02u",
-            ctx->time.year, ctx->time.month, ctx->time.day,
-            ctx->time.hour, ctx->time.min, ctx->time.sec);
 }
 
 int config_set_mode(enum recording_mode mode)

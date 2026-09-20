@@ -1591,7 +1591,6 @@ int display_init(void)
 		return -ENODEV;
 	}
 
-	LOG_INF("Display initialized: %dx%d", OLED_WIDTH, OLED_HEIGHT);
 
 	/* Ensure display is unblanked and active on init */
 	display_blanking_off(display_dev);
@@ -1869,14 +1868,12 @@ static void display_start_ui(void)
 		render_status_bar(display_buffer);
 		flush_display();
 		k_work_schedule(&display_timeout_work, K_MSEC(DISPLAY_STATUS_TIMEOUT_MS));
-		LOG_INF("UI started: STATUS_BAR");
 	} else {
 		set_ui_state(UI_STATE_PAIRING_GUIDE);
 		render_pairing_guide(display_buffer);
 		flush_display();
 		k_work_schedule(&display_timeout_work,
 				K_MSEC(DISPLAY_PAIRING_GUIDE_TIMEOUT_MS));
-		LOG_INF("UI started: PAIRING_GUIDE");
 	}
 }
 
