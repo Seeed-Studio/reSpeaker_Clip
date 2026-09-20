@@ -71,6 +71,17 @@ int clip_post_event_sync(enum clip_event event,
 enum clip_state clip_event_get_state(void);
 
 /**
+ * @brief True while an MCUmgr DFU upload is in progress.
+ *
+ * Set at DFU STARTED; cleared at DFU PENDING (upload complete, image
+ * awaiting reboot), DFU STOPPED/cancelled, and BLE disconnect during
+ * upload. Input gating uses this flag because the state machine stays
+ * in its current state during OTA — CLIP_STATE_OTA is not entered via
+ * the transition table.
+ */
+bool clip_event_ota_in_progress(void);
+
+/**
  * @brief Initialize the event dispatcher
  */
 int clip_event_init(void);

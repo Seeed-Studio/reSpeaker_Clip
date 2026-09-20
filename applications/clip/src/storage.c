@@ -268,23 +268,45 @@ int storage_init(void)
     const struct device *ldo2 = DEVICE_DT_GET(DT_NODELABEL(npm1300_ldo2));
     if (device_is_ready(ldo2)) {
         regulator_enable(ldo2);
-        k_msleep(10);
+        k_msleep(20);
     }
 
     LOG_INF("SD init");
 
-    /* Initialize SD card */
-    rc = disk_access_init("SD");
-    if (rc != 0)
-    {
-        LOG_WRN("SD init failed: %d", rc);
-        return rc;
-    }
+    /* Card power-up race: the LDO2 ramp plus the card's internal init
+     * can exceed the settle delay on some cards / temperatures. A boot
+     * mount failure here is expensive — recording must then lazily
+     * remount, and the one-shot boot-time unsynced-audio check in
+     * main() is skipped entirely (the UI then misses existing
+     * recordings until the next reboot). Retry with a growing delay. */
+    for (int attempt = 1;; attempt++) {
+        /* Initialize SD card. -ENOTSUP = already initialized (same
+         * tolerance as storage_resume/storage_ensure_mounted below):
+         * without it, a first-attempt init success + mount failure
+         * would exit every later attempt at the init step and the
+         * fs_mount retry would never run — recreating the exact
+         * boot degradation this loop exists to fix. */
+        rc = disk_access_init("SD");
+        if (rc != 0 && rc != -ENOTSUP) {
+            if (attempt < 4) {
+                LOG_WRN("SD init failed: %d (attempt %d)", rc, attempt);
+                k_msleep(100 * attempt);
+                continue;
+            }
+            LOG_WRN("SD init failed: %d", rc);
+            return rc;
+        }
 
-    /* Mount filesystem */
-    rc = fs_mount(&mp);
-    if (rc != 0)
-    {
+        /* Mount filesystem */
+        rc = fs_mount(&mp);
+        if (rc == 0) {
+            break;
+        }
+        if (attempt < 4) {
+            LOG_WRN("SD mount failed: %d (attempt %d)", rc, attempt);
+            k_msleep(100 * attempt);
+            continue;
+        }
         LOG_WRN("SD mount failed: %d", rc);
         sd_mounted = false;
         return rc;
@@ -1533,9 +1555,14 @@ int storage_format_card(void)
 {
     int rc;
 
-    if (!sd_mounted)
+    /* The idle power-gate unmounts the SD after 45 s of inactivity — a
+     * format request arriving over BLE while idle must lazily remount
+     * first, or it fails -ENODEV and (previously) the AT response still
+     * claimed success while every recording survived the "factory reset". */
+    rc = storage_ensure_mounted();
+    if (rc != 0)
     {
-        return -ENODEV;
+        return rc;
     }
 
     /* 1. Unmount */
@@ -1573,7 +1600,6 @@ int storage_format_card(void)
     /* 4. Recreate REC directory */
     fs_mkdir(STORAGE_BASE_PATH);
 
-    LOG_INF("SD card formatted and remounted");
     return 0;
 }
 

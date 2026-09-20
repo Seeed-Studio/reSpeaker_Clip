@@ -699,9 +699,6 @@ process_next_file:
             goto process_next_file;
         }
 
-        LOG_INF("xfer loop: state=%d file_open=%d tp=%d",
-            current_transfer.state, transfer_file_open,
-            current_transport != NULL);
 
         /* Open first file if not already open */
         if (!transfer_file_open) {

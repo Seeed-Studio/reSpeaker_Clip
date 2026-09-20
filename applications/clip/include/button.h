@@ -30,6 +30,21 @@ typedef void (*button_callback_t)(enum button_action action, void *user_data);
 int button_init(void);
 
 /**
+ * @brief Ignore all button input from now on (shutdown committed).
+ *
+ * Called at POWER_OFF_EXEC entry; only a reboot clears it.
+ */
+void button_shutdown_lockout(void);
+
+/**
+ * @brief Re-enable button input after a FAILED shutdown attempt.
+ *
+ * POWER_OFF_EXEC calls this on its error paths (regulator not ready,
+ * ship-mode rejected): the device is still alive and must stay usable.
+ */
+void button_shutdown_unlock(void);
+
+/**
  * @brief Register button event callback
  *
  * @param callback Callback function

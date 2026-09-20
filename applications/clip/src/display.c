@@ -1139,6 +1139,14 @@ static void handle_event(enum ui_event event)
 		}
 		break;
 
+	case UI_EVENT_STATUS_REFRESH:
+		/* Nothing to do here: the event loop's render_current_state()
+		 * re-renders after every event. This event exists so NON-display
+		 * threads can request a redraw without touching display_buffer
+		 * or the I2C bus themselves (they used to render+flush directly
+		 * and raced the display thread -> garbled frames). */
+		break;
+
 	case UI_EVENT_PAIRING_SHOW:
 		k_work_cancel_delayable(&display_timeout_work);
 		set_ui_state(UI_STATE_PAIRING_GUIDE);
@@ -1637,13 +1645,13 @@ int display_update_status(const struct display_status *status)
 		g_has_untransferred = false;
 	}
 
-	/* Update display if in status bar state */
-	if (g_ui_state == UI_STATE_STATUS_BAR) {
-		render_status_bar(display_buffer);
-		flush_display();
-	} else if (!was_charging && g_status.battery_charging) {
+	/* Runs on the caller's thread (battery poll on the system workqueue):
+	 * only mutate state here and ask the display thread to redraw. */
+	if (!was_charging && g_status.battery_charging) {
 		/* Charging just started, show status bar briefly */
 		display_post_event(UI_EVENT_STATUS_SHOW);
+	} else if (g_ui_state == UI_STATE_STATUS_BAR) {
+		display_post_event(UI_EVENT_STATUS_REFRESH);
 	}
 
 	return 0;
@@ -1659,8 +1667,7 @@ void display_check_untransferred(void)
 	bool had = g_has_untransferred;
 	g_has_untransferred = storage_has_unsynced_sessions();
 	if (had != g_has_untransferred && g_ui_state == UI_STATE_STATUS_BAR) {
-		render_status_bar(display_buffer);
-		flush_display();
+		display_post_event(UI_EVENT_STATUS_REFRESH);
 	}
 }
 
@@ -1674,8 +1681,7 @@ void display_set_transferring(bool transferring)
 	}
 
 	if (g_ui_state == UI_STATE_STATUS_BAR) {
-		render_status_bar(display_buffer);
-		flush_display();
+		display_post_event(UI_EVENT_STATUS_REFRESH);
 	} else if (transferring && g_ui_state == UI_STATE_OFF) {
 		set_ui_state(UI_STATE_STATUS_BAR);
 		k_work_schedule(&display_timeout_work, K_MSEC(DISPLAY_STATUS_TIMEOUT_MS));

@@ -123,10 +123,6 @@ static int time_settings_set(const char *name, size_t len,
     ctx->time.base_uptime_ms = k_uptime_get();
     ctx->time.valid = true;
 
-    LOG_INF("Time restored: %04d-%02d-%02d %02d:%02d:%02d",
-            ctx->time.year, ctx->time.month, ctx->time.day,
-            ctx->time.hour, ctx->time.min, ctx->time.sec);
-
     return 0;
 }
 

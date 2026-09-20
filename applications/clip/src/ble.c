@@ -343,7 +343,6 @@ static void adv_timeout_handler(struct k_work *work)
 static void inactivity_timeout_handler(struct k_work *work)
 {
 	if (ble_ctx.conn) {
-		LOG_INF("BLE inactivity, disconnecting");
 		bt_conn_disconnect(ble_ctx.conn,
 				   BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 	}
@@ -393,7 +392,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
     if (ble_ctx.notify_enabled) {
         /* CCC already enabled - set transport as ready */
         transport_ble_update_connection(conn, true);
-        LOG_INF("BLE transport ready (CCC pre-enabled)");
     } else {
         /* CCC not yet written - set transport but not ready */
         transport_ble_update_connection(conn, false);
@@ -566,7 +564,6 @@ static void pairing_complete(struct bt_conn *conn, bool bonded)
         int new_bond_count = 0;
         bt_foreach_bond(BT_ID_DEFAULT, count_bond_cb, &new_bond_count);
         if (new_bond_count != prev_bond_count) {
-            LOG_INF("new device, regen WiFi pw");
             config_generate_wifi_password();
         }
 
@@ -790,7 +787,6 @@ int ble_notify_state_change(const char *state, const char *session_id, int durat
                        state, session_id);
     }
 
-    LOG_INF("Event: state=%s session=%s duration=%d", state, session_id, duration);
     return ble_send(buf, len);
 }
 
@@ -808,7 +804,6 @@ int ble_notify_mark(const char *session_id, int mark_count)
                    "\"mark_count\":%d}",
                    session_id, mark_count);
 
-    LOG_INF("Event: mark session=%s count=%d", session_id, mark_count);
     return ble_send(buf, len);
 }
 

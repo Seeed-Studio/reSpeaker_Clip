@@ -17,6 +17,7 @@
 #include <zephyr/settings/settings.h>
 
 #include <stddef.h>
+#include <limits.h>
 #include <string.h>
 
 #include "battery.h"
@@ -26,6 +27,7 @@
 #include "ble.h"
 #include "transfer.h"
 #include "wifi.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 
@@ -44,6 +46,41 @@ LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 
 /* Low-battery warning threshold (displayed % = actual SoC; no reserve). */
 #define BATTERY_LOW_WARNING_THRESHOLD  15
+
+/* Display re-anchor gap (%) and stale-state heal threshold.
+ *
+ * The directional display latch intentionally holds small upward gauge
+ * corrections while discharging (anti-churn). But a value far below reality
+ * must not be latched forever: if the persisted state was phantom-drained
+ * (e.g. 0% shown at 4.0 V), it would stay wrong until the next charge.
+ *
+ * While discharging, an upward gap to the gauge >= this threshold is a
+ * re-anchor, not churn — catch up at MAX_STEP instead of holding. At boot,
+ * a persisted display seed >= this threshold below the voltage-curve
+ * estimate invalidates the restored coulomb-counter state (see the heal in
+ * battery_init). */
+#define BATTERY_DISPLAY_REANCHOR_THRESHOLD  20
+
+/* Display rate limiting is TIME-based: MAX_STEP applies per this window,
+ * not per call — UI refreshes and VBUS events trigger extra
+ * read_and_update() calls, and a per-call cap let those bursts step the
+ * display several times within seconds (e.g. 68%->78% "instantly" on
+ * charger plug-in). */
+#define BATTERY_DISPLAY_RATE_WINDOW_MS  60000
+
+/* On charger plug-in the terminal voltage instantly rises by I*R (~+10%
+ * on the OCV curve at CC currents) and the fuel-gauge model re-anchors
+ * upward — no real charge has flowed yet. Hold the display for this long
+ * after the VBUS rising edge before following the gauge again. */
+#define BATTERY_PLUGIN_HOLD_MS  120000
+
+/* Post-full hold: charge completion forces the display to 100% (the
+ * gauge model itself plateaus at ~99), so on unplug the display would
+ * drop to 99 within one poll — visibly wrong. Hold 100% briefly after
+ * unplugging from a completed charge; keep it SHORT (the gap to the
+ * gauge grows with hold time, and a long hold would later show a cliff).
+ * 10 min of real discharge is ~0.2% idle / ~1-2% recording. */
+#define BATTERY_POST_FULL_HOLD_MS  (10 * 60 * MSEC_PER_SEC)
 
 /* High-temperature charge cutoff. The NPM1300 hot threshold
  * (thermistor-hot-millidegrees=45C in DTS) is the autonomous HW safety net
@@ -93,11 +130,19 @@ struct fg_state_record {
 static struct fg_state_record fg_state_record;
 static bool fg_state_loaded;
 static uint8_t last_saved_soc = 255U;  /* last SoC% persisted (255 = force first save) */
+static atomic_t last_fg_save_ms = ATOMIC_INIT(INT_MIN); /* 0.1s ticks, see battery_fg_state_age_ms */
 
 /* Directional-smoothed display SoC. Persisted across reboot so it resumes from
  * the value shown before reboot (no cross-reboot lag accumulation). 0xFF means
  * "not seeded yet" — the first poll seeds it from the gauge. */
 static uint8_t displayed_percent = 0xFF;
+
+/* Time-based display rate limiting and plug-in hold (see
+ * BATTERY_DISPLAY_RATE_WINDOW_MS / BATTERY_PLUGIN_HOLD_MS). */
+static int64_t last_display_change_ms = -BATTERY_DISPLAY_RATE_WINDOW_MS;
+static int64_t vbus_plugin_ms = -1;
+static bool charger_complete_seen;   /* charge completed this VBUS session */
+static int64_t post_full_until_ms;    /* hold 100% until this (unplug from full) */
 
 static uint32_t fg_model_crc(void)
 {
@@ -186,7 +231,6 @@ static void read_and_update(void);
 void battery_poll(void)
 {
 	read_and_update();
-	LOG_INF("Battery poll: %u%%, charging=%d", last_percent, last_charging);
 }
 
 /* Save the fuel gauge state to settings (LittleFS). Call on SoC change + on
@@ -226,12 +270,28 @@ static void battery_save_fg_state_unlocked(void)
 		LOG_WRN("fg_state save failed: %d", ret);
 	} else {
 		fg_state_loaded = true;
+		/* Stamp in 0.1 s ticks (atomic_t is 32-bit; raw uptime ms would
+		 * overflow it). battery_fg_state_age_ms() uses this to skip
+		 * redundant synchronous saves. */
+		atomic_set(&last_fg_save_ms, (int32_t)(k_uptime_get_32() / 100));
 	}
 }
 
 /* Public: serializes against the battery poll (battery_mutex) so the gauge
  * state_get here can't race nrf_fuel_gauge_process() on another thread. Safe
  * to call from any context (e.g. the power-off work item). */
+int64_t battery_fg_state_age_ms(void)
+{
+	/* Time since the last completed fg-state save (INT64_MAX-ish when
+	 * never). Callers use this to skip a redundant synchronous save
+	 * when a recent one already persisted the state. */
+	int32_t stamp = atomic_get(&last_fg_save_ms);
+	if (stamp == (int32_t)INT_MIN) {
+		return INT64_MAX;
+	}
+	return (int64_t)(k_uptime_get_32() - (uint32_t)stamp * 100U);
+}
+
 void battery_save_fg_state(void)
 {
 	k_mutex_lock(&battery_mutex, K_FOREVER);
@@ -310,12 +370,36 @@ static float wifi_load_estimate_a(void)
 		return 0.0f;
 	}
 
+	/* Two calibrated tiers — both are REAL current the PMIC IBAT cannot
+	 * see (nRF7002 is fed from VBAT upstream of the sense resistor), so
+	 * both must be billed while the AP is up:
+	 * AP idle (beaconing/standby) and active UDP transfer. */
 	int ma = 0;
 	if (wifi_ap_is_running()) {
 		ma = transfer_is_active() ? CONFIG_CLIP_BATTERY_WIFI_TX_LOAD_MA
 					  : CONFIG_CLIP_BATTERY_WIFI_AP_LOAD_MA;
 	}
 	return (float)ma / 1000.0f;
+}
+
+/* Piecewise-linear voltage-to-SoC estimate for the HSZ 362123 Li-Po.
+ * Coarse (no load/temperature correction) — used as the fallback SoC
+ * source and as a sanity reference for the persisted fuel-gauge state. */
+static uint8_t voltage_soc_estimate(float voltage)
+{
+	if (voltage >= 4.15f) {
+		return 100;
+	} else if (voltage >= 3.75f) {
+		/* 3.75-4.15V: 50-100% (upper plateau) */
+		return (uint8_t)(50.0f + (voltage - 3.75f) / (4.15f - 3.75f) * 50.0f);
+	} else if (voltage >= 3.45f) {
+		/* 3.45-3.75V: 10-50% (mid plateau, relatively flat) */
+		return (uint8_t)(10.0f + (voltage - 3.45f) / (3.75f - 3.45f) * 40.0f);
+	} else if (voltage > 3.3f) {
+		/* 3.3-3.45V: 0-10% (steep drop at end) */
+		return (uint8_t)((voltage - 3.3f) / (3.45f - 3.3f) * 10.0f);
+	}
+	return 0;
 }
 
 static void read_and_update_locked(void)
@@ -406,22 +490,42 @@ static void read_and_update_locked(void)
 		/* Calculate time delta */
 		float delta = (float)k_uptime_delta(&fg_ref_time) / 1000.f;
 
-		/* WiFi compensation: fold in the nRF70 current GAUGE_AVG_CURRENT
-		 * cannot see (it bypasses the PMIC on VBAT-direct). Added as extra
-		 * discharge (positive in the lib convention) in both charge and
-		 * discharge states. current is in amperes (sensor_value_from_micro). */
-		float wifi_load_a = wifi_load_estimate_a();
-		if (wifi_load_a != last_wifi_load_a) {
-			last_wifi_load_a = wifi_load_a;
-			LOG_INF("Battery fg: ibat=%d mA, wifi_comp=%d mA",
-				(int)(current * 1000.0f), (int)(wifi_load_a * 1000.0f));
+		/* Feed the gauge a current it can trust.
+		 *
+		 * ACTIVE (charging / recording / transfer): the one-shot IBAT
+		 * sample is representative — use it, plus the transfer-only WiFi
+		 * compensation for the nRF70 current that bypasses the PMIC
+		 * sense resistor.
+		 *
+		 * IDLE: the single IBAT snapshot is taken while the CPU runs this
+		 * very poll (mA-level, ~1.09 mA LSB — true idle reads 0), and
+		 * integrating that one sample over the whole 60 s delta wildly
+		 * over-counts discharge (~3%/h phantom at 1%/20min scale).
+		 * Nordic's guidance for low-power periods is that the idle
+		 * current is known ahead of time: feed the configured average
+		 * instead, keep V/T real, and mirror it into idle_set() so the
+		 * library's predictions agree. */
+		bool fg_active = charger_connected || audio_is_recording() ||
+				 transfer_is_active();
+		float i_feed;
+		if (fg_active) {
+			/* nrf_fuel_gauge lib expects negative = charging;
+			 * GAUGE_AVG_CURRENT is negative = discharging, so negate.
+			 * Without this the coulomb count runs backwards. */
+			float wifi_load_a = wifi_load_estimate_a();
+			if (wifi_load_a != last_wifi_load_a) {
+				last_wifi_load_a = wifi_load_a;
+				LOG_INF("Battery fg: ibat=%d mA, wifi_comp=%d mA",
+					(int)(current * 1000.0f),
+					(int)(wifi_load_a * 1000.0f));
+			}
+			i_feed = -current + wifi_load_a;
+		} else {
+			i_feed = (float)CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA / 1000000.0f;
+			nrf_fuel_gauge_idle_set(voltage, temp, i_feed);
 		}
 
-		/* nrf_fuel_gauge lib expects negative = charging; GAUGE_AVG_CURRENT
-		 * is negative = discharging, so negate. Without this the Coulomb
-		 * count runs backwards and SoC jumps (voltage correction fights it). */
-		float soc = nrf_fuel_gauge_process(voltage, -current + wifi_load_a,
-						  temp, delta, NULL);
+		float soc = nrf_fuel_gauge_process(voltage, i_feed, temp, delta, NULL);
 		percent = (uint8_t)soc;
 
 		/* Determine charging status for display/BLE:
@@ -438,20 +542,7 @@ static void read_and_update_locked(void)
 		}
 	} else {
 		/* Fallback: piecewise-linear voltage-SoC curve for HSZ 362123 Li-Po */
-		if (voltage >= 4.15f) {
-			percent = 100;
-		} else if (voltage >= 3.75f) {
-			/* 3.75-4.15V: 50-100% (upper plateau) */
-			percent = (uint8_t)(50.0f + (voltage - 3.75f) / (4.15f - 3.75f) * 50.0f);
-		} else if (voltage >= 3.45f) {
-			/* 3.45-3.75V: 10-50% (mid plateau, relatively flat) */
-			percent = (uint8_t)(10.0f + (voltage - 3.45f) / (3.75f - 3.45f) * 40.0f);
-		} else if (voltage > 3.3f) {
-			/* 3.3-3.45V: 0-10% (steep drop at end) */
-			percent = (uint8_t)((voltage - 3.3f) / (3.45f - 3.3f) * 10.0f);
-		} else {
-			percent = 0;
-		}
+		percent = voltage_soc_estimate(voltage);
 		bool battery_full = (percent >= BATTERY_FULL_THRESHOLD);
 		charging = charger_connected && (!charger_complete || !battery_full);
 	}
@@ -469,35 +560,84 @@ static void read_and_update_locked(void)
 	 * cross-reboot lag accumulation. The raw gauge value (percent) is still
 	 * logged as "actual" for calibration. */
 	uint8_t display_percent;
+	int64_t now_ms = k_uptime_get();
+
+	/* VBUS rising/falling edge tracking for the plug-in hold and the
+	 * post-full hold. */
+	if (vbus_connected) {
+		if (vbus_plugin_ms < 0) {
+			vbus_plugin_ms = now_ms;
+		}
+	} else {
+		if (vbus_plugin_ms >= 0 && charger_complete_seen) {
+			/* Unplugged from a completed charge: hold 100% briefly. */
+			post_full_until_ms = now_ms + BATTERY_POST_FULL_HOLD_MS;
+		}
+		vbus_plugin_ms = -1;
+		charger_complete_seen = false;
+	}
+
+	/* Time-based rate limit: MAX_STEP per RATE_WINDOW since the last
+	 * DISPLAYED change — however many polls fire in between. */
+	int since_change_ms = (int)(now_ms - last_display_change_ms);
+	int allowed_step = (int)((int64_t)CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP *
+				 since_change_ms / BATTERY_DISPLAY_RATE_WINDOW_MS);
+	/* Plug-in hold: right after VBUS appears, the gauge re-anchors up on
+	 * the I*R-elevated charging voltage; don't follow it yet. */
+	bool plugin_hold = vbus_plugin_ms >= 0 &&
+			   now_ms - vbus_plugin_ms < BATTERY_PLUGIN_HOLD_MS;
+
 	if (vbus_connected && charger_complete) {
 		/* Charge complete: force 100% immediately (gauge plateaus ~99%). */
 		display_percent = 100;
 		displayed_percent = 100;
+		charger_complete_seen = true;
+		last_display_change_ms = now_ms;
 	} else if (displayed_percent == 0xFF) {
 		/* First poll with no persisted seed: start at the gauge value. */
 		display_percent = percent;
 		displayed_percent = percent;
+		last_display_change_ms = now_ms;
 	} else if (charging) {
-		/* Charging: catch up toward the gauge, upward only, rate-limited. */
+		/* Charging: catch up toward the gauge, upward only, time-limited. */
 		int diff = (int)percent - (int)displayed_percent;
-		if (diff > CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP) {
-			diff = CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP;
+		if (diff > allowed_step) {
+			diff = allowed_step;
 		} else if (diff < 0) {
 			diff = 0;  /* don't decrease while charging */
+		}
+		if (plugin_hold && diff > 0) {
+			diff = 0;
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
 	} else {
-		/* Discharging/idle: track depletion, downward only, rate-limited.
+		/* Discharging/idle: track depletion, downward only, time-limited.
 		 * An upward gauge correction is held until the next charge. */
 		int diff = (int)percent - (int)displayed_percent;
-		if (diff < -CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP) {
-			diff = -CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP;
+		if (now_ms < post_full_until_ms && diff < 0) {
+			/* Briefly hold 100% after unplugging from a completed
+			 * charge (the ~99 is the termination plateau, not real
+			 * discharge). Short by design: afterwards the gap to
+			 * the gauge is 1-2% and tracking resumes stepwise. */
+			diff = 0;
+		}
+		if (diff < -allowed_step) {
+			diff = -allowed_step;
 		} else if (diff > 0) {
-			diff = 0;  /* don't increase while discharging */
+			/* Re-anchor escape: a LARGE upward gap is the gauge
+			 * recovering from a phantom-drained counter, not
+			 * display churn. Let it catch up at the time-limited
+			 * rate; small corrections stay held (anti-churn). */
+			diff = (diff >= BATTERY_DISPLAY_REANCHOR_THRESHOLD)
+				       ? allowed_step
+				       : 0;
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
+	}
+	if (display_percent != last_percent) {
+		last_display_change_ms = now_ms;
 	}
 
 	/* Update battery percent (display value) */
@@ -619,12 +759,17 @@ static void battery_delayed_update_handler(struct k_work *work)
 static void battery_level_handler(struct k_work *work)
 {
 	read_and_update();
-	/* Persist the fuel-gauge state when its displayed integer SoC changes.
-	 * The SoC moves slowly, so this writes infrequently — not every poll —
-	 * to avoid wearing the LittleFS settings flash. The graceful shutdown/
-	 * reboot paths also save (a fresh copy) via battery_save_fg_state(). */
-	if (last_percent != last_saved_soc) {
-		battery_save_fg_state_unlocked();  /* already under battery_mutex */
+	/* Persist the fuel-gauge state when its displayed integer SoC changes,
+	 * and at least every 10 polls (~10 min) so a reboot never loses more
+	 * than ~10 min of coulomb counting. read_and_update() has already
+	 * released battery_mutex, so take it here — the save reads the library
+	 * state, which must not race a concurrent poll. */
+	static uint32_t fg_save_polls;
+	if (last_percent != last_saved_soc || ++fg_save_polls >= 10) {
+		fg_save_polls = 0;
+		k_mutex_lock(&battery_mutex, K_FOREVER);
+		battery_save_fg_state_unlocked();
+		k_mutex_unlock(&battery_mutex);
 		last_saved_soc = last_percent;
 	}
 	k_work_schedule(&battery_level_work, K_SECONDS(60));
@@ -678,12 +823,34 @@ int battery_init(void)
 		max_charge_current = (float)value.val1 + ((float)value.val2 / 1000000);
 		term_charge_current = max_charge_current / 10.f;
 
+		/* Stale-state heal — MUST run before nrf_fuel_gauge_init():
+		 * once init consumes the restored blob there is no way to
+		 * discard it. If the persisted display seed is far below what
+		 * the boot-time (near-relaxed) voltage says, the restored
+		 * coulomb counter was phantom-drained (idle-sampling bias,
+		 * WiFi over-compensation, or the pack charged while the device
+		 * was off). Drop the blob so init re-estimates from voltage,
+		 * and leave the display unseeded so the first poll adopts the
+		 * fresh estimate. */
+		if (fg_state_loaded &&
+		    (int)voltage_soc_estimate(init_params.v0) -
+			    (int)fg_state_record.displayed_soc >=
+			    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
+			LOG_WRN("stale fg state: %.3fV vs seed %u%% -> new estimate",
+				init_params.v0,
+				(unsigned int)fg_state_record.displayed_soc);
+			fg_state_loaded = false;
+			init_params.state = NULL;
+			displayed_percent = 0xFF;
+		}
+
 		/* Initialize fuel gauge */
 		ret = nrf_fuel_gauge_init(&init_params, NULL);
 		if (ret < 0) {
 			LOG_WRN("fuel gauge init %d, using voltage SoC", ret);
 		} else {
 			fg_initialized = true;
+
 			LOG_INF("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
 
 			/* Seed the directional-smoothed display from the persisted value so

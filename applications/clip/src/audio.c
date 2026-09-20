@@ -25,6 +25,7 @@
 #endif
 
 #include "audio.h"
+#include "haptic.h"
 #include "clip.h"
 #include "config.h"
 #include "storage.h"
@@ -46,7 +47,7 @@ static const struct device *mic_regulator =
 static const struct gpio_dt_spec pdm_en_gpio = {
 	.port = DEVICE_DT_GET(DT_NODELABEL(gpio1)),
 	.pin = 14,
-	.dt_flags = GPIO_OUTPUT | GPIO_ACTIVE_HIGH,
+	.dt_flags = GPIO_ACTIVE_HIGH,
 };
 
 /* PCM stream configuration for DMIC */
@@ -451,9 +452,33 @@ bool audio_is_paused(void)
     return paused;
 }
 
+/* The haptic motor's mechanical noise couples into the PDM mics; a
+ * confirmation buzz that overlaps capture ends up recorded at the start of
+ * the session. Wait (bounded) for any queued/running pattern to finish
+ * before the mics are powered on. */
+static void audio_wait_haptic_quiet(void)
+{
+	bool waited = false;
+
+	for (int i = 0; i < 75 && haptic_is_busy(); i++) {
+		waited = true;
+		k_sleep(K_MSEC(20));
+	}
+	if (waited) {
+		/* Electrical off is not mechanical quiet: the eccentric-mass
+		 * motor rings down after the GPIO deasserts and the residual
+		 * vibration couples into the mics. Kept SHORT on purpose —
+		 * recording-start content matters more than a perfectly clean
+		 * first instant. Trade residual buzz vs lost audio here. */
+		k_sleep(K_MSEC(50));
+	}
+}
+
 /* Internal recording initialization */
 static int audio_start_recording_internal(enum audio_mode mode)
 {
+	audio_wait_haptic_quiet();
+
     int ret;
     struct clip_context *c = clip_get_context();
 
@@ -690,7 +715,9 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
 
                 file_start_frame_count = recording_frame_count;
 
-                /* Power on mic and restart DMIC */
+                /* Power on mic and restart DMIC (after any haptic
+                 * pattern has finished — see audio_wait_haptic_quiet) */
+                audio_wait_haptic_quiet();
                 mic_power_on();
                 ret = dmic_trigger(dmic_dev, DMIC_TRIGGER_START);
                 if (ret < 0) {

@@ -29,6 +29,7 @@
 #include "storage.h"
 #include "transfer.h"
 #include "usb_cdc.h"
+#include "button.h"
 #include "config.h"
 
 LOG_MODULE_REGISTER(clip_event, LOG_LEVEL_WRN); /* chatty event-flow logs */
@@ -106,11 +107,17 @@ struct k_sem event_notify_sem;
 #define OTA_PROGRESS_POLL_INTERVAL_MS  200
 
 static struct k_work_delayable ota_progress_work;
-static bool ota_in_progress = false;
+/* Atomic: read cross-thread from the button callback's input gate. */
+static atomic_t ota_in_progress = ATOMIC_INIT(0);
+
+bool clip_event_ota_in_progress(void)
+{
+	return atomic_get(&ota_in_progress) != 0;
+}
 
 static void ota_progress_work_handler(struct k_work *work)
 {
-    if (ota_in_progress && g_img_mgmt_state.size > 0) {
+    if (atomic_get(&ota_in_progress) && g_img_mgmt_state.size > 0) {
         size_t offset = g_img_mgmt_state.off;
         size_t total = g_img_mgmt_state.size;
         uint8_t pct = 0;
@@ -121,7 +128,7 @@ static void ota_progress_work_handler(struct k_work *work)
         }
 
         /* Reschedule work if OTA still in progress and not complete */
-        if (ota_in_progress && pct < 100) {
+        if (atomic_get(&ota_in_progress) && pct < 100) {
             k_work_schedule(&ota_progress_work, K_MSEC(OTA_PROGRESS_POLL_INTERVAL_MS));
         }
     }
@@ -162,7 +169,7 @@ static enum mgmt_cb_return mcumgr_dfu_cb(uint32_t event, enum mgmt_cb_return pre
         g_ota_total_size = 0;
         g_ota_chunk_count = 0;
         k_mutex_unlock(&ota_mutex);
-        ota_in_progress = true;
+        atomic_set(&ota_in_progress, 1);
         /* Start periodic work to poll g_img_mgmt_state */
         k_work_schedule(&ota_progress_work, K_MSEC(OTA_PROGRESS_POLL_INTERVAL_MS));
         clip_post_event(CLIP_EVENT_OTA_START);
@@ -174,9 +181,9 @@ static enum mgmt_cb_return mcumgr_dfu_cb(uint32_t event, enum mgmt_cb_return pre
             k_mutex_lock(&ota_mutex, K_FOREVER);
 
             /* Detect OTA resume: first chunk with offset > 0 means resuming */
-            if (!ota_in_progress && check->req && check->req->off > 0) {
+            if (!atomic_get(&ota_in_progress) && check->req && check->req->off > 0) {
                 LOG_INF("OTA resumed at offset %zu", (size_t)check->req->off);
-                ota_in_progress = true;
+                atomic_set(&ota_in_progress, 1);
                 k_work_schedule(&ota_progress_work, K_MSEC(OTA_PROGRESS_POLL_INTERVAL_MS));
                 clip_post_event(CLIP_EVENT_OTA_START);
             }
@@ -234,7 +241,7 @@ static enum mgmt_cb_return mcumgr_dfu_cb(uint32_t event, enum mgmt_cb_return pre
         g_ota_total_size = 0;
         g_ota_chunk_count = 0;
         k_mutex_unlock(&ota_mutex);
-        ota_in_progress = false;
+        atomic_clear(&ota_in_progress);
         /* Cancel the progress work */
         k_work_cancel_delayable(&ota_progress_work);
         display_set_ota_progress(100);
@@ -244,7 +251,7 @@ static enum mgmt_cb_return mcumgr_dfu_cb(uint32_t event, enum mgmt_cb_return pre
         g_ota_total_size = 0;
         g_ota_chunk_count = 0;
         k_mutex_unlock(&ota_mutex);
-        ota_in_progress = false;
+        atomic_clear(&ota_in_progress);
         k_work_cancel_delayable(&ota_progress_work);
         clip_post_event(CLIP_EVENT_OTA_DONE);
     }
@@ -256,7 +263,7 @@ void clip_event_ota_cancel(void)
 {
     if (ota_in_progress) {
         LOG_INF("OTA cancelled (BLE disconnect)");
-        ota_in_progress = false;
+        atomic_clear(&ota_in_progress);
         k_work_cancel_delayable(&ota_progress_work);
         clip_post_event(CLIP_EVENT_OTA_DONE);
     }
@@ -352,7 +359,6 @@ int clip_event_init(void)
     mcumgr_dfu_cb_stopped.event_id = MGMT_EVT_OP_IMG_MGMT_DFU_STOPPED;
     mgmt_callback_register(&mcumgr_dfu_cb_stopped);
 
-    LOG_INF("Event dispatcher initialized");
     return 0;
 }
 
@@ -565,6 +571,14 @@ static enum clip_event_result execute_transition(enum clip_event event,
             return CLIP_EVENT_INVALID;
         }
 
+        /* Feedback FIRST: haptic (non-blocking, own thread) + UI flags post
+         * instantly at the button threshold, BEFORE the SD-bound file flush
+         * below — which can take hundreds of ms when a transfer is reading
+         * the card. The stop itself completes right after. */
+        haptic_play_pattern(HAPTIC_DOUBLE);  /* stop = 2 buzzes (button or AT) */
+        display_post_event(UI_EVENT_REC_STOP);
+        display_set_recording(false, false);
+
         err = audio_stop_recording();
         if (err == -ETIMEDOUT) {
             /* Stop was requested but the audio thread is slow to flush/close
@@ -578,9 +592,6 @@ static enum clip_event_result execute_transition(enum clip_event event,
             LOG_ERR("audio_stop_recording failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
-        haptic_play_pattern(HAPTIC_DOUBLE);  /* stop = 2 buzzes (button or AT) */
-        display_post_event(UI_EVENT_REC_STOP);
-        display_set_recording(false, false);
         {
             struct audio_stats stats;
             int dur = -1;
@@ -612,12 +623,14 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_RESUME:
     {
+        /* Buzz first: the audio thread waits for haptic quiet before
+         * re-powering the mics, so the motor noise is not recorded. */
+        haptic_play_pattern(HAPTIC_SHORT);
         err = audio_resume_recording();
         if (err) {
             LOG_ERR("audio_resume_recording failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
-        haptic_play_pattern(HAPTIC_SHORT);
         display_post_event(UI_EVENT_REC_RESUME);
         display_set_recording(true, c->config.mode == MODE_ENHANCED);
         ble_notify_state_change("RECORDING", audio_get_session_id(), -1);
@@ -687,46 +700,77 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_POWER_OFF_EXEC:
     {
-        /* Cancel any active transfer so it stops reading the SD before we cut
-         * power. Bounded wait so a stuck transfer can't block shutdown. */
+        /* Ignore all button input from here on: the cleanup below runs
+         * for hundreds of ms and presses during it used to pop the
+         * status bar over the power-off screen (or race a START before
+         * ship mode cut power). */
+        button_shutdown_lockout();
+
+        /* Keep the POWER OFF screen lit until power is actually cut: a
+         * blank-but-alive device with dead buttons reads as "already
+         * off", and a user pressing the button to wake it gets no
+         * response. The screen dies together with ship mode. */
+        /* Confirmation buzz plays on the haptic thread WHILE we clean
+         * up below — only wait out the REMAINING pattern time just
+         * before power is cut, instead of a serial 400 ms sleep. */
+        haptic_play_pattern(HAPTIC_DOUBLE);
+        /* Cut power no sooner than this: buzz (300 ms) finishes with a
+         * short beat after it — killing BUCK mid-spin chops the buzz
+         * and the whole shutdown reads as abrupt. */
+        int64_t power_cut_earliest = k_uptime_get() + 800;
+
+        /* Cancel any active transfer so it stops reading the SD before
+         * we cut power. Bounded (1 s) so a stuck transfer can't drag
+         * the shutdown out. */
         if (transfer_is_active()) {
             LOG_INF("Cancelling transfer before power off");
             transfer_cancel();
-            for (int i = 0; i < 20 && transfer_is_active(); i++) {
-                k_sleep(K_MSEC(100));   /* up to ~2s */
+            for (int i = 0; i < 10 && transfer_is_active(); i++) {
+                k_sleep(K_MSEC(100));   /* up to ~1s */
             }
         }
 
-        /* Stop recording if active, to save file before shutdown */
+        /* Stop recording if active, to save the file before shutdown.
+         * audio_stop_recording() already waits for the audio thread's
+         * close+fs_sync, so no extra settle on success. */
         if (audio_is_recording()) {
             LOG_INF("Stopping recording before power off");
             int stop_rc = audio_stop_recording();
             if (stop_rc != 0) {
                 LOG_WRN("audio_stop %d (slow SD) grace", stop_rc);
                 k_sleep(K_MSEC(500));
-            } else {
-                k_sleep(K_MSEC(100));
             }
         }
-
-        haptic_play_pattern(HAPTIC_DOUBLE);
-        k_sleep(K_MSEC(400));
-        display_post_event(UI_EVENT_TIMEOUT);
 
         const struct device *regulators =
             DEVICE_DT_GET(DT_NODELABEL(npm1300_regulators));
         if (!device_is_ready(regulators)) {
+            /* Still alive: restore input so the device stays usable. */
             LOG_ERR("Regulators not ready for ship mode");
+            button_shutdown_unlock();
             return CLIP_EVENT_ERROR;
         }
 
-        /* Persist fuel gauge state before power-off so the SoC is continuous
-         * on the next boot (avoids the reboot % jump). */
-        battery_save_fg_state();
+        /* Persist fuel gauge state before power-off so the SoC is
+         * continuous on the next boot — but SKIP it when a fresh copy
+         * already exists: POWER_OFF_SHOW queued a save at the 3 s hold,
+         * and the settings-file rewrite (whole-file, incl. BLE bonds)
+         * costs ~1 s on LittleFS, which was doubling the shutdown
+         * delay for no benefit. */
+        if (battery_fg_state_age_ms() > 60000) {
+            battery_save_fg_state();
+        }
+
+        /* Hold the minimum shutdown window (buzz + a short beat). */
+        int64_t left = power_cut_earliest - k_uptime_get();
+        if (left > 0) {
+            k_sleep(K_MSEC(left));
+        }
 
         err = regulator_parent_ship_mode(regulators);
         if (err) {
             LOG_ERR("Failed to enter ship mode: %d", err);
+            button_shutdown_unlock();
             return CLIP_EVENT_ERROR;
         }
         return CLIP_EVENT_OK;

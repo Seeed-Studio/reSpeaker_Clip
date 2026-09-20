@@ -145,7 +145,6 @@ static void udp_server_thread(void *p1, void *p2, void *p3)
         return;
     }
 
-    LOG_INF("UDP server listening on port %d", WIFI_AP_UDP_PORT);
 
     while (server_running) {
         memset(udp_recv_buf, 0, sizeof(udp_recv_buf));
