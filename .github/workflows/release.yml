@@ -121,10 +121,11 @@ jobs:
         run: |
           TAG="${{ steps.ver.outputs.tag }}"
           VER="${{ steps.ver.outputs.version }}"
+          # --repo: the Actions workspace root is NOT a git repo (the
+          # checkout lives under respeaker_clip/), and 'gh release create'
+          # shells out to git to resolve the repo. Pass it explicitly.
           gh release create "$TAG" "output/$VER"/* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --notes-file "respeaker_clip/docs/release_notes/$TAG.md" \
             --prerelease
-          # No --verify-tag: it shells out to git, but the Actions workspace
-          # root isn't a git repo (the checkout lives under respeaker_clip/).
-          # The tag is guaranteed to exist — this workflow only runs on tag push.
