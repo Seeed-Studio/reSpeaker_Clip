@@ -243,6 +243,16 @@ static void gpio_button_thread(void *p1, void *p2, void *p3)
 
 	while (1) {
 		k_sem_take(&data->gpio_sem, K_FOREVER);
+		/* Drain stale counts: each GPIO edge gives a sem, but ONE
+		 * polling-loop invocation handles ALL edges until it breaks.
+		 * Excess sems make the loop re-enter on a stale wake and
+		 * misread a still-held button as a NEW press — clearing
+		 * long_press_triggered right after the max-level callback
+		 * fired, so the confirming RELEASE never fires (the
+		 * "stuck on power-off screen after rapid clicking" bug). */
+		while (k_sem_count_get(&data->gpio_sem) > 0) {
+			k_sem_take(&data->gpio_sem, K_NO_WAIT);
+		}
 		gpio_button_thread_cb(data->dev);
 	}
 }

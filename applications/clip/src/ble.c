@@ -704,7 +704,6 @@ int ble_init(void)
     k_work_schedule(&adv_timeout_work, K_MSEC(ADV_FAST_TIMEOUT_MS));
     is_fast_adv = true;
 
-    LOG_INF("BLE ready, device: %s", ble_ctx.device_name);
 
     return 0;
 }
@@ -848,7 +847,6 @@ int ble_send_file_data(const uint8_t *data, uint16_t len)
     total_sent += len;
     int64_t now = k_uptime_get();
     if (now - last_log_time >= 1000) {  /* Every 1 second */
-        LOG_INF("BLE sending: %u KB total", total_sent / 1024);
         last_log_time = now;
     }
 

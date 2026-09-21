@@ -562,7 +562,6 @@ notify:
 
 static void shutdown_thread_fn(void)
 {
-    struct clip_event_result_info discard;
     int err;
 
     while (true) {
@@ -631,7 +630,6 @@ static void shutdown_thread_fn(void)
         button_shutdown_unlock();
         display_post_event(UI_EVENT_STATUS_SHOW);
         ble_notify_event("poweroff", "failed");
-        (void)discard;
     }
 }
 
