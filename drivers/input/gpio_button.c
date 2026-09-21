@@ -97,7 +97,16 @@ static void gpio_button_thread_cb(const struct device *dev)
 
 		// 1. press detect
 		if (pressed) {
-			if (!data->waiting_for_release) {
+			/* long_press_triggered set means the max-level callback
+			 * already fired and we are polling for the physical
+			 * release that emits the confirming BUTTON_RELEASE. A
+			 * wake that still sees the pin pressed is stale (contact
+			 * bounce during the hold, a motor/EMI glitch, an edge
+			 * racing the fire). Registering a "new press" here would
+			 * clear long_press_triggered and swallow the confirming
+			 * RELEASE — the "release not recognized, stuck on the
+			 * power-off screen" bug. Fall through and keep polling. */
+			if (!data->waiting_for_release && !data->long_press_triggered) {
 				data->press_time = now;
 				data->press_count++;
 				data->waiting_for_release = true;
@@ -171,6 +180,17 @@ static void gpio_button_thread_cb(const struct device *dev)
 				if (data->level0_auto_fired) {
 					data->level0_auto_fired = false;
 					data->press_count = 0;
+					/* Release landed in the poll gap after the
+					 * max threshold but before the auto-fire
+					 * poll caught it: fire the max level now,
+					 * so a full 3 s hold is not misread as the
+					 * level-0 deferred action (would start a
+					 * recording instead of powering off). */
+					uint32_t max_idx = cfg->long_press_count - 1;
+					if (press_duration >= cfg->long_press_ms[max_idx] &&
+					    data->event_cb[max_idx]) {
+						data->event_cb[max_idx](dev, max_idx);
+					}
 					if (data->event_cb[BUTTON_RELEASE]) {
 						data->event_cb[BUTTON_RELEASE](
 							dev, BUTTON_RELEASE);

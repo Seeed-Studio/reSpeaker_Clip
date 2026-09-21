@@ -64,8 +64,12 @@ static void button_event_callback(const struct device *dev, enum button_action a
     /* Power-off screen pending (3 s hold reached, waiting for the
      * confirming release): ignore everything except that RELEASE, so
      * noise during the hold can't switch the UI away from the
-     * confirmation screen. */
-    if (atomic_get(&poweroff_screen_active) && action != BUTTON_RELEASE) {
+     * confirmation screen. A fresh max-level hold is allowed through
+     * as a retry: if the confirming RELEASE is ever lost, this latch
+     * would otherwise eat all input forever (dead buttons). Re-posting
+     * POWER_OFF_SHOW is idempotent. */
+    if (atomic_get(&poweroff_screen_active) && action != BUTTON_RELEASE &&
+        !(action >= BUTTON_LONG_PRESS_LEVEL_1 && action <= BUTTON_LONG_PRESS_LEVEL_3)) {
         return;
     }
 
