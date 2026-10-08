@@ -187,14 +187,22 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
 
     clip_cpu_boost_acquire();
 
-    /* Check if transfer is already active with file open */
-    if (transfer_is_active() && transfer_file_open) {
+    /* Busy must answer IMMEDIATELY: the old check also required
+     * transfer_file_open, so the between-files window of a multi-file
+     * sync fell through to the 3 s silent wait below — every host
+     * re-issue in that window blocked the AT channel 3 s and came back
+     * as -ETIMEDOUT, which carries no busy keyword (the app's
+     * cancel-and-retry self-heal never fires) and reads as a failure
+     * -> retry storm. */
+    if (transfer_is_active()) {
         clip_cpu_boost_release();
         LOG_WRN("Transfer already active");
         return -EBUSY;
     }
 
-    /* Wait for transfer thread to be idle (replaces 3 polling loops) */
+    /* Wait for transfer thread to be idle — this now only covers the
+     * short window where a finished transfer is parking (state already
+     * left TRANSMITTING). */
     if (k_sem_take(&transfer_idle_sem, K_SECONDS(3)) != 0) {
         clip_cpu_boost_release();
         LOG_ERR("Transfer thread not idle after 3s");
@@ -333,14 +341,16 @@ int transfer_resume_from(const char *session_id, const char *start_file, struct 
 
     clip_cpu_boost_acquire();
 
-    /* Check if transfer is already active with file open */
-    if (transfer_is_active() && transfer_file_open) {
+    /* Busy answers immediately — see transfer_start() for why the old
+     * transfer_file_open condition was too narrow (between-files window
+     * fell into the 3 s wait below). */
+    if (transfer_is_active()) {
         clip_cpu_boost_release();
         LOG_WRN("Transfer already active");
         return -EBUSY;
     }
 
-    /* Wait for transfer thread to be idle */
+    /* Wait for transfer thread to be idle — short park window only. */
     if (k_sem_take(&transfer_idle_sem, K_SECONDS(3)) != 0) {
         clip_cpu_boost_release();
         LOG_ERR("Transfer thread not idle after 3s");
