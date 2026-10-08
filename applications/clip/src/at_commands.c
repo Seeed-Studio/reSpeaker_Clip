@@ -239,12 +239,19 @@ static int cmd_gstat_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         free_space = stats.free_space_mb;
     }
 
-    /* Get recording duration and session ID if recording */
-    /* Check session_id first to handle startup window where recording is
-     * initializing but session_id is already set */
-    session_id = audio_get_session_id();
-    if (session_id != NULL && audio_get_stats(&audio_stats) == 0) {
-        recording_duration = (uint32_t)(audio_stats.recording_time_ms / 1000);
+    /* Get recording duration and session ID — ONLY while audio is
+     * actually running. audio_get_session_id()/stats deliberately keep
+     * the LAST recording's values after stop (the IDLE notification
+     * needs them), but leaking them here made hosts polling GSTAT after
+     * a stop (e.g. re-connecting after a link drop) show the previous
+     * recording's session and seconds as if it were still going. */
+    if (audio_is_recording()) {
+        session_id = audio_get_session_id();
+        /* session_id first: startup window where recording is
+         * initializing but session_id is already set */
+        if (session_id != NULL && audio_get_stats(&audio_stats) == 0) {
+            recording_duration = (uint32_t)(audio_stats.recording_time_ms / 1000);
+        }
     }
 
     /* Build response - format matches clip for compatibility
