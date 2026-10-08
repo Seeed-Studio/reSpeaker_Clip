@@ -86,6 +86,18 @@ int ble_send(const uint8_t *data, uint16_t len);
 int ble_send_file_data(const uint8_t *data, uint16_t len);
 
 /**
+ * @brief Send one RTC stream frame as a single notification (no retry)
+ *
+ * Like ble_send_file_data() but without the retry loop: the RTC path drops
+ * frames on TX backpressure instead of blocking the realtime pipeline.
+ *
+ * @param data Data to send (one complete protocol frame)
+ * @param len Length of data
+ * @return 0 on success, negative error code on failure
+ */
+int ble_send_stream_data(const uint8_t *data, uint16_t len);
+
+/**
  * @brief Check if BLE is connected
  *
  * @return true if connected, false otherwise
@@ -173,6 +185,27 @@ void ble_adv_restart_fast(void);
  * Called on AT command reception.
  */
 void ble_activity_refresh(void);
+
+/**
+ * @brief Request RTC-optimized connection parameters
+ *
+ * While an RTC stream is active, request a tight connection interval
+ * (7.5-15 ms) so 20 ms Opus frames can be delivered on cadence. Passing
+ * false reverts to the coexistence-friendly defaults (18.75-37.5 ms).
+ * Both variants keep the 8 s supervision timeout for WiFi coexistence.
+ * No-op when not connected.
+ *
+ * @param rtc true to request RTC parameters, false for defaults
+ */
+void ble_request_rtc_conn_params(bool rtc);
+
+/**
+ * @brief Get the currently negotiated connection interval
+ *
+ * Returns the last interval reported by the controller in 1.25 ms units
+ * (0 if unknown). Used by RTC stream diagnostics.
+ */
+uint16_t ble_get_conn_interval(void);
 
 /* Zero-copy response buffer size */
 #define BLE_RESPONSE_BUFFER_SIZE 1024

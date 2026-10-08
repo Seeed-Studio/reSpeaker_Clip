@@ -276,6 +276,45 @@ config CLIP_TRANSFER_CHUNK_SIZE
 	  BLE transport will split into multiple notifications automatically.
 
 # =============================================================================
+# RTC Streaming Configuration
+# =============================================================================
+
+config CLIP_RTC_QUEUE_FRAMES
+	int "RTC stream queue depth (20ms Opus frames)"
+	default 32
+	range 8 128
+	help
+	  Number of encoded frames the RTC queue can buffer. When full
+	  (consumer not started or BLE too slow) the oldest frame is
+	  dropped — RTC favors low latency over completeness.
+	  32 frames = 640 ms at 20 ms/frame.
+
+config CLIP_RTC_FRAME_MAX_BYTES
+	int "RTC queue slot size (bytes)"
+	default 384
+	range 128 1024
+	help
+	  Maximum encoded frame size stored per RTC queue slot. Opus at
+	  32 kbps/20 ms averages ~80 bytes; VBR peaks stay well below this.
+	  Frames exceeding the slot are dropped.
+
+config CLIP_RTC_START_TIMEOUT_SEC
+	int "RTC start timeout (seconds)"
+	default 5
+	range 1 300
+	help
+	  If AT+DOWNLOAD does not start the stream within this time after
+	  AT+START=RTC, the RTC session is aborted.
+
+config CLIP_RTC_STACK_SIZE
+	int "RTC stream thread stack size"
+	default 2048
+
+config CLIP_RTC_THREAD_PRIORITY
+	int "RTC stream thread priority"
+	default 4
+
+# =============================================================================
 # UDP Transport Configuration
 # =============================================================================
 

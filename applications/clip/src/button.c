@@ -99,10 +99,10 @@ static void button_event_callback(const struct device *dev, enum button_action a
 		 */
 		clip_post_event(CLIP_EVENT_STOP);  /* STOP handler vibrates */
 		atomic_set(&recording_stopped, 1);
-	} else if (state == CLIP_STATE_IDLE || state == CLIP_STATE_ERROR
-		   || state == CLIP_STATE_WIFI_SYNC) {
+	} else if (state == CLIP_STATE_IDLE) {
 		/* Vibrate to confirm long-press threshold.
-		 * Actual start deferred to RELEASE.
+		 * Actual RTC start is deferred to RELEASE so continuing to hold
+		 * can still enter the power-off flow without starting audio.
 		 */
 		haptic_play_pattern(HAPTIC_SHORT);
 	}
@@ -140,9 +140,16 @@ static void button_event_callback(const struct device *dev, enum button_action a
 	     * But handle as safety fallback.
 	     */
 	    clip_post_event(CLIP_EVENT_STOP);  /* STOP event handler vibrates */
-	} else if (state == CLIP_STATE_IDLE || state == CLIP_STATE_ERROR
-		   || state == CLIP_STATE_WIFI_SYNC) {
-	    clip_post_event(CLIP_EVENT_START);
+	} else if (state == CLIP_STATE_IDLE) {
+	    int ret;
+
+	    /* Reuse the same RTC START path as AT+START=RTC. BLE/notify and
+	     * audio readiness are validated centrally by clip_event.
+	     */
+	    ret = clip_post_start_event(true);
+	    if (ret != 0) {
+		LOG_WRN("RTC start event queue failed: %d", ret);
+	    }
 	}
 	break;
 

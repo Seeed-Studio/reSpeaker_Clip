@@ -16,6 +16,7 @@ class BaseTransport(ABC):
 
     def __init__(self) -> None:
         self._file_frame_handler: FileFrameHandler | None = None
+        self._file_frame_token = 0
         self._event_handler: EventHandler | None = None
 
     @property
@@ -35,8 +36,37 @@ class BaseTransport(ABC):
     async def send_command(self, command: str, *, timeout: float) -> dict[str, Any]:
         """Send one complete AT command and wait for its JSON response."""
 
-    def set_file_frame_handler(self, handler: FileFrameHandler | None) -> None:
+    def set_file_frame_handler(self, handler: FileFrameHandler | None) -> int | None:
+        """Install the file-frame consumer; returns a lease token.
+
+        The token lets the owner detach later without clobbering a handler
+        that a newer transfer installed in the meantime. Passing ``None``
+        clears unconditionally (legacy behavior).
+        """
+        if handler is None:
+            self._file_frame_handler = None
+            return None
         self._file_frame_handler = handler
+        self._file_frame_token += 1
+        return self._file_frame_token
+
+    def detach_file_frame_handler(self, token: int | None) -> bool:
+        """Atomically clear the handler only if ``token`` still owns the slot.
+
+        Synchronous compare-and-clear (no await in between), so it cannot
+        race a successor registration on the single-threaded loop. Idempotent:
+        detaching an already-released lease returns ``False`` and leaves the
+        current registration untouched. Returns ``True`` when this call removed
+        the handler, releasing the strong reference to it.
+        """
+        if (
+            token is not None
+            and self._file_frame_handler is not None
+            and token == self._file_frame_token
+        ):
+            self._file_frame_handler = None
+            return True
+        return False
 
     def set_event_handler(self, handler: EventHandler | None) -> None:
         self._event_handler = handler

@@ -29,11 +29,19 @@ LOG_MODULE_REGISTER(transport_ble, CONFIG_CLIP_LOG_LEVEL);
 #define FRAME_FILE_END      0x11
 #define FRAME_TRANSFER_DONE 0x12
 
+/* RTC live-stream frames (BLE only; UDP/WiFi streaming is not supported) */
+#define FRAME_STREAM_START  0x13  /* type(1) + sid_len(1) + session_id(N) */
+#define FRAME_STREAM_DATA   0x14  /* type(1) + seq(2) + len(2) + opus(N) */
+#define FRAME_STREAM_END    0x15  /* type(1) + reason(1) */
+
 /* DATA frame header: type(1) + seq(2) + len(2) = 5 bytes (no per-frame CRC for BLE) */
 #define BLE_DATA_HEADER_SIZE 5
 
 /* Max data payload per BLE DATA frame (computed from actual negotiated MTU) */
 static uint16_t max_data_payload;
+
+/* Sequence counter for RTC STREAM_DATA frames (independent of file seq) */
+static uint16_t stream_seq;
 
 /* ---- Per-file state ---- */
 static uint16_t next_seq;
@@ -100,6 +108,40 @@ static int build_transfer_done_frame(uint8_t *buf,
 	buf[2 + sid_len + 3] = (file_count >> 24) & 0xFF;
 
 	return 2 + sid_len + 4;
+}
+
+static int build_stream_start_frame(uint8_t *buf, const char *session_id)
+{
+	uint8_t sid_len = (uint8_t)strlen(session_id);
+	if (sid_len > 63) {
+		sid_len = 63;
+	}
+
+	buf[0] = FRAME_STREAM_START;
+	buf[1] = sid_len;
+	memcpy(&buf[2], session_id, sid_len);
+
+	return 2 + sid_len;
+}
+
+static int build_stream_data_frame(uint8_t *buf, uint16_t seq,
+				   const uint8_t *data, uint16_t data_len)
+{
+	buf[0] = FRAME_STREAM_DATA;
+	buf[1] = seq & 0xFF;
+	buf[2] = (seq >> 8) & 0xFF;
+	buf[3] = data_len & 0xFF;
+	buf[4] = (data_len >> 8) & 0xFF;
+	memcpy(&buf[BLE_DATA_HEADER_SIZE], data, data_len);
+
+	return BLE_DATA_HEADER_SIZE + data_len;
+}
+
+static int build_stream_end_frame(uint8_t *buf, uint8_t reason)
+{
+	buf[0] = FRAME_STREAM_END;
+	buf[1] = reason;
+	return 2;
 }
 
 /* BLE Transport Context */
@@ -292,4 +334,57 @@ void transport_ble_update_connection(void *conn, bool ready)
 struct transport *transport_ble_get(void)
 {
     return &ble_ctx.tp;
+}
+
+/* ========================================================================== */
+/* RTC live-stream frames (BLE only)                                          */
+/* ========================================================================== */
+
+/* Max notify payload = negotiated MTU - 3 (ATT header). Returns a safe
+ * default when no connection is up. */
+static uint16_t stream_notify_max(void)
+{
+    void *conn = ble_get_connection();
+    uint16_t mtu = conn ? ble_get_mtu(conn) : 23;
+
+    return (mtu > 3) ? (uint16_t)(mtu - 3) : 20;
+}
+
+int transport_ble_send_stream_start(const char *session_id)
+{
+    uint8_t frame[2 + 63];
+    int frame_len = build_stream_start_frame(frame, session_id);
+
+    stream_seq = 0;
+    LOG_INF("STREAM_START: %s", session_id);
+    return ble_send_stream_data(frame, (uint16_t)frame_len);
+}
+
+int transport_ble_send_stream_data(const uint8_t *data, uint16_t len)
+{
+    /* One Opus frame per STREAM_DATA frame (no slicing). Reject anything
+     * that cannot fit in a single notification. */
+    uint16_t notify_max = stream_notify_max();
+
+    if ((uint16_t)(BLE_DATA_HEADER_SIZE + len) > notify_max) {
+        return -EMSGSIZE;
+    }
+
+    uint8_t frame[BLE_DATA_HEADER_SIZE + CONFIG_CLIP_RTC_FRAME_MAX_BYTES];
+    int frame_len = build_stream_data_frame(frame, stream_seq, data, len);
+
+    int ret = ble_send_stream_data(frame, (uint16_t)frame_len);
+    if (ret == 0) {
+        stream_seq++;
+    }
+    return ret;
+}
+
+int transport_ble_send_stream_end(uint8_t reason)
+{
+    uint8_t frame[2];
+    int frame_len = build_stream_end_frame(frame, reason);
+
+    LOG_INF("STREAM_END: reason=%u", reason);
+    return ble_send_stream_data(frame, (uint16_t)frame_len);
 }

@@ -29,6 +29,7 @@
 #include "wifi.h"
 #include "storage.h"
 #include "transfer.h"
+#include "rtc_stream.h"
 #include "usb_cdc.h"
 #include "button.h"
 #include "config.h"
@@ -86,6 +87,7 @@ static const uint8_t transition_table[CLIP_STATE_OTA + 1][CLIP_EVENT_COUNT] = {
 
 struct clip_event_item {
     enum clip_event event;
+    bool start_rtc;
     struct k_sem *done_sem;
     struct clip_event_result_info *result;
 };
@@ -168,6 +170,7 @@ static void ota_progress_work_handler(struct k_work *work)
 
 static atomic_t g_state;
 static atomic_t g_boost_refcnt;
+static bool current_start_rtc;
 
 /* OTA progress tracking - protected by ota_mutex (accessed from MCUmgr cb + work queue) */
 static K_MUTEX_DEFINE(ota_mutex);
@@ -449,9 +452,12 @@ enum clip_state clip_event_get_state(void)
 /* Event Submission                                                            */
 /* ========================================================================== */
 
-int clip_post_event(enum clip_event event)
+static int post_event_async(enum clip_event event, bool start_rtc)
 {
-    struct clip_event_item item = { .event = event };
+    struct clip_event_item item = {
+        .event = event,
+        .start_rtc = start_rtc,
+    };
 
     int ret = k_msgq_put(&clip_ev_msgq, &item, K_NO_WAIT);
     if (ret != 0) {
@@ -463,14 +469,15 @@ int clip_post_event(enum clip_event event)
     return 0;
 }
 
-int clip_post_event_sync(enum clip_event event,
-                         struct clip_event_result_info *info)
+static int post_event_sync(enum clip_event event, bool start_rtc,
+                           struct clip_event_result_info *info)
 {
     struct k_sem sem;
     k_sem_init(&sem, 0, 1);
 
     struct clip_event_item item = {
         .event = event,
+        .start_rtc = start_rtc,
         .done_sem = &sem,
         .result = info,
     };
@@ -487,6 +494,28 @@ int clip_post_event_sync(enum clip_event event,
     k_sem_give(&event_notify_sem);
     k_sem_take(&sem, K_FOREVER);
     return 0;
+}
+
+int clip_post_event(enum clip_event event)
+{
+    return post_event_async(event, false);
+}
+
+int clip_post_start_event(bool rtc)
+{
+    return post_event_async(CLIP_EVENT_START, rtc);
+}
+
+int clip_post_event_sync(enum clip_event event,
+                         struct clip_event_result_info *info)
+{
+    return post_event_sync(event, false, info);
+}
+
+int clip_post_start_event_sync(bool rtc,
+                               struct clip_event_result_info *info)
+{
+    return post_event_sync(CLIP_EVENT_START, rtc, info);
 }
 
 /* ========================================================================== */
@@ -521,6 +550,10 @@ void clip_event_process(void)
             goto notify;
         }
 
+        /* The START mode is carried by this queue item, so concurrent
+         * producers cannot redirect one another's request. */
+        current_start_rtc = item.event == CLIP_EVENT_START && item.start_rtc;
+
         /* Special case: recording blocked while WiFi active */
         if (current == CLIP_STATE_WIFI_SYNC && item.event == CLIP_EVENT_START) {
             LOG_INF("Recording blocked: WiFi active");
@@ -531,8 +564,11 @@ void clip_event_process(void)
             goto notify;
         }
 
-        /* Special case: recording blocked while USB MSC active */
-        if (usb_cdc_is_enabled() && item.event == CLIP_EVENT_START) {
+		/* Special case: recording blocked while USB MSC active. RTC is
+		 * exempt: it streams over BLE and never touches the SD, so it
+		 * cannot conflict with MSC's exclusive SD access. */
+		if (usb_cdc_is_enabled() && item.event == CLIP_EVENT_START &&
+		    !current_start_rtc) {
             LOG_INF("Recording blocked: USB MSC active");
             display_post_event(UI_EVENT_USB_BLOCKED);
             if (item.result) {
@@ -690,6 +726,36 @@ static enum clip_event_result execute_transition(enum clip_event event,
     {
         struct clip_context *ctx = clip_get_context();
 
+        if (current_start_rtc) {
+            /* RTC session: pipeline only — no SD session, works on a full
+             * card, but requires a BLE consumer ready to subscribe. */
+            if (!ble_is_connected() || !ble_is_file_data_notify_enabled()) {
+                LOG_WRN("RTC refused: BLE link or data notify not ready");
+                return CLIP_EVENT_INVALID;
+            }
+
+            /* Ask for tight connection parameters now so they have the
+             * whole session-setup round trip to apply before streaming
+             * begins (rtc_stream_start waits for them). */
+            ble_request_rtc_conn_params(true);
+
+            err = audio_start_rtc();
+            if (err) {
+                if (err == -EBUSY) {
+                    return CLIP_EVENT_BUSY;
+                }
+                LOG_ERR("audio_start_rtc failed: %d", err);
+                display_post_error("Rec Fail");
+                return CLIP_EVENT_ERROR;
+            }
+
+            rtc_stream_session_begin(audio_get_session_id());
+            display_post_event(UI_EVENT_REC_START);
+            display_set_recording(true, true);
+            ble_notify_state_change("STREAMING", audio_get_session_id(), -1);
+            return CLIP_EVENT_OK;
+        }
+
         /* SD may be idle-powered-off — bring it up before recording writes */
         err = storage_ensure_mounted();
         if (err) {
@@ -750,6 +816,16 @@ static enum clip_event_result execute_transition(enum clip_event event,
             LOG_ERR("audio_stop_recording failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
+
+        /* RTC teardown: STREAM_END first (if the stream is up), then state.
+         * No-op when STOP was posted by rtc_stream itself (timeout / BLE
+         * disconnect already ended the session). (Haptic/UI feedback for
+         * the stop already fired in the Feedback-FIRST block above.) */
+        if (rtc_stream_session_active()) {
+            rtc_stream_stop(RTC_END_REASON_STOPPED);
+            rtc_stream_session_end();
+        }
+
         {
             struct audio_stats stats;
             int dur = -1;
@@ -799,6 +875,14 @@ static enum clip_event_result execute_transition(enum clip_event event,
     {
         if (!audio_is_recording()) {
             return CLIP_EVENT_INVALID;
+        }
+
+        /* RTC sessions have no on-card session to bookmark (button path;
+         * AT+MARK is rejected earlier in the AT layer). */
+        if (rtc_stream_session_active()) {
+            LOG_WRN("MARK not supported in RTC mode");
+            haptic_play_pattern(HAPTIC_SHORT);
+            return CLIP_EVENT_OK;
         }
 
         err = audio_add_bookmark();
