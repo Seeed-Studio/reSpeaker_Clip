@@ -72,6 +72,38 @@ static int transfer_next_file(void);
 static int transfer_send_chunk(void);
 static void transfer_cleanup(void);
 static void send_file_ready_event(const char *session_id, const char *filename, uint64_t size);
+
+/* Called by transfer_start()/transfer_resume_from() BEFORE acquiring the
+ * idle sem. Returns 0 when the caller should just answer OK (re-issue of
+ * the transfer that is already streaming exactly what was asked), -EBUSY
+ * for any other active transfer, -EALREADY when no transfer is active
+ * (caller proceeds with the start handshake).
+ *
+ * Hosts legitimately re-send AT+DOWNLOAD (response timeout, resume logic,
+ * UI retry). Answering an identical re-issue with an error either aborts
+ * the host's sync (-ETIMEDOUT carries no busy keyword, the app gives up
+ * after one retry) or triggers its cancel-and-restart self-heal (-EBUSY)
+ * — both interrupt a transfer already delivering what was asked. A
+ * cross-leg re-issue (different session or different transport, e.g. the
+ * stale-BLE-leg race the app's self-heal targets) still gets -EBUSY. */
+static int transfer_busy_check(const char *session_id, struct transport *tp)
+{
+    if (!transfer_is_active()) {
+        return -EALREADY;
+    }
+    bool same_leg =
+        current_transfer.state == TRANSFER_STATE_TRANSMITTING &&
+        current_transport && tp &&
+        current_transport->type == tp->type &&
+        strcmp(current_transfer.session_id, session_id) == 0;
+
+    if (same_leg) {
+        LOG_WRN("xfer reissue %s ignored", session_id);
+        return 0;
+    }
+    LOG_WRN("Transfer already active");
+    return -EBUSY;
+}
 static int send_file_complete_event(const char *filename);
 static void send_transfer_complete_once(const char *session_id, int file_count);
 static void generate_filename(uint32_t file_num, char *filename);
@@ -187,17 +219,12 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
 
     clip_cpu_boost_acquire();
 
-    /* Busy must answer IMMEDIATELY: the old check also required
-     * transfer_file_open, so the between-files window of a multi-file
-     * sync fell through to the 3 s silent wait below — every host
-     * re-issue in that window blocked the AT channel 3 s and came back
-     * as -ETIMEDOUT, which carries no busy keyword (the app's
-     * cancel-and-retry self-heal never fires) and reads as a failure
-     * -> retry storm. */
-    if (transfer_is_active()) {
+    /* Busy/idempotent gate: 0 = re-issue of the running transfer
+     * (answer OK), -EBUSY = other active transfer, -EALREADY = free. */
+    int busy = transfer_busy_check(session_id, tp);
+    if (busy != -EALREADY) {
         clip_cpu_boost_release();
-        LOG_WRN("Transfer already active");
-        return -EBUSY;
+        return busy;
     }
 
     /* Wait for transfer thread to be idle — this now only covers the
@@ -341,13 +368,12 @@ int transfer_resume_from(const char *session_id, const char *start_file, struct 
 
     clip_cpu_boost_acquire();
 
-    /* Busy answers immediately — see transfer_start() for why the old
-     * transfer_file_open condition was too narrow (between-files window
-     * fell into the 3 s wait below). */
-    if (transfer_is_active()) {
+    /* Busy/idempotent gate: 0 = re-issue of the running transfer
+     * (answer OK), -EBUSY = other active transfer, -EALREADY = free. */
+    int busy = transfer_busy_check(session_id, tp);
+    if (busy != -EALREADY) {
         clip_cpu_boost_release();
-        LOG_WRN("Transfer already active");
-        return -EBUSY;
+        return busy;
     }
 
     /* Wait for transfer thread to be idle — short park window only. */

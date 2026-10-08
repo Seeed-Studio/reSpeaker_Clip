@@ -124,7 +124,7 @@ static void generate_ap_ssid(void)
 		snprintf(ap_ssid, sizeof(ap_ssid), "%s%04X",
 				 WIFI_AP_SSID_PREFIX, (unsigned)(suffix & 0xFFFF));
 	}
-	LOG_INF("AP SSID: %s", ap_ssid);
+	LOG_DBG("AP SSID: %s", ap_ssid);
 }
 
 static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
@@ -225,7 +225,7 @@ int wifi_init(void)
 		}
 	}
 
-	LOG_INF("WiFi module initialized");
+	LOG_DBG("WiFi module initialized");
 
 
 	return 0;
@@ -310,7 +310,7 @@ static int wifi_start_dhcp_server(struct net_if *iface)
 	}
 	else
 	{
-		LOG_INF("DHCP server started");
+		LOG_DBG("DHCP server started");
 	}
 
 	return ret;
@@ -338,7 +338,7 @@ int wifi_on(void)
 	/* Bring up interface if not already up */
 	if (!net_if_is_admin_up(iface))
 	{
-		LOG_INF("Interface is down, bringing up");
+		LOG_DBG("Interface is down, bringing up");
 		ret = net_if_up(iface);
 		if (ret)
 		{
