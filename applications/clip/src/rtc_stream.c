@@ -13,7 +13,7 @@
 #include "transport_ble.h"
 #include "clip_event.h"
 
-LOG_MODULE_REGISTER(rtc_stream, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(rtc_stream, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* One queue slot: a single encoded Opus frame (20 ms). */
 struct rtc_frame {

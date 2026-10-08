@@ -18,7 +18,7 @@
 #include "clip.h"
 #include "config.h"
 
-LOG_MODULE_REGISTER(config, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(config, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* Settings keys */
 #define SETTING_MODE            "config/mode"

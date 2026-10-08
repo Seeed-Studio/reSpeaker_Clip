@@ -14,7 +14,7 @@
 #include "transport_udp.h"
 #include "usb_cdc.h"
 
-LOG_MODULE_REGISTER(at_server, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(at_server, LOG_LEVEL_WRN); /* chatty plumbing logs */
 
 /* Command queue item */
 struct at_queue_item {

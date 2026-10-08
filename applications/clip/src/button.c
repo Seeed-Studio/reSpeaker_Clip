@@ -101,8 +101,10 @@ static void button_event_callback(const struct device *dev, enum button_action a
 		atomic_set(&recording_stopped, 1);
 	} else if (state == CLIP_STATE_IDLE) {
 		/* Vibrate to confirm long-press threshold.
-		 * Actual RTC start is deferred to RELEASE so continuing to hold
+		 * Actual start deferred to RELEASE so continuing to hold
 		 * can still enter the power-off flow without starting audio.
+		 * (Button recording is always the SD pipeline; RTC live
+		 * streaming is AT-only — AT+START=rtc.)
 		 */
 		haptic_play_pattern(HAPTIC_SHORT);
 	}
@@ -143,12 +145,14 @@ static void button_event_callback(const struct device *dev, enum button_action a
 	} else if (state == CLIP_STATE_IDLE) {
 	    int ret;
 
-	    /* Reuse the same RTC START path as AT+START=RTC. BLE/notify and
-	     * audio readiness are validated centrally by clip_event.
-	     */
-	    ret = clip_post_start_event(true);
+	    /* Hold-release = SD recording START (deferred from the 1 s
+	     * threshold so continuing to hold enters power-off instead).
+	     * RTC live streaming stays AT-only — a button gesture that
+	     * silently skips the SD card is too easy to trigger by
+	     * accident. */
+	    ret = clip_post_event(CLIP_EVENT_START);
 	    if (ret != 0) {
-		LOG_WRN("RTC start event queue failed: %d", ret);
+		LOG_WRN("START event queue failed: %d", ret);
 	    }
 	}
 	break;

@@ -34,7 +34,7 @@
 #include "usb_cdc.h"
 #include "rtc_stream.h"
 
-LOG_MODULE_REGISTER(at_commands, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(at_commands, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* Delayed reboot work — allows response to be sent before rebooting */
 static struct k_work_delayable reboot_work;

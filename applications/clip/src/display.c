@@ -25,7 +25,7 @@
 #include "storage.h"
 #include "haptic.h"
 
-LOG_MODULE_REGISTER(display, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(display, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* =============================================================================
  * Display Configuration

@@ -21,7 +21,7 @@
 #include "transport_ble.h"
 #include "ble.h"
 
-LOG_MODULE_REGISTER(transport_ble, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(transport_ble, LOG_LEVEL_WRN); /* chatty plumbing logs */
 
 /* ---- Frame types (same as UDP) ---- */
 #define FRAME_DATA          0x01

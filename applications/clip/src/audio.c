@@ -681,7 +681,7 @@ static int audio_stop_recording_internal(void)
     /* Power off microphone to save power */
     mic_power_off();
 
-    LOG_INF("Recording stopped, releasing CPU boost");
+    LOG_DBG("Recording stopped, releasing CPU boost");
     clip_cpu_boost_release();
 
     /* Note: Keep encoder and DSP initialized for next recording
@@ -740,7 +740,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                 mic_power_off();
 
                 is_paused = true;
-                LOG_INF("Recording paused at %u sec", (unsigned int)(stats.recording_time_ms / 1000));
+                LOG_DBG("Recording paused at %u sec", (unsigned int)(stats.recording_time_ms / 1000));
 
                 /* Wait for resume signal */
                 while (is_paused && !stop_requested) {
@@ -776,7 +776,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                 /* Discard initial frames for DMIC settling */
                 dmic_flush_initial();
 
-                LOG_INF("Recording resumed: new file #%u", current_file_index);
+                LOG_DBG("Recording resumed: new file #%u", current_file_index);
                 continue;
             }
 
@@ -974,7 +974,7 @@ create_new_segment:
                             LOG_WRN("Failed to close segment file: %d", ret);
                         }
 
-                        LOG_INF("seg #%u: %u frm %uB %us",
+                        LOG_DBG("seg #%u: %u frm %uB %us",
                                 current_file_index, segment_frames, segment_bytes,
                                 segment_duration_sec);
                     }

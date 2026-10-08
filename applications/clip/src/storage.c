@@ -777,7 +777,7 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
     /* Mark this file as being written for transfer coordination */
     storage_set_writing_file(session_id, filename);
 
-    LOG_INF("file: %s (chunk %u)", filepath, chunk_index);
+    LOG_DBG("file: %s (chunk %u)", filepath, chunk_index);
     return 0;
 }
 

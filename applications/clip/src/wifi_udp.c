@@ -25,7 +25,7 @@
 #include "transport.h"
 #include "transport_udp.h"
 
-LOG_MODULE_REGISTER(wifi_udp, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(wifi_udp, LOG_LEVEL_WRN); /* chatty plumbing logs */
 
 /* State */
 static K_THREAD_STACK_DEFINE(udp_stack, CONFIG_CLIP_UDP_THREAD_STACK_SIZE);

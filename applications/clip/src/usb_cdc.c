@@ -19,7 +19,7 @@
 #include "transfer.h"
 #include "clip_usb_dfu.h"
 
-LOG_MODULE_REGISTER(usb, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(usb, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* USB device definition (Seeed VID 0x2886) */
 USBD_DEVICE_DEFINE(clip_usbd,

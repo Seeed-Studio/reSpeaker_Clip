@@ -38,7 +38,8 @@
 #include "usb_cdc.h"
 #include "rtc_stream.h"
 
-LOG_MODULE_REGISTER(main, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(main, LOG_LEVEL_WRN); /* flash budget: INF kept for
+ * battery/wifi/storage/button/audio */
 
 /* Global context */
 static struct clip_context g_ctx;
@@ -423,8 +424,8 @@ SYS_INIT(clip_xo_cap_init, POST_KERNEL, 0);
 int main(void)
 {
     /* Print version and build info at startup */
-    LOG_INF("Clip Firmware v%s", CLIP_VERSION);
-    LOG_INF("Build: %s %s", __DATE__, __TIME__);
+    LOG_WRN("Clip Firmware v%s", CLIP_VERSION); /* WRN so it survives the module diet — boot evidence */
+    LOG_WRN("Build: %s %s", __DATE__, __TIME__);
 
     int err;
 

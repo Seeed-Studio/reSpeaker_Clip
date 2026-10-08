@@ -23,7 +23,7 @@
 #include "clip_event.h"
 #include "rtc_stream.h"
 
-LOG_MODULE_REGISTER(ble, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(ble, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* BLE context */
 static struct ble_context ble_ctx = {
