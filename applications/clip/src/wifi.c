@@ -101,7 +101,9 @@ static void wifi_coex_configure(bool is_5ghz)
 	{
 		LOG_WRN("Coex PTA config failed: %d", ret);
 	}
-	LOG_INF("coex PTA (%s sep=%d ble=%d)", is_5ghz ? "5GHz" : "2.4GHz", sep, ble);
+	/* One-shot init detail; DBG keeps the debug FLASH budget in check
+	 * (INF level compiles this out). */
+	LOG_DBG("coex PTA (%s sep=%d ble=%d)", is_5ghz ? "5GHz" : "2.4GHz", sep, ble);
 }
 #endif
 

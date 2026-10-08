@@ -630,12 +630,13 @@ static int cmd_brightness_handler(struct at_cmd_ctx *ctx, char *response, size_t
 /* POWEROFF Command Handler - Shutdown the device */
 static int cmd_poweroff_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
-    /* The PMIC will not enter ship mode while VBUS/charging is present:
-     * the EXEC handler would fail, recover and notify "failed". Refuse
-     * up-front with a clear message instead. (The button path already
-     * gates on battery_charging.) */
-    if (clip_get_context()->status.battery_charging) {
-        return create_json_response(false, "Charging — unplug USB first",
+    /* The PMIC will not enter ship mode while VBUS is present: the EXEC
+     * handler would fail, recover and notify "failed". Refuse up-front
+     * with a clear message instead. Gate on VBUS presence, NOT on
+     * battery_charging — a FULL pack on USB reports charging=false but
+     * ship mode is still refused. (The button path uses the same gate.) */
+    if (battery_vbus_present()) {
+        return create_json_response(false, "USB power present — unplug USB first",
                                     NULL, response, len);
     }
 

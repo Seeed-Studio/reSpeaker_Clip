@@ -12,6 +12,7 @@
 
 #include "button.h"
 #include "clip_event.h"
+#include "battery.h"
 #include "haptic.h"
 
 LOG_MODULE_REGISTER(button, CONFIG_CLIP_LOG_LEVEL);
@@ -111,8 +112,11 @@ static void button_event_callback(const struct device *dev, enum button_action a
     case BUTTON_LONG_PRESS_LEVEL_2:
     case BUTTON_LONG_PRESS_LEVEL_3:
 	LOG_INF("LONG_PRESS_LVL (pwr off) act=%d st=%d", action, state);
-	if (clip_get_context()->status.battery_charging) {
-		LOG_INF("USB charging, ignore power off");
+	/* Gate on VBUS presence, not battery_charging: a FULL pack on USB
+	 * reports charging=false, but the PMIC still refuses ship mode with
+	 * VBUS up — the shutdown would walk the whole failure path. */
+	if (battery_vbus_present()) {
+		LOG_INF("USB power present, ignore power off");
 		break;
 	}
 	clip_post_event(CLIP_EVENT_POWER_OFF_SHOW);

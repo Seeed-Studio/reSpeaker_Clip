@@ -640,7 +640,10 @@ int config_generate_wifi_password(void)
         return err;
     }
 
-    LOG_INF("WiFi password generated: %s", ctx->config.wifi_password);
+    /* Do NOT log the password itself: debug builds mirror logs to the SD
+     * card and the UART console, and the AP credential must not persist
+     * there (CRA / EN 18031 finding). */
+    LOG_DBG("WiFi password generated");
     return 0;
 }
 
@@ -654,7 +657,12 @@ const char *config_get_wifi_password(void)
     struct clip_context *ctx = clip_get_context();
 
     if (ctx->config.wifi_password[0] == '\0') {
-        return "12345678";  /* Fallback if not generated yet */
+        /* Never fall back to a fixed universal password ("12345678" was
+         * a public default credential — CRA / EN 18031 finding): a
+         * missing password means first boot after settings loss; fill a
+         * fresh per-device one. sys_rand_get() cannot fail and the
+         * buffer is written even if persisting it fails (saved later). */
+        (void)config_generate_wifi_password();
     }
 
     return ctx->config.wifi_password;

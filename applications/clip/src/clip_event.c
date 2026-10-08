@@ -107,6 +107,15 @@ static void shutdown_thread_fn(void);
 K_MSGQ_DEFINE(clip_ev_msgq, sizeof(struct clip_event_item),
               EVENT_QUEUE_SIZE, 4);
 
+/* Set while the dedicated shutdown thread is tearing the system down.
+ * The shutdown sequence runs OUTSIDE this file's event loop, so without
+ * this gate an AT-posted START (clip_post_event_sync from BLE/USB) during
+ * the multi-second window would be dispatched after audio_stop_recording()
+ * completed — opening a fresh recording that ship mode (or the 8 s
+ * failsafe reboot) then cuts power into mid-write. Cleared only by the
+ * failed-ship-mode recovery path (a successful ship mode never returns). */
+static atomic_t shutdown_active = ATOMIC_INIT(0);
+
 /* ========================================================================== */
 /* Event Notification Semaphore                                               */
 /* ========================================================================== */
@@ -496,6 +505,17 @@ void clip_event_process(void)
     while (k_msgq_get(&clip_ev_msgq, &item, K_NO_WAIT) == 0) {
         enum clip_state current = (enum clip_state)atomic_get(&g_state);
 
+        /* Shutdown in progress: refuse new work (see shutdown_active).
+         * Drop the event — a queued START replayed after recovery would
+         * be stale — and hand sync callers CLIP_EVENT_BUSY. */
+        if (atomic_get(&shutdown_active)) {
+            LOG_INF("shutdown active, refusing event %d", item.event);
+            if (item.result) {
+                item.result->result = CLIP_EVENT_BUSY;
+            }
+            goto notify;
+        }
+
         if (item.event >= CLIP_EVENT_COUNT) {
             LOG_WRN("Invalid event: %d", item.event);
             goto notify;
@@ -567,6 +587,10 @@ static void shutdown_thread_fn(void)
     while (true) {
         k_sem_take(&shutdown_sem, K_FOREVER);
 
+        /* Gate the dispatcher for the whole sequence (see shutdown_active
+         * above): everything below runs outside its serialization. */
+        atomic_set(&shutdown_active, 1);
+
         /* Failsafe armed FIRST: everything below is best-effort. If ship
          * mode has not killed us within 8 s, force a clean reboot. */
         k_timer_start(&shutdown_failsafe, K_SECONDS(8), K_NO_WAIT);
@@ -627,6 +651,23 @@ static void shutdown_thread_fn(void)
         /* Still alive: ship mode could not be entered. Recover. */
         LOG_ERR("power-off failed (%d), recovering", err);
         k_timer_stop(&shutdown_failsafe);
+
+        /* The dispatcher was gated and this thread may have force-stopped
+         * audio while the machine still said RECORDING/PAUSED. A STOP
+         * through the dispatcher would be INVALID (audio is no longer
+         * recording), wedging the machine in a phantom RECORDING state
+         * where START/STATUS are table-invalid — re-sync by hand. */
+        enum clip_state now = (enum clip_state)atomic_get(&g_state);
+        if (now == CLIP_STATE_RECORDING || now == CLIP_STATE_PAUSED) {
+            display_set_recording(false, false);
+            ble_notify_state_change("IDLE", audio_get_session_id(), -1);
+            atomic_set(&g_state, CLIP_STATE_IDLE);
+        }
+
+        /* Drop anything queued while gated (a replayed START would be
+         * stale), then re-open the dispatcher and the UI. */
+        k_msgq_purge(&clip_ev_msgq);
+        atomic_clear(&shutdown_active);
         button_shutdown_unlock();
         display_post_event(UI_EVENT_STATUS_SHOW);
         ble_notify_event("poweroff", "failed");

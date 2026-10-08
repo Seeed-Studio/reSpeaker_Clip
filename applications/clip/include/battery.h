@@ -42,4 +42,9 @@ void battery_poll(void);
  */
 void battery_save_fg_state(void);
 
+/* VBUS present (USB plugged), regardless of active charging — a full pack on
+ * USB still has VBUS up and the PMIC refuses ship mode. Power-off paths gate
+ * on this, NOT on status.battery_charging (false once the charge completes). */
+bool battery_vbus_present(void);
+
 #endif /* CLIP_BATTERY_H */

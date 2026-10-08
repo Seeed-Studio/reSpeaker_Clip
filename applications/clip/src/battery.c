@@ -143,6 +143,9 @@ static int64_t last_display_change_ms = -BATTERY_DISPLAY_RATE_WINDOW_MS;
 static int64_t vbus_plugin_ms = -1;
 static bool charger_complete_seen;   /* charge completed this VBUS session */
 static int64_t post_full_until_ms;    /* hold 100% until this (unplug from full) */
+/* Cached VBUS presence, refreshed each poll (and seeded at init) —
+ * battery_vbus_present() consumers need it OUTSIDE the poll cadence. */
+static bool vbus_present_cached;
 
 static uint32_t fg_model_crc(void)
 {
@@ -299,6 +302,15 @@ void battery_save_fg_state(void)
 	k_mutex_unlock(&battery_mutex);
 }
 
+/* VBUS present (USB plugged), regardless of whether the charger is actively
+ * charging — a full battery on USB still has VBUS up, and the PMIC will not
+ * enter ship mode in that state. Power-off paths gate on THIS, not on
+ * status.battery_charging (which reads false once the charge completes). */
+bool battery_vbus_present(void)
+{
+	return vbus_present_cached;
+}
+
 static int read_sensors(float *voltage, float *current, float *temp, int32_t *chg_status)
 {
 	struct sensor_value val;
@@ -426,6 +438,7 @@ static void read_and_update_locked(void)
 
 	/* Get VBUS status */
 	vbus_connected = poll_vbus_status();
+	vbus_present_cached = vbus_connected;
 
 	/* ---- High-temperature charge gating (software hysteresis) ----
 	 * The HW hot threshold (45C, thermistor-hot-millidegrees in DTS)
@@ -521,7 +534,16 @@ static void read_and_update_locked(void)
 			}
 			i_feed = -current + wifi_load_a;
 		} else {
-			i_feed = (float)CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA / 1000000.0f;
+			/* Idle feed: configured average + any unseen WiFi load.
+			 * A client merely ASSOCIATED keeps the AP up (auto-off only
+			 * fires with no STA) without being fg_active — without
+			 * folding the estimate in here too, the AP-idle tier
+			 * (~59 mA) goes un-billed (~24%/h on the 240 mAh pack)
+			 * and SoC reads high. wifi_load_estimate_a() is 0 when
+			 * the AP is down. */
+			i_feed = (float)CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA /
+					 1000000.0f +
+				 wifi_load_estimate_a();
 			nrf_fuel_gauge_idle_set(voltage, temp, i_feed);
 		}
 
@@ -814,6 +836,9 @@ int battery_init(void)
 			init_params.v0, init_params.i0, init_params.t0,
 			(unsigned int)chg_status);
 
+		/* Seed the VBUS cache before the first power-off gate read */
+		vbus_present_cached = poll_vbus_status();
+
 		/* Zephyr sensor API: negative = discharging; nrf_fuel_gauge expects
 		 * negative = charging -- negate i0 so the fuel gauge starts correct. */
 		init_params.i0 = -init_params.i0;
@@ -831,8 +856,18 @@ int battery_init(void)
 		 * WiFi over-compensation, or the pack charged while the device
 		 * was off). Drop the blob so init re-estimates from voltage,
 		 * and leave the display unseeded so the first poll adopts the
-		 * fresh estimate. */
+		 * fresh estimate.
+		 *
+		 * Gated on VBUS absent: while USB is attached the NPM1300
+		 * charger runs autonomously and the terminal voltage is
+		 * I*R-elevated (CC) or pinned at the CV target — the same
+		 * artifact BATTERY_PLUGIN_HOLD_MS documents as ~+10%. A pack
+		 * at 75-85% rebooted during late charging would otherwise
+		 * show an inflated voltage estimate 20-30 points above the
+		 * seed and the heal would wrongly discard a healthy coulomb
+		 * counter, un-seeding the display until the next full cycle. */
 		if (fg_state_loaded &&
+		    !poll_vbus_status() &&
 		    (int)voltage_soc_estimate(init_params.v0) -
 			    (int)fg_state_record.displayed_soc >=
 			    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
