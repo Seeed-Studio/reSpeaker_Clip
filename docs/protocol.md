@@ -1,5 +1,10 @@
 # reSpeaker Clip - BLE AT Protocol Specification
 
+> **中文版：** [`protocol.zh-CN.md`](protocol.zh-CN.md) — full Chinese translation,
+> kept in sync with this file. On any divergence the English version is
+> authoritative; code blocks, field names, and error messages are the
+> device's literal bytes and are never translated.
+
 ## 1. Protocol Overview
 
 ### 1.1 Design Principles
@@ -339,12 +344,12 @@ AT+GSTAT
 ```
 
 **Fields:**
-- `state`: Current device state (IDLE/RECORDING/TRANSMITTING/WIFI_SYNC/PAUSED/ERROR)
+- `state`: Current device state (IDLE/RECORDING/TRANSMITTING/WIFI_SYNC/PAUSED/ERROR; OTA is defined but never entered during an upload)
 - `recording`: Whether actively recording (true/false)
-- `session`: Current session ID or null
-- `duration`: Current recording duration in seconds
+- `session`: Current session ID or null — **reported only while recording**; after stop it is `null` (the last id is kept internally for the stop notification only)
+- `duration`: Current recording duration in seconds — only while recording; `0` when stopped
 - `battery`: Battery percentage (0-100)
-- `charging`: Charging status (true/false)
+- `charging`: Charging status (true/false). Reads false when the battery is full even with USB attached — VBUS presence gates power-off, not this field
 - `temp`: Battery temperature in °C (NTC via NPM1300)
 - `voltage`: Battery voltage in mV
 - `mode`: Recording mode (normal/enhanced)
@@ -504,7 +509,10 @@ AT+START=normal
 ```
 
 **Parameters:**
-- `mode`: "normal" or "enhanced" (legacy aliases: "stereo" = normal, "merge" = enhanced; case-insensitive). Omitted → current mode.
+- `mode`: "normal", "enhanced", or "rtc" (legacy aliases: "stereo" = normal, "merge" = enhanced; all case-insensitive). Omitted → current mode.
+  `rtc` starts a live stream instead of an SD recording — BLE only, with the
+  File Data characteristic subscribed (Section 4.8). The button cannot start
+  RTC; a button hold-release always starts the SD pipeline.
 
 **Response:**
 ```json
@@ -931,8 +939,19 @@ After the start response, the device sends binary frames on the File Data charac
 5. Client sends `AT+DOWNLOAD=session:last_received_file`
 6. Transfer resumes from next file
 
+**Re-issue While a Transfer Runs (idempotent):**
+
+`AT+DOWNLOAD` for the session **already streaming over the same transport**
+answers `{"ok":true}` with the current progress and changes nothing — hosts
+legitimately re-send after a response timeout or UI retry, and interrupting a
+running transfer for an identical request would be wrong. A re-issue for a
+**different session or different transport** (e.g. the stale-BLE-leg race
+during a WiFi handoff) is rejected **immediately** with
+`"Transfer already in progress"`; so is a re-issue while the transfer is
+paused (use `AT+RESUME`). No busy path waits silently.
+
 **Error Cases:**
-- `{"ok":false,"msg":"Transfer already in progress"}` / `"Session or file not found"`
+- `{"ok":false,"msg":"Transfer already in progress"}` (immediate — see above) / `"Session or file not found"`
 - `"Missing session_id"`, `"Invalid session ID"`, or `"DOWNLOAD argument too long"`
 - `"Invalid download filename"` unless the resume file is exactly
   `NNNN.opus`, from `0001.opus` through the configured maximum chunk index
@@ -1255,7 +1274,7 @@ AT+WIFI?
   "ok": true,
   "data": {
     "ssid": "ClipAP_A1B2",
-    "password": "12345678",
+    "password": "aB3xK9mQ",
     "ip": "192.168.4.1",
     "port": 8089
   }
@@ -1277,7 +1296,7 @@ AT+WIFI?
   "data": {
     "running": true,
     "ssid": "ClipAP_A1B2",
-    "password": "12345678",
+    "password": "aB3xK9mQ",
     "ip": "192.168.4.1",
     "port": 8089,
     "connected": true
@@ -1287,7 +1306,9 @@ AT+WIFI?
 
 **Fields:**
 - `ssid`: WiFi SSID (ClipAP_XXXX, last 4 hex of chip ID)
-- `password`: WPA2 password (12345678)
+- `password`: WPA2 password — **per-device, randomly generated at first boot**
+  (8 printable characters, persisted in settings; read via `AT+WIFI?` over BLE).
+  There is no universal default; a device that lost its settings generates a new one
 - `ip`: AP IP address (192.168.4.1)
 - `port`: UDP transfer port (8089)
 - `running`: Whether AP is active
@@ -1299,7 +1320,9 @@ AT+WIFI?
 - Cannot start WiFi while recording
 - Cannot start recording while WiFi is active
 
-**Auto-off:** WiFi AP automatically stops after 3 minutes if no client connects.
+**Auto-off:** WiFi AP automatically stops after 3 minutes
+(`CONFIG_CLIP_WIFI_TIMEOUT_MS`; 0 disables) — the timer runs from AP start or
+the last client disconnect; **an associated client keeps the AP up**, even when idle.
 
 **Error Cases:**
 - `{"ok":false,"msg":"Missing argument (on/off)"}` / `"Invalid argument (use on/off)"`
@@ -1449,10 +1472,17 @@ AT+POWEROFF
 }
 ```
 
+**Error Cases:**
+- `{"ok":false,"msg":"USB power present — unplug USB first"}` — the PMIC refuses ship mode whenever VBUS is present, even with a full battery (the gate is VBUS, not the `charging` flag)
+
 **Side Effects:**
 - Displays power off animation
+- Stops any active recording (files flush first) and cancels transfers
 - Enters PMIC ship mode (requires physical button press to wake)
 - All unsaved data is preserved
+- If ship mode is rejected, the device recovers — status screen restored,
+  buttons re-enabled, `{"event":"poweroff","status":"failed"}` pushed; an
+  8-second failsafe reboot guards the whole sequence
 
 ---
 
@@ -1913,6 +1943,8 @@ BLE disconnect.
 
 **Notes:**
 - RTC sessions never appear in `AT+LIST` (nothing is stored)
+- Re-sending `AT+DOWNLOAD=<rtc_session>` while the stream runs is idempotent
+  (answered ok, stream continues) — same rule as file transfer
 - The stream shares the File Data characteristic with file transfer; the two
   are mutually exclusive (a file download cannot run while streaming)
 - Backpressure policy: dropped frames are counted, never retried. Because
@@ -1972,6 +2004,9 @@ BLE disconnect.
 - **WIFI_SYNC**: WiFi AP active, file transfer available
 - **PAUSED**: Recording paused
 - **ERROR**: Error state, requires intervention
+- **OTA**: Defined for firmware-upload flows but never entered during an upload
+  (DFU activity is tracked by a separate flag); button input is ignored while
+  an upload runs
 
 **Constraints:**
 - Cannot start WiFi while recording (RECORDING → WIFI_SYNC is invalid)
@@ -1985,7 +2020,7 @@ BLE disconnect.
 │                    Recording State                       │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│   ┌──────────┐   Button RTC / AT+START        ┌────────┐│
+│   ┌──────────┐   Button hold-release / AT+START        ┌────────┐│
 │   │   IDLE   │ ─────────────────────────────> │RECORDING│
 │   └──────────┘                                  └────┬───┘
 │        ▲                                             │   │
@@ -1998,7 +2033,7 @@ BLE disconnect.
 ```
 
 **Transitions:**
-- IDLE → RECORDING: `AT+START`, or long button press starting an RTC session
+- IDLE → RECORDING: `AT+START` (SD or RTC) or a button hold-release (SD only — RTC is AT-only)
 - RECORDING → IDLE: Long button press OR `AT+STOP`
 
 **Recording-Specific Actions:**
@@ -2226,8 +2261,8 @@ Sent when recording state changes (start, stop, pause, resume). Uses `"event":"s
 {"event":"state","state":"RECORDING","session":"20240203100000"}
 ```
 
-**Trigger:** Persistent recording starts with `AT+START`; RTC streaming starts
-with `AT+START=rtc` or a button long press from IDLE.
+**Trigger:** Persistent recording starts with `AT+START` or a button
+hold-release; RTC streaming starts with `AT+START=rtc` (AT only).
 
 ```json
 {"event":"state","state":"IDLE","session":"20240203100000","duration":600}
@@ -2285,6 +2320,8 @@ Other state-change events use the generic two-field form
 | `wifi` | `on` / `off` | WiFi AP started / stopped (manual or auto-off) |
 | `usb` | `on` / `off` | USB CDC enabled / disabled (cable, 10-min auto-off, or `AT+USB`) |
 | `storage` | `full` | SD card crosses the storage-full threshold; recording is refused |
+| `rtc` | `timeout` | RTC session aborted — no `AT+DOWNLOAD` within the start timeout (Section 4.8) |
+| `poweroff` | `failed` | Power-off rejected (ship mode refused); device recovered |
 
 This is the complete list of `ble_notify_event` sources.
 
@@ -2338,7 +2375,7 @@ These message strings appear across commands (exact text from the handlers):
 | `Already recording or invalid state` | `AT+START` while recording |
 | `No active session` / `Not recording` | `AT+STOP`/`AT+MARK`/`AT+PAUSE` with nothing running |
 | `Not paused` | `AT+RESUME` while not paused |
-| `Transfer already in progress` | `AT+DOWNLOAD` while one is active |
+| `Transfer already in progress` | `AT+DOWNLOAD` for a different session/transport while one is active — answered immediately; re-issuing the SAME session+transport answers ok and continues |
 | `No active transfer` | `AT+CANCEL` with nothing transferring |
 | `Mode must be normal or enhanced` | Bad `AT+MODE` value |
 | `Brightness must be 0-255` | `AT+BRIGHTNESS` out of range |
@@ -2601,7 +2638,7 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | Parameter | Value |
 |-----------|-------|
 | SSID | `ClipAP_XXXX` (last 4 hex digits of chip ID) |
-| Password | `12345678` |
+| Password | Per-device random (8 chars, generated at first boot) |
 | IP Address | `192.168.4.1` |
 | UDP Port | `8089` |
 | Protocol | UDP |
