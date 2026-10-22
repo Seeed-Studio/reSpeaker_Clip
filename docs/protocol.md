@@ -1424,17 +1424,22 @@ AT+LOG?
 |------|----------|
 | `off` | Deactivates the FS log backend; the SD card is then free to idle power-gate (lowest idle current) |
 | `info` | Ensures the SD is mounted, then logs at INF level and above to `/SD:/LOG` |
-| `debug` | Same as `info` but at DBG level (most verbose; for troubleshooting) |
+| `debug` | Same as `info` but at DBG level. **Debug image only**; production rejects it because DBG records are not compiled (`CONFIG_LOG_MAX_LEVEL=3`) |
 
 **Notes:**
 - Boot default follows the build: the **debug** image enables `info` at boot; the
   **production** image defaults to `off`. `AT+LOG` overrides this at runtime.
-- Enabling the backend (`info`/`debug`) keeps the SD mounted, which raises idle
+- The production image has UART disabled; use `AT+LOG=info` when you want logs
+  written to `/SD:/LOG` (128KB × 20, circular overwrite).
+- Enabling the backend (`info`) keeps the SD mounted, which raises idle
   current — use for diagnostics, then set `off` to restore low-power idle.
-- The query reports the backend's active level: `off`, `info`, or `debug`.
+- The query reports the backend's active level: `off`, `info`, or `debug`
+  (`debug` can only be active on a debug image).
 
 **Error Cases:**
 - Missing or invalid mode (must be `off`, `info`, or `debug`)
+- `{"ok":false,"msg":"Debug log not available in this build"}` when
+  `AT+LOG=debug` is used on a production image (DBG compiled out)
 - SD card not available when enabling (`info`/`debug`)
 
 ---
@@ -2455,6 +2460,7 @@ These message strings appear across commands (exact text from the handlers):
 | `Mode must be normal or enhanced` | Bad `AT+MODE` value |
 | `Brightness must be 0-255` | `AT+BRIGHTNESS` out of range |
 | `Log mode must be off, info or debug` | Bad `AT+LOG` value |
+| `Debug log not available in this build` | `AT+LOG=debug` on production (DBG not compiled; use `info` or the debug image) |
 | `Cannot format while recording` | `AT+FORMAT` while recording |
 | `Recording in progress, stop first` | `AT+USB`/`AT+WIFI` blocked by active recording |
 | `Cannot start WiFi in current state` | `AT+WIFI=on` while recording/transferring |

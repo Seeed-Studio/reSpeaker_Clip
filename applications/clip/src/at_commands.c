@@ -615,6 +615,15 @@ static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
                                         NULL, response, len);
         }
 
+        /* Production caps LOG_MAX_LEVEL at INF (DBG not compiled). Reject
+         * instead of silently accepting a level that cannot emit records. */
+        if (strcmp(mode, "debug") == 0 &&
+            CONFIG_LOG_MAX_LEVEL < LOG_LEVEL_DBG) {
+            return create_json_response(false,
+                                        "Debug log not available in this build",
+                                        NULL, response, len);
+        }
+
         uint32_t level = (strcmp(mode, "debug") == 0) ? LOG_LEVEL_DBG : LOG_LEVEL_INF;
 
         if (reject_if_usb_msc(response, len)) {

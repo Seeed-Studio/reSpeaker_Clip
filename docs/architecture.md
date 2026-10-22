@@ -460,7 +460,9 @@ a "Storage Full" error is shown on the OLED, and a BLE event is posted.
 - Log directory: `/SD:/LOG/`
 - Log files: `log.000001` ... (prefix `log.`, 128KB per file, up to 20 files,
   circular overwrite)
-- Backend level is runtime-controlled by `AT+LOG=off|info|debug` (see §3.3)
+- Backend level is runtime-controlled by `AT+LOG=off|info` (see §3.3).
+  `AT+LOG=debug` is **debug-image only**: production is compiled with
+  `LOG_MAX_LEVEL=INF`, so DBG records do not exist and the command is rejected.
 - Boot default follows the build: `CLIP_LOG_FS_DEFAULT_ON` tracks
   `LOG_BACKEND_UART` (debug image → INF on; production image → off). While the
   backend is active the SD stays mounted (higher idle current); `off` lets it

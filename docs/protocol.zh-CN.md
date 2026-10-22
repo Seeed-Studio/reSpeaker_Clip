@@ -1310,15 +1310,18 @@ AT+LOG?
 |------|----------|
 | `off` | 停用 FS 日志后端；SD 卡可回到空闲断电（最低待机电流） |
 | `info` | 确保 SD 挂载，INF 级及以上日志写入 `/SD:/LOG` |
-| `debug` | 同 info 但为 DBG 级（最详尽；排障用） |
+| `debug` | 同 info 但为 DBG 级。**仅 debug 镜像**；production 会拒绝，因为 DBG 记录未编译（`CONFIG_LOG_MAX_LEVEL=3`） |
 
 **说明：**
 - 开机默认随构建走：**debug** 镜像开机启用 `info`；**production** 镜像默认 `off`。`AT+LOG` 运行时覆盖。
-- 启用后端（`info`/`debug`）会保持 SD 挂载，抬高待机电流 —— 诊断用完设回 `off` 恢复低功耗。
-- 查询返回后端当前的实际级别：`off`、`info` 或 `debug`。
+- production 镜像关闭 UART；需要文件日志时用 `AT+LOG=info`，写入 `/SD:/LOG`（128KB × 20，循环覆盖）。
+- 启用后端（`info`）会保持 SD 挂载，抬高待机电流 —— 诊断用完设回 `off` 恢复低功耗。
+- 查询返回后端当前的实际级别：`off`、`info` 或 `debug`（`debug` 只可能在 debug 镜像上生效）。
 
 **错误情况：**
 - 缺失或非法模式（必须 `off`/`info`/`debug`）
+- production 镜像执行 `AT+LOG=debug` 返回
+  `{"ok":false,"msg":"Debug log not available in this build"}`（DBG 已编译裁掉）
 - 启用（`info`/`debug`）时 SD 卡不可用
 
 ---

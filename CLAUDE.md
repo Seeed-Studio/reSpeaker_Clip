@@ -219,7 +219,7 @@ All commands return JSON responses. Key commands:
 - `AT+DELETE=<session_id>` - Session management
 - `AT+MODE`, `AT+BRIGHTNESS` - Configuration (`AT+AUTODEL` removed — the policy was stored but never enforced; `noise_suppress`/`dereverb_enabled` have no AT setter and keep their Kconfig defaults)
 - `AT+WIFI=on|off` - WiFi AP control (start is refused while discharging below `CLIP_WIFI_MIN_BATTERY_PERCENT` (15%) / `_MV` (3500 mV); charging/VBUS bypasses; an already-running AP is not torn down)
-- `AT+LOG=off|info|debug` - SD log backend level (debug default: info); off lets the SD card idle power-gate
+- `AT+LOG=off|info|debug` - SD log backend (debug default: info; `debug` only on the debug image — production is compiled at INF and rejects it); off lets the SD card idle power-gate
 - `AT+TIME=<timestamp>` - Time sync
 - `AT+MARKS=<session_id>` - Bookmark management
 

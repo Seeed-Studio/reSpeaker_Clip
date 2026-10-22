@@ -11,7 +11,7 @@
 | SpeexDSP Processing | Noise suppression, dereverberation (SpeexDSP AGC unavailable in FIXED_POINT; custom integer AGC + high-pass in Enhanced/MERGE mode) |
 | Audio Modes | Both mono (L+R merge); Normal = SpeexDSP off, Enhanced = SpeexDSP NS/DR; both 32kbps/complexity 1 (normal Kconfig unused) |
 | SD Card Storage | FAT32, timestamp buckets under `/SD:/REC/YYYYMMDD/HH/MM/SS/` with 100-file group directories |
-| SD Card Log Persistence | LOG_BACKEND_FS, /SD:/LOG/, 128KB files x20; AT+LOG=off\|info\|debug (debug default INF) |
+| SD Card Log Persistence | LOG_BACKEND_FS, /SD:/LOG/, 128KB files x20; AT+LOG=off\|info\|debug (debug image DBG; production INF only) |
 | Session Metadata | session.json and marks.bin per timestamp-bucket session |
 | Bookmark System | Binary marks.bin with notes |
 | BLE GATT Service | Command, Response, File Data, Event characteristics |
@@ -71,7 +71,7 @@
 | AT+REBOOT | EXEC | Reboot |
 | AT+USB | GET/SET/EXEC | USB CDC control (default: off, auto-off on disconnect) |
 | AT+DFU | EXEC | Reboot into MCUboot recovery mode |
-| AT+LOG | GET/SET | SD log backend level: off \| info \| debug (debug default info) |
+| AT+LOG | GET/SET | SD log backend: off \| info \| debug (debug image only; production rejects debug) |
 | AT+NAME | GET/SET | Custom BLE device name |
 
 ### Thread Architecture
@@ -88,7 +88,7 @@
 
 ### Memory Usage
 
-- FLASH: ~934 KB used of the 0xE9E00 (935.5 KB) app slot
+- FLASH: ~943 KB debug / ~933 KB production, against the 0xE9E00 (957,952 B) app slot
 - RAM: ~450 KB used of 450,560 B (≈496 B free at the current static layout)
 
 ### Recording Presets
@@ -143,7 +143,7 @@ minicom -D /dev/ttyACM0 -b 921600
   - SPI bias-pull-up removed from `spi3`/`spi4` (push-pull needs no pull-up) and `bias-pull-down` added to `spi4_sleep`; ~750µA
   - UART console keeps UARTE active at idle (~570µA, baud-independent); the `production` snippet disables console + UART log backend
 - **Debug / production firmware split** via the `production` snippet: debug keeps UART console + SD log at INF; production strips both for low power. Both exported to `output/0.0.5/`
-- **FS log backend (`/SD:/LOG`) now AT-controlled**: new `AT+LOG=off|info|debug` toggles it at runtime; boot default coupled to `LOG_BACKEND_UART` (debug on / production off) so the app-only Kconfig symbol is never broadcast into the mcuboot sysbuild image
+- **FS log backend (`/SD:/LOG`) now AT-controlled**: new `AT+LOG=off|info|debug` toggles it at runtime; boot default coupled to `LOG_BACKEND_UART` (debug on / production off) so the app-only Kconfig symbol is never broadcast into the mcuboot sysbuild image. `debug` is debug-image only; production caps `LOG_MAX_LEVEL` at INF and rejects it.
 - **Storage-full handling**: percentage-based (`CLIP_STORAGE_FULL_PERCENT`, default 95%) via `fs_statvfs`; recording refused with a "Storage Full" on-screen error and BLE event when SD is full
 - **AT+NAME**: capacity 32B → 256B; surrounding quotes stripped from the argument
 - **BLE reliability**: fixed slow-advertising interval (was a copy-paste of the fast interval); un-bonded devices also drop to slow advertising; connection params tightened (interval 15–30, supervision timeout 800); CCC handlers use a notify mask (`&`) instead of equality
