@@ -58,7 +58,7 @@ minicom -D /dev/ttyACM0 -b 921600  # Clip UART0 debug console @921600 (board def
 
 ### Power Management
 
-`CONFIG_PM_DEVICE_RUNTIME=y` enables automatic peripheral power management (UART/I2C/SPI suspend when idle). The debug UART console leaks ~570µA at idle; the `production` snippet disables it, reaching ~170µA. Full idle power budget, regulator map, and measurement procedure: **docs/power.md** (that file owns the power figures).
+`CONFIG_PM_DEVICE_RUNTIME=y` enables automatic peripheral power management (UART/I2C/SPI suspend when idle). The debug UART console leaks ~570µA at idle; the `production` snippet disables it, reaching ~250µA average (170µA steady baseline). Full idle power budget, regulator map, and measurement procedure: **docs/power.md** (that file owns the power figures).
 
 ### Build Snippets
 
@@ -66,7 +66,7 @@ Snippets are in `applications/clip/snippets/`. Each snippet has a conf file, opt
 
 | Snippet | Purpose | Changes |
 |---------|---------|---------|
-| `production` | Low-power production firmware | Disables UART console + UART log backend (`CONFIG_CONSOLE=n`, `CONFIG_UART_CONSOLE=n`, `CONFIG_LOG_BACKEND_UART=n`); FS log default follows (off). Idle ~170µA vs ~higher for the debug build. |
+| `production` | Low-power production firmware | Disables UART console + UART log backend (`CONFIG_CONSOLE=n`, `CONFIG_UART_CONSOLE=n`, `CONFIG_LOG_BACKEND_UART=n`); FS log default follows (off). Idle ~250µA average vs ~higher for the debug build. |
 
 The default (no-snippet) build is the **debug** image: UART console on, FS log to `/SD:/LOG` at INF level (`CLIP_LOG_FS_DEFAULT_ON` defaults to `LOG_BACKEND_UART`). Use the `production` snippet for battery/production builds where the console leak matters.
 
@@ -212,20 +212,20 @@ It is **VBUS-aware**: auto-disables USB immediately on VBUS removal, and auto-di
 ### AT Commands
 
 All commands return JSON responses. Key commands:
-- `AT+RECORD` / `AT+STOP` - Recording control
+- `AT+START` / `AT+STOP` - Recording control
 - `AT+LIST` / `AT+LIST?page&per_page` - Session listing (sorted newest-first)
 - `AT+DOWNLOAD=<session_id>` - Start file transfer
 - `AT+CANCEL` - Cancel transfer (thread-safe via volatile flag)
 - `AT+DELETE=<session_id>` - Session management
-- `AT+MODE`, `AT+BRIGHTNESS` - Configuration (`AT+AUTODEL` removed — the policy was stored but never enforced; noise/dereverb fold into MODE)
-- `AT+WIFI=on|off` - WiFi AP control
+- `AT+MODE`, `AT+BRIGHTNESS` - Configuration (`AT+AUTODEL` removed — the policy was stored but never enforced; `noise_suppress`/`dereverb_enabled` have no AT setter and keep their Kconfig defaults)
+- `AT+WIFI=on|off` - WiFi AP control (start is refused while discharging below `CLIP_WIFI_MIN_BATTERY_PERCENT` (15%) / `_MV` (3500 mV); charging/VBUS bypasses; an already-running AP is not torn down)
 - `AT+LOG=off|info|debug` - SD log backend level (debug default: info); off lets the SD card idle power-gate
 - `AT+TIME=<timestamp>` - Time sync
 - `AT+MARKS=<session_id>` - Bookmark management
 
 ### Audio Pipeline
 
-`audio.c`: PDM microphone → SpeexDSP preprocessing (noise suppression, dereverb — SpeexDSP AGC is NOT available in the FIXED_POINT build) → lightweight custom integer AGC/high-pass (enhanced/merge mode) → Opus encoding. Modes: mono (L), merge (L+R), stereo. Enhanced mode uses higher bitrate.
+`audio.c`: PDM microphone → mono merge (delay-aligned L+R) → high-pass → integer AGC → Opus 32 kbps mono. **Both** presets are mono; `normal` bypasses SpeexDSP, `enhanced` runs SpeexDSP noise suppression + dereverb (when `noise_suppress > 0`). Both currently use the `CLIP_ENHANCED_*` bitrate/complexity constants; `CONFIG_CLIP_NORMAL_BITRATE/COMPLEXITY` are unused. SpeexDSP AGC is NOT available in the FIXED_POINT build.
 
 ### Storage & Transfer
 
@@ -245,7 +245,7 @@ Binary frame protocol with per-file CRC32 verification:
 - `icons.c` - XBM-format display icons
 - `button.c` - Multi-press, long-press support via custom input driver
 - `haptic.c` - Vibration motor feedback via PMIC GPIO
-- `battery.c` - NPM1300 PMIC battery monitoring + nRF Fuel Gauge (model in `battery_model.inc`). Polls every 60 s. Displayed % is a directionally rate-limited view of the fuel-gauge SoC (`CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP`, default 3%/poll, 0=raw), persisted across reboot. Charge termination 4.25V. `vbatlow-charge-enable` lets the charger recover a deeply discharged/protected cell. No low-battery auto-shutdown (removed); low battery shows a UI warning only (≤15%).
+- `battery.c` - NPM1300 PMIC battery monitoring + nRF Fuel Gauge (model in `battery_model.inc`). Polls every 60 s. Displayed % is a directionally rate-limited view of the fuel-gauge SoC (`CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP`, default 3%/poll, 0=raw), persisted across reboot; `AT+BATT` also exposes `soc_raw` (un-smoothed). Idle feed is `CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA=250`µA (measured standby average; the old 400µA over-counted). Charge termination 4.25V. `vbatlow-charge-enable` lets the charger recover a deeply discharged/protected cell. Automatic power-off is voltage-based: ≤`CLIP_BATTERY_SHUTDOWN_MV` (3.1V) for `CLIP_BATTERY_SHUTDOWN_CONFIRM_MS` (2 min), valid readings, no charging/VBUS; graceful stop/save/ship mode. SoC is never the trigger; low battery still shows a UI warning (≤15%).
 
 ## Known Pitfalls
 
@@ -256,7 +256,7 @@ Names + one-liners for AI recall; full symptom→cause→fix detail in **docs/tr
 - **`except Exception` misses `KeyboardInterrupt`** (BaseException) — use bare `except:`.
 - **FAT directory order** is not chronological — sorted cached listing invalidated on mutations.
 - **Transfer thread safety**: coordinate AT vs transfer thread via volatile flags (`transfer_cancel_requested`).
-- **Logs persist to SD** (`/SD:/LOG`, rotating 64KiB) — read post-mortem; `LOG_DEFAULT_LEVEL=0` compiles logs out.
+- **Logs persist to SD** (`/SD:/LOG`, rotating 128KiB) — read post-mortem; `LOG_DEFAULT_LEVEL=0` compiles logs out.
 - **Corrupt settings boot loop**: corrupt `/lfs/settings/run` blocks `settings_load` ~40s; watchdog (3s) wipes + reboots; manual recovery via MCUboot erase-settings. Reflashing the app does NOT clear it (external flash).
 - Build/console pitfalls (ZEPHYR_EXTRA_MODULES must be env var; v3.2.1 unsupported; ttyACM0/ACM1 with J-Link attached, Clip port = USB PID `2886:0069`): docs/troubleshooting.md.
 
@@ -296,7 +296,7 @@ The DTS is split across includes: `clip-pinctrl.dtsi`, `clip-cpuapp_partitioning
 
 ### Power Management
 
-`CONFIG_PM_DEVICE_RUNTIME=y` (UART/I2C/SPI suspend when idle, resume on access). Debug UART console leaks ~570µA at idle (baud-independent); the `production` snippet disables it → ~170µA. Full idle-power budget (DCDC ~500–600µA saving, SD idle power-gating after 45s, NRF70 QSPI low power, BLE advertising adder), regulator map, and how to measure: **docs/power.md**.
+`CONFIG_PM_DEVICE_RUNTIME=y` (UART/I2C/SPI suspend when idle, resume on access). Debug UART console leaks ~570µA at idle (baud-independent); the `production` snippet disables it → ~250µA average. Full idle-power budget (DCDC ~500–600µA saving, SD idle power-gating after 45s, NRF70 QSPI low power, BLE advertising adder), regulator map, and how to measure: **docs/power.md**.
 
 ### PMIC & Regulators
 

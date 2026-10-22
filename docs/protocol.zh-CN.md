@@ -222,6 +222,7 @@ MTU 越大 = 通知越少 = 吞吐越高。
 - `AT+BRIGHTNESS=<0-255>` - 设置 OLED 亮度
 - `AT+TIME=<unix_ts>` - 设置系统时间
 - `AT+PAIR=<reset>` - 重置 BLE 配对
+- `AT+SN=<sn>[,<mac>]` - 写入产品序列号（重写需附 MAC）
 - `AT+FACTORY=<confirm>` - 恢复出厂
 - `AT+START=<mode>` - 以指定模式开始录音
 - `AT+MARK=<note>` - 添加带备注书签
@@ -243,6 +244,7 @@ MTU 越大 = 通知越少 = 吞吐越高。
 - `AT+BRIGHTNESS?` - 获取 OLED 亮度
 - `AT+TIME?` - 获取当前时间
 - `AT+PAIR?` - 获取配对状态
+- `AT+SN?` - 获取序列号 + 设备 MAC
 - `AT+WIFI?` - 获取 WiFi AP 状态
 - `AT+USB?` - 获取 USB 状态
 - `AT+LOG?` - 获取 SD 日志后端状态
@@ -305,7 +307,7 @@ AT+GSTAT
     "temp": 26,
     "voltage": 3980,
     "mode": "normal",
-    "bitrate": 16000,
+    "bitrate": 32000,
     "free_space": 1024,
     "device": "Clip"
   }
@@ -321,8 +323,8 @@ AT+GSTAT
 - `charging`：充电状态（true/false）。注意：电池充满时即使插着 USB 也为 false —— 关机门控看的是 VBUS 在场，不是此字段
 - `temp`：电池温度 °C（NPM1300 NTC）
 - `voltage`：电池电压 mV
-- `mode`：录音模式（normal/enhanced）
-- `bitrate`：当前模式码率（normal=16000，enhanced=32000）
+- `mode`：录音预设（normal/enhanced）
+- `bitrate`：当前预设上报的码率。两种预设当前都上报 32000（编码器使用 `CONFIG_CLIP_ENHANCED_BITRATE`；normal 常量未使用）
 - `free_space`：剩余空间 MB
 - `device`：设备名字符串
 
@@ -357,12 +359,19 @@ AT+TIME?
 ```json
 {
   "ok": true,
-  "data": { "time": "2024-02-03T10:00:30Z" }
+  "data": { "time": "2024-02-03T10:00:30Z", "restored": false, "uptime": 3612 }
 }
 ```
 
 > 设置时在 `data.time` 回显 Unix 时间戳（整数）；查询返回 `data.time` 中的 ISO-8601 字符串。若从未设置过时间，查询返回
 > `{"ok":false,"msg":"Time not set (use AT+TIME=<timestamp>)"}`。
+>
+> `"restored":true` 表示时钟来自开机时的持久化恢复、此后没有进行过活体校时：主板没有 RTC，断电期间流逝的时间无法得知，
+> 报出的时间会偏差断电时长。**App 看到 `restored:true` 应立即推送一次 `AT+TIME=<ts>`**（标志随之清除），此后再信任
+> 会话时间戳。时间在每次录音停止和关机时持久化，因此偏差从这两个时刻中较晚者起算，而不是从上次同步起算。
+>
+> `"uptime"` 为开机以来的秒数——设备"明明一直开着"但该值很小，说明中间发生过**静默重启**（死机/掉电），
+> 这正是"没人关机、时钟却停在昨天"的原因。
 
 **错误情况：**
 - `{"ok":false,"msg":"Missing timestamp"}` / `"Invalid timestamp"` / `"Invalid time"`
@@ -406,6 +415,7 @@ AT+BATT
   "ok": true,
   "data": {
     "battery": 85,
+    "soc_raw": 86,
     "charging": true,
     "voltage": 3980,
     "temp": 26
@@ -414,7 +424,8 @@ AT+BATT
 ```
 
 **字段：**
-- `battery`：电量百分比（0-100，电量计 SoC 估计）
+- `battery`：显示电量百分比（0-100，方向平滑后的电量计 SoC）
+- `soc_raw`：未平滑的电量计 SoC（0-100）。显示值在限速/重锚时可能低于它；现场诊断请用此字段
 - `charging`：充电状态（true/false）
 - `voltage`：电池电压 mV
 - `temp`：电池温度 °C（NPM1300 NTC；可用于验证充电截止）
@@ -651,9 +662,9 @@ AT+LIST=20240203100000?1&20
     "size": 5242880,
     "synced": 15,
     "bookmarks": 5,
-    "channels": 2,
+    "channels": 1,
     "sample_rate": 16000,
-    "mode": "normal"
+    "mode": "mono"
   }
 }
 ```
@@ -686,9 +697,9 @@ AT+LIST=20240203100000?1&20
   - `bookmarks`：会话书签数
 - `files`：文件名数组（文件分页）
 - `synced`：已成功传输的文件数（仅会话详情）
-- `channels`：声道数 - 1=单声道，2=立体声（仅会话详情）
+- `channels`：声道数 —— 当前两种预设都是 1（单声道）；2 为保留值（仅会话详情）
 - `sample_rate`：采样率 Hz，如 16000（仅会话详情）
-- `mode`：录音模式 - "normal"（立体声）或 "enhanced"（单声道 + DSP）（仅会话详情）
+- `mode`：录制器写入的**音频布局字符串** —— 当前为 `"mono"`（`"stereo"` 保留）。它**不表示** AT+MODE 的 normal/enhanced 预设；当前固件写的是音频模式而非预设。（仅会话详情）
 
 **用法示例：**
 ```
@@ -734,6 +745,7 @@ AT+DELETE=20240203100000
 
 **错误情况：**
 - `{"ok":false,"msg":"Session not found"}` / `"Invalid session ID"` / `"cannot delete active session"` / `"Missing session_id"` / `"SD card not mounted"`
+- `"Transfer active"` —— 该会话正在被下载，需先 `AT+CANCEL`。否则删除会在传输线程仍持有文件句柄时释放簇。
 
 **副作用：**
 - 删除会话目录及全部文件
@@ -1024,10 +1036,10 @@ AT+MODE?
 **合法值：** "normal"、"enhanced"
 
 **模式预设：**
-- **Normal**：单声道（L+R 合并），16kbps，复杂度 0，无 DSP 处理（原始采集路径），10 分钟文件分段
-- **Enhanced**：单声道（L+R 合并），32kbps，复杂度 1，DSP 开启（降噪 + 去混响），2 分钟文件分段
+- **Normal**：单声道（L+R 合并）；**SpeexDSP 旁路**（不降噪、不去混响）；合并 + 高通 + 整数 AGC；32kbps，复杂度 1；分段 60s（同步中）/ 300s（空闲）
+- **Enhanced**：单声道（L+R 合并）；**SpeexDSP 降噪 + 去混响开启**（`noise_suppress > 0` 时）；合并 + 高通 + 整数 AGC；32kbps，复杂度 1；分段 60s（同步中）/ 300s（空闲）
 
-码率与复杂度按模式固定，构建期经 Kconfig 配置（`CONFIG_CLIP_NORMAL_BITRATE`、`CONFIG_CLIP_ENHANCED_BITRATE` 等），运行时不可改。
+两种预设都是单声道，当前都使用 `CONFIG_CLIP_ENHANCED_BITRATE`/`COMPLEXITY`；`CONFIG_CLIP_NORMAL_BITRATE`/`COMPLEXITY` 未使用。模式切换在**下一次开始录音**时生效（Speex 开关在 `audio_start_recording_internal` 中锁存），录音过程中切换不影响当前会话。码率/复杂度运行时不可改。
 
 ---
 
@@ -1206,6 +1218,13 @@ AT+WIFI?
 **错误情况：**
 - `{"ok":false,"msg":"Missing argument (on/off)"}` / `"Invalid argument (use on/off)"`
 - `"Cannot start WiFi in current state"` / `"Failed to start WiFi AP"` / `"Failed to stop WiFi AP"`
+- `{"ok":false,"msg":"Battery too low, charge first"}` —— 放电且低于
+  `CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT`（默认 15%）或
+  `CONFIG_CLIP_WIFI_MIN_BATTERY_MV`（默认 3500 mV）时拒绝 `AT+WIFI=on`。
+  充电/USB VBUS 在场会绕过这两个门槛；AP 已经在运行时仍返回凭据（不拆除）。
+- `"WiFi busy"` —— `AT+WIFI=off` 撞上了仍在排队/进行中的 bring-up。该 OFF 被丢弃（更新的 ON 覆盖了它），不是失败；等 AP 起来后再关。
+- `"WiFi start timed out"` —— 启动 30 秒内未完成（射频状态异常），AP 未起来。成功/失败以响应时刻
+  AP 的实际状态为准，因此 `ok:true` 始终代表 SSID 可连接。
 
 ---
 
@@ -1248,6 +1267,9 @@ AT+USB?
 **自动禁用行为：**
 - 拔线后 USB 自动禁用
 - USB 启用但 10 分钟无电缆接入时自动禁用
+
+**SD 卡独占：** USB MSC 使能期间，SD 卡处于未挂载状态并交给主机。需要访问 SD 的 AT 命令（`LIST`、`DOWNLOAD`、`DELETE`、`MARKS`、`FORMAT`、`FACTORY`、`PAIR=reset`、`LOG=info|debug`）会返回
+`{"ok":false,"msg":"USB MSC active, disable USB first"}`。`AT+USB=off` 会重新挂载给固件使用。
 
 ---
 
@@ -1293,7 +1315,7 @@ AT+LOG?
 **说明：**
 - 开机默认随构建走：**debug** 镜像开机启用 `info`；**production** 镜像默认 `off`。`AT+LOG` 运行时覆盖。
 - 启用后端（`info`/`debug`）会保持 SD 挂载，抬高待机电流 —— 诊断用完设回 `off` 恢复低功耗。
-- 只要后端活动，查询一律报 `info`（无论 debug 级别）。
+- 查询返回后端当前的实际级别：`off`、`info` 或 `debug`。
 
 **错误情况：**
 - 缺失或非法模式（必须 `off`/`info`/`debug`）
@@ -1318,8 +1340,8 @@ AT+FORMAT
 ```
 
 **错误情况：**
-- SD 卡未挂载
-- 录音期间不能格式化
+- `{"ok":false,"msg":"SD card not mounted"}`
+- `{"ok":false,"msg":"Recording or transfer active, stop first"}` —— 格式化会先卸载卡再 `f_mkfs`；录音或文件传输仍占用时拒绝。格式化前会自动停掉 FS log 后端。
 
 ---
 
@@ -1407,6 +1429,53 @@ AT+PAIR=reset
 - 需要重新配对
 
 > 应答（`"sd_erase":"pending"`）在擦除前发出；重启只在后台擦除完成后发生，因此设备保证以"未绑定 + 干净 SD"回来。
+
+---
+
+##### AT+SN - 产品序列号
+
+产线写入的设备序列号。存放在 LittleFS settings 文件的
+`sn` 子树 —— `AT+FACTORY`（只重置 config 键）与升级固件后都保留；**settings 文件本身被擦除时会丢**
+（MCUboot erase-settings、损坏看门狗擦除），恢复后需重写。
+
+查询同时返回设备 BLE MAC（`bt_id_get` 身份地址）：产线工位一次查询拿到 MAC → 到自己系统里查绑定的 SN → 写回，
+一条命令驱动整个工位流程。
+
+**首次写入（SN 为空）：**
+```
+AT+SN=SC24A03100012
+```
+
+**重写（SN 已存在）：** 追加设备自身 MAC 作为凭证 —— 普通用户拿不到它（手机不显示 BLE MAC），
+而产线工位本来就从 `AT+SN?` 查询里持有它。冒号分隔符可省略，大小写不敏感：
+```
+AT+SN=SC24A03100042,aabbccddeeff
+```
+
+**查询：**
+```
+AT+SN?
+```
+
+**响应（设置）：**
+```json
+{ "ok": true, "data": { "sn": "SC24A03100012" } }
+```
+
+**响应（查询）：**
+```json
+{ "ok": true, "data": { "mac": "AA:BB:CC:DD:EE:FF", "sn": "SC24A03100012" } }
+```
+未写入时 `"sn":null`；BLE 协议栈就绪前 `mac` 为空串。
+
+**格式：** SN 为 1-32 字符，仅 `[A-Za-z0-9._-]`。首次写入时若附带 MAC 也会校验（防止工位写错设备）。
+
+**错误情况：**
+- `{"ok":false,"msg":"Missing argument (SN)"}` / `"Invalid SN"` / `"SN write failed"`
+- `"SN locked (rewrite needs ,<mac>)"` / `"MAC mismatch"` / `"MAC unavailable"`
+
+> MAC 凭证防的是误写，不是防攻击者——能发 `AT+SN?` 的人就能读到 MAC。USB 说明：USB 序列号字符串描述符
+> 由 hwinfo 芯片 ID 派生（每台唯一），**不是**产品 SN。
 
 ---
 
@@ -1854,9 +1923,9 @@ RTC 模式经 BLE 实时流式传输麦克风音频，不在 SD 卡写任何内�
   "duration": 600,
   "files": 30,
   "synced": 15,
-  "channels": 2,
+  "channels": 1,
   "sample_rate": 16000,
-  "mode": "normal"
+  "mode": "mono"
 }
 ```
 
@@ -1865,9 +1934,9 @@ RTC 模式经 BLE 实时流式传输麦克风音频，不在 SD 卡写任何内�
 - `duration`：录音秒数（录音中为 0）
 - `files`：会话音频文件总数（录音中为 0）
 - `synced`：已成功传输的文件数
-- `channels`：声道数（1=单声道，2=立体声）
+- `channels`：声道数（当前两种预设均为 1；2 保留）
 - `sample_rate`：采样率 Hz（如 16000）
-- `mode`：录音模式（"normal" 或 "enhanced"）
+- `mode`：录制器写入的音频布局字符串（当前 `"mono"`；`"stereo"` 保留）。它不表示 AT+MODE 预设。
 
 **用途：**
 - 跟踪传输进度支持续传

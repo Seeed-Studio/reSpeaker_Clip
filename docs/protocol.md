@@ -251,6 +251,7 @@ Set configuration or execute with parameters:
 - `AT+BRIGHTNESS=<0-255>` - Set OLED brightness
 - `AT+TIME=<unix_ts>` - Set system time
 - `AT+PAIR=<reset>` - Reset BLE pairing
+- `AT+SN=<sn>[,<mac>]` - Write product serial number (rewrite needs the MAC)
 - `AT+FACTORY=<confirm>` - Factory reset
 - `AT+START=<mode>` - Start recording with mode override
 - `AT+MARK=<note>` - Add bookmark with note
@@ -272,6 +273,7 @@ Query current configuration:
 - `AT+BRIGHTNESS?` - Get OLED brightness
 - `AT+TIME?` - Get current time
 - `AT+PAIR?` - Get pairing status
+- `AT+SN?` - Get serial number + device MAC
 - `AT+WIFI?` - Get WiFi AP status
 - `AT+USB?` - Get USB status
 - `AT+LOG?` - Get SD log backend status
@@ -334,7 +336,7 @@ AT+GSTAT
     "temp": 26,
     "voltage": 3980,
     "mode": "normal",
-    "bitrate": 16000,
+    "bitrate": 32000,
     "free_space": 1024,
     "device": "Clip"
   }
@@ -350,8 +352,8 @@ AT+GSTAT
 - `charging`: Charging status (true/false). Reads false when the battery is full even with USB attached — VBUS presence gates power-off, not this field
 - `temp`: Battery temperature in °C (NTC via NPM1300)
 - `voltage`: Battery voltage in mV
-- `mode`: Recording mode (normal/enhanced)
-- `bitrate`: Bitrate for current mode (normal=16000, enhanced=32000)
+- `mode`: Recording preset (normal/enhanced)
+- `bitrate`: Reported bitrate for the current preset. Both presets currently report 32000 (the encoder uses `CONFIG_CLIP_ENHANCED_BITRATE`; the normal constant is unused).
 - `free_space`: Free space in MB
 - `device`: Device name string
 
@@ -386,13 +388,25 @@ AT+TIME?
 ```json
 {
   "ok": true,
-  "data": { "time": "2024-02-03T10:00:30Z" }
+  "data": { "time": "2024-02-03T10:00:30Z", "restored": false, "uptime": 3612 }
 }
 ```
 
 > Set echoes the Unix timestamp back in `data.time` (integer); Get returns an
 > ISO-8601 string in `data.time`. If time was never set, Get returns
 > `{"ok":false,"msg":"Time not set (use AT+TIME=<timestamp>)"}`.
+>
+> `"restored":true` means the clock was restored from persisted settings at
+> boot and no live sync has arrived since: the board has no RTC, so time
+> elapsed while powered off is lost and the reported time is stale by the
+> power-off duration. **Hosts should answer `restored:true` by pushing
+> `AT+TIME=<ts>`** (once; the flag clears) before trusting session
+> timestamps. Time is persisted at recording stop and at power-off, so the
+> stale amount starts from the last of those, not from the last sync.
+>
+> `"uptime"` is seconds since boot — a small value on a device that has
+> "been on for days" reveals a silent reboot (crash/brownout), which is how
+> a stale clock can appear without anyone powering the device off.
 
 **Error Cases:**
 - `{"ok":false,"msg":"Missing timestamp"}` / `"Invalid timestamp"` / `"Invalid time"`
@@ -436,6 +450,7 @@ AT+BATT
   "ok": true,
   "data": {
     "battery": 85,
+    "soc_raw": 86,
     "charging": true,
     "voltage": 3980,
     "temp": 26
@@ -444,7 +459,8 @@ AT+BATT
 ```
 
 **Fields:**
-- `battery`: Battery percentage (0-100, fuel-gauge SoC estimate)
+- `battery`: Displayed battery percentage (0-100, directionally smoothed fuel-gauge SoC)
+- `soc_raw`: Un-smoothed fuel-gauge SoC (0-100). Can be higher than `battery` while the display is rate-limited/re-anchoring; use this for diagnostics and field reports.
 - `charging`: Charging status (true/false)
 - `voltage`: Battery voltage in mV
 - `temp`: Battery temperature in °C (NTC via NPM1300; useful for verifying the charge cutoff)
@@ -687,9 +703,9 @@ AT+LIST=20240203100000?1&20
     "size": 5242880,
     "synced": 15,
     "bookmarks": 5,
-    "channels": 2,
+    "channels": 1,
     "sample_rate": 16000,
-    "mode": "normal"
+    "mode": "mono"
   }
 }
 ```
@@ -723,9 +739,9 @@ AT+LIST=20240203100000?1&20
 - `files`: Array of file names (file list pagination)
 - `id`: Session ID (non-paginated response, deprecated)
 - `synced`: Number of files successfully transferred (only in session details)
-- `channels`: Audio channels - 1=mono, 2=stereo (only in session details)
+- `channels`: Audio channels — currently 1 (mono) for both presets; 2 is reserved (only in session details)
 - `sample_rate`: Sample rate in Hz, e.g., 16000 (only in session details)
-- `mode`: Recording mode - "normal" (stereo) or "enhanced" (mono with DSP) (only in session details)
+- `mode`: Audio-layout string written by the recorder — currently `"mono"` (`"stereo"` reserved). It does **not** identify the AT+MODE preset; the firmware currently stores the audio mode, not the normal/enhanced preset. (only in session details)
 
 **Usage Examples:**
 ```
@@ -777,6 +793,9 @@ AT+DELETE=20240203100000
 
 **Error Cases:**
 - `{"ok":false,"msg":"Session not found"}` / `"Invalid session ID"` / `"cannot delete active session"` / `"Missing session_id"` / `"SD card not mounted"`
+- `"Transfer active"` — the session is currently being downloaded; cancel the
+  transfer first (`AT+CANCEL`). Deleting it would free the clusters under the
+  transfer thread's open file.
 
 **Side Effects:**
 - Deletes the session directory and all its files
@@ -1093,10 +1112,10 @@ AT+MODE?
 **Valid Values:** "normal", "enhanced"
 
 **Mode Presets:**
-- **Normal**: Mono (L+R merged), 16kbps, complexity 0, no DSP processing (raw capture path), 10-minute file segments
-- **Enhanced**: Mono (L+R merged), 32kbps, complexity 1, DSP enabled (noise suppression + dereverberation), 2-minute file segments
+- **Normal**: Mono (L+R merged); **SpeexDSP bypassed** (no noise suppression/dereverb); merge + high-pass + integer AGC; 32kbps, complexity 1; segments 60s (syncing) / 300s (idle)
+- **Enhanced**: Mono (L+R merged); **SpeexDSP noise suppression + dereverb enabled** (when `noise_suppress > 0`); merge + high-pass + integer AGC; 32kbps, complexity 1; segments 60s (syncing) / 300s (idle)
 
-Bitrate and complexity are fixed per mode and configured at build time via Kconfig (`CONFIG_CLIP_NORMAL_BITRATE`, `CONFIG_CLIP_ENHANCED_BITRATE`, etc.). They cannot be changed at runtime.
+Both presets are mono and currently use `CONFIG_CLIP_ENHANCED_BITRATE`/`COMPLEXITY`; `CONFIG_CLIP_NORMAL_BITRATE`/`COMPLEXITY` are unused. A mode change takes effect at the next recording start (the Speex enable is latched in `audio_start_recording_internal`), not mid-recording. Bitrate/complexity cannot be changed at runtime.
 
 ---
 
@@ -1295,6 +1314,18 @@ the last client disconnect; **an associated client keeps the AP up**, even when 
 **Error Cases:**
 - `{"ok":false,"msg":"Missing argument (on/off)"}` / `"Invalid argument (use on/off)"`
 - `"Cannot start WiFi in current state"` / `"Failed to start WiFi AP"` / `"Failed to stop WiFi AP"`
+- `{"ok":false,"msg":"Battery too low, charge first"}` — `AT+WIFI=on` is
+  refused while discharging below `CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT`
+  (default 15%) or `CONFIG_CLIP_WIFI_MIN_BATTERY_MV` (default 3500 mV).
+  Charging / USB VBUS bypasses both floors; an AP that is already running is
+  reported with its credentials (no teardown).
+- `"WiFi busy"` — an `AT+WIFI=off` arrived while a bring-up was still queued
+  or in flight. The OFF was dropped (a newer ON supersedes it), not failed;
+  wait for the AP to come up, then turn it off.
+- `"WiFi start timed out"` — bring-up did not finish within 30 s (radio in a
+  bad state); the AP is not up. Failure/success is judged from the AP's
+  actual state at response time, so `ok:true` always means the SSID is
+  connectable.
 
 ---
 
@@ -1346,6 +1377,13 @@ or
 - USB automatically disables on cable unplug
 - USB automatically disables after 10 minutes without a USB cable connected
 
+**SD-card exclusivity:** while USB MSC is enabled the card is handed to the
+host and unmounted from the application. AT commands that need the card
+(`LIST`, `DOWNLOAD`, `DELETE`, `MARKS`, `FORMAT`, `FACTORY`, `PAIR=reset`,
+`LOG=info|debug`) are refused with
+`{"ok":false,"msg":"USB MSC active, disable USB first"}`. `AT+USB=off`
+remounts the card for the firmware.
+
 ---
 
 ##### AT+LOG - SD Log Backend Control
@@ -1393,7 +1431,7 @@ AT+LOG?
   **production** image defaults to `off`. `AT+LOG` overrides this at runtime.
 - Enabling the backend (`info`/`debug`) keeps the SD mounted, which raises idle
   current — use for diagnostics, then set `off` to restore low-power idle.
-- The query reports `info` whenever the backend is active (regardless of debug level).
+- The query reports the backend's active level: `off`, `info`, or `debug`.
 
 **Error Cases:**
 - Missing or invalid mode (must be `off`, `info`, or `debug`)
@@ -1418,8 +1456,11 @@ AT+FORMAT
 ```
 
 **Error Cases:**
-- SD card not mounted
-- Cannot format while recording
+- `{"ok":false,"msg":"SD card not mounted"}`
+- `{"ok":false,"msg":"Recording or transfer active, stop first"}` — formatting
+  unmounts the card and runs `f_mkfs`; it is refused while a recording or a
+  file transfer still owns it. The FS log backend is stopped automatically
+  before the format.
 
 ---
 
@@ -1517,6 +1558,62 @@ AT+PAIR=reset
 > happens only after the background erase finishes, so the device is
 > guaranteed to come back unbonded with a clean SD card.
 
+
+---
+
+##### AT+SN - Product Serial Number
+
+Factory-written device serial number. Stored in the `sn` subtree of the
+LittleFS settings file — survives `AT+FACTORY` (which only resets config
+keys) and app reflash; **lost** if the settings file itself is wiped (MCUboot
+erase-settings, or the corrupt-settings watchdog wipe) — re-write it after
+such a recovery.
+
+The query also returns the device's BLE MAC (`bt_id_get` identity address) so
+a factory station can read the MAC, look up the SN bound to it in its own
+system, and write it back — one query drives the whole station flow.
+
+**Write (first time, SN empty):**
+```
+AT+SN=SC24A03100012
+```
+
+**Rewrite (SN already set):** append the device's own MAC as proof —
+ordinary users cannot produce it (phones do not show BLE MACs), while the
+station already holds it from its `AT+SN?` query. Colon separators optional,
+case-insensitive:
+```
+AT+SN=SC24A03100042,aabbccddeeff
+```
+
+**Query:**
+```
+AT+SN?
+```
+
+**Response (Set):**
+```json
+{ "ok": true, "data": { "sn": "SC24A03100012" } }
+```
+
+**Response (Get):**
+```json
+{ "ok": true, "data": { "mac": "AA:BB:CC:DD:EE:FF", "sn": "SC24A03100012" } }
+```
+`"sn":null` when not yet written; `mac` is empty before the BLE stack
+provides an identity.
+
+**Format:** SN is 1-32 chars, `[A-Za-z0-9._-]` only. A MAC supplied on a
+first write is verified too (catches a station addressing the wrong device).
+
+**Error Cases:**
+- `{"ok":false,"msg":"Missing argument (SN)"}` / `"Invalid SN"` / `"SN write failed"`
+- `"SN locked (rewrite needs ,<mac>)"` / `"MAC mismatch"` / `"MAC unavailable"`
+
+> The MAC proof guards against accidental overwrites, not adversaries —
+> anyone able to run `AT+SN?` can read the MAC. USB note: the USB
+> serial-number string descriptor is hwinfo chip-id derived (unique per
+> device) and is **not** the product SN.
 
 ---
 
@@ -2113,9 +2210,9 @@ Stored in each session directory, contains session information, sync progress, a
   "duration": 600,
   "files": 30,
   "synced": 15,
-  "channels": 2,
+  "channels": 1,
   "sample_rate": 16000,
-  "mode": "normal"
+  "mode": "mono"
 }
 ```
 
@@ -2124,9 +2221,12 @@ Stored in each session directory, contains session information, sync progress, a
 - `duration`: Recording length in seconds (0 while recording)
 - `files`: Total number of audio files in session (0 while recording)
 - `synced`: Number of files that have been successfully transferred
-- `channels`: Audio channels (1=mono, 2=stereo)
+- `channels`: Audio channels (currently 1 for both presets; 2 is reserved)
 - `sample_rate`: Sample rate in Hz (e.g., 16000)
-- `mode`: Recording mode ("normal" or "enhanced")
+- `mode`: Audio-layout string written by the recorder (`"mono"` currently;
+  `"stereo"` reserved). It does **not** identify the AT+MODE preset — use
+  `channels` for decoder setup. (Historical docs said "normal"/"enhanced"; the
+  current firmware writes the audio mode string instead.)
 
 **Purpose:**
 - Track transfer progress for resume functionality
@@ -2137,7 +2237,7 @@ Stored in each session directory, contains session information, sync progress, a
 **Example Usage:**
 ```
 # Session has 30 files, 15 have been transferred
-# Audio is normal mode (stereo, 2 channels) at 16kHz
+# Audio is mono (1 channel) at 16kHz for both presets; the mode field is "mono"
 # Next transfer should start from file 0016.opus
 AT+DOWNLOAD=20240203100000:0016.opus
 ```

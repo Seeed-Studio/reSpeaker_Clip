@@ -27,7 +27,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 - High-quality audio processing (SpeexDSP + Opus encoding)
 - Dual transport: BLE for mobile app, WiFi UDP for high-speed local sync
 - Simple single-button operation with OLED display feedback
-- Long battery life (recording duration target TBD with the 240 mAh cell; production idle measured at ~170µA)
+- Long battery life (recording duration target TBD with the 240 mAh cell; production idle ~250µA average, 170µA steady baseline)
 
 ## 2. User Stories
 
@@ -78,9 +78,9 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 **FR-1.1.1**: The system shall capture audio from PDM microphones at 16 kHz sample rate, 16-bit depth
 
-**FR-1.1.2**: The system shall support stereo recording from dual microphones (Normal mode)
+**FR-1.1.2**: The system shall capture 2-channel PDM audio and record it as mono (delay-aligned L+R merge) for both presets
 
-**FR-1.1.3**: The system shall support merged mode: stereo capture downmixed to mono (Enhanced mode)
+**FR-1.1.3**: The system shall downmix the 2-channel PDM capture to a single mono Opus stream; there is no stereo recording path in the current firmware
 
 **FR-1.1.4**: The PDM driver shall use double buffering (memory slab) to prevent audio overflow
 
@@ -92,13 +92,13 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 **FR-1.2.2**: The system shall apply dereverberation using SpeexDSP (enable/disable, default on; fixed level=40, decay=30)
 
-**FR-1.2.3**: Automatic Gain Control: the SpeexDSP AGC is not available (the library is built with FIXED_POINT, which does not support AGC). Instead, a custom lightweight integer AGC + high-pass filter runs in Enhanced/MERGE mode alongside the SpeexDSP preprocessor.
+**FR-1.2.3**: Automatic Gain Control: the SpeexDSP AGC is not available (the library is built with FIXED_POINT, which does not support AGC). A custom lightweight integer AGC + high-pass filter runs in **both** presets; the SpeexDSP preprocessor itself only runs in Enhanced mode.
 
-**FR-1.2.4**: The system shall provide two recording mode presets:
-- **Normal mode**: Stereo capture, no DSP processing, 32 kbps/channel (64 kbps total)
-- **Enhanced mode**: Mono (merged L+R), noise suppression + dereverb + integer AGC, 32 kbps
+**FR-1.2.4**: The system shall provide two recording presets:
+- **Normal**: Mono (L+R merged), SpeexDSP bypassed, merge + HPF + integer AGC, 32 kbps
+- **Enhanced**: Mono (L+R merged), SpeexDSP noise suppression + dereverb + integer AGC + HPF, 32 kbps
 
-**FR-1.2.5**: Audio processing shall be applied only in Enhanced (merge) mode; Normal (stereo) mode passes PCM data directly to the encoder
+**FR-1.2.5**: SpeexDSP noise suppression/dereverberation shall apply only in Enhanced mode. Normal still uses the merged mono path plus HPF and the custom integer AGC; only the SpeexDSP stage is bypassed.
 
 **FR-1.2.6**: The system shall process audio in real-time with < 50ms latency
 
@@ -106,13 +106,9 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 **FR-1.3.1**: The system shall encode audio using the Opus codec
 
-**FR-1.3.2**: Bitrate is mode-specific, set at compile time via Kconfig (not user-configurable at runtime):
-- Normal mode: 32 kbps per channel (CONFIG_CLIP_NORMAL_BITRATE=32000; stereo encoder runs at 2x = 64 kbps total)
-- Enhanced mode: 32 kbps (CONFIG_CLIP_ENHANCED_BITRATE=32000), mono
+**FR-1.3.2**: Bitrate is set at compile time via Kconfig (not user-configurable at runtime). Both presets are mono and currently use `CONFIG_CLIP_ENHANCED_BITRATE=32000`; `CONFIG_CLIP_NORMAL_BITRATE` is unused.
 
-**FR-1.3.3**: Encoding complexity is mode-specific, set at compile time via Kconfig (not user-configurable at runtime):
-- Normal mode: complexity 1 (CONFIG_CLIP_NORMAL_COMPLEXITY=1)
-- Enhanced mode: complexity 1 (CONFIG_CLIP_ENHANCED_COMPLEXITY=1)
+**FR-1.3.3**: Encoding complexity is set at compile time via Kconfig (not user-configurable at runtime). Both presets currently use `CONFIG_CLIP_ENHANCED_COMPLEXITY=1`; `CONFIG_CLIP_NORMAL_COMPLEXITY` is unused.
 
 **FR-1.3.4**: The encoder shall use VBR enabled, unconstrained quality, voice-optimized signal, 16-bit LSB depth, DTX/FEC/packet loss compensation disabled
 
@@ -126,9 +122,9 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 
 #### 3.1.4 Recording Modes
 
-**FR-1.4.1**: Normal mode: stereo recording, no DSP, 32 kbps/channel (64 kbps total)
+**FR-1.4.1**: Normal preset: mono (merged L+R), no SpeexDSP (noise suppression/dereverb off), merge + HPF + integer AGC, 32 kbps
 
-**FR-1.4.2**: Enhanced mode: mono (merged L+R), SpeexDSP noise suppression + dereverb + custom integer AGC, 32 kbps
+**FR-1.4.2**: Enhanced preset: mono (merged L+R), SpeexDSP noise suppression + dereverb + custom integer AGC + HPF, 32 kbps
 
 **FR-1.4.3**: Recording mode shall be stored in NVS and configurable via AT+MODE command
 
@@ -179,10 +175,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 #### 3.2.4 Auto-Purge Policies
 
-**FR-2.4.1**: The system shall support auto-delete policies configurable via AT+AUTODEL:
-- `off` (-1): Manual delete only
-- `0`: Delete immediately after transfer
-- `1-30`: Delete N days after transfer
+**FR-2.4.1**: Auto-delete is **not implemented**. `AT+AUTODEL` was removed because the policy was stored but never enforced; sessions are deleted explicitly with `AT+DELETE=<session_id>`.
 
 **FR-2.4.2**: The system shall identify fully synced sessions (synced_files == file_count) for cleanup
 
@@ -234,6 +227,8 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-3.3.6a**: WiFi AP shall automatically disable after a configurable timeout (`CONFIG_CLIP_WIFI_TIMEOUT_MS`, default 3 minutes) to prevent unnecessary power drain when left enabled but unused. Timer restarts on client disconnect. Set to 0 to disable.
 
+**FR-3.3.6b**: WiFi start shall be refused while discharging below `CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT` (default 15%) or `CONFIG_CLIP_WIFI_MIN_BATTERY_MV` (default 3500 mV); charging or VBUS bypasses both. `AT+WIFI=on` returns `Battery too low, charge first`.
+
 **FR-3.3.7**: WiFi driver shall use WiFi/BLE coexistence (MPSL_CX + NRF70_SR_COEX)
 
 #### 3.3.4 AT Command Protocol
@@ -263,12 +258,12 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 | `AT+DEVICE` | QUERY/EXEC | Get device name |
 | `AT+VERSION` | EXEC | Get firmware version |
 | `AT+TIME` | SET/GET/EXEC | Set time (Unix timestamp) or get current time (ISO 8601) |
-| `AT+MODE` | SET/GET/EXEC | Set/get recording mode (normal/enhanced/stereo/merge) |
-| `AT+AUTODEL` | SET/GET/EXEC | Set/get auto-delete policy (off/0-30 days) |
+| `AT+MODE` | SET/GET/EXEC | Set/get recording preset (normal/enhanced) |
 | `AT+BRIGHTNESS` | SET/GET/EXEC | Set/get OLED brightness (0-255) |
 | `AT+POWEROFF` | EXEC | Shutdown device |
 | `AT+FACTORY` | SET/EXEC | Factory reset (requires "confirm" or "yes") |
 | `AT+PAIR` | SET/GET | Query pairing status or `AT+PAIR=reset` to clear bonds |
+| `AT+SN` | SET/GET | Product serial number (write-once; rewrite needs MAC) |
 | `AT+REBOOT` | EXEC | Reboot device |
 | `AT+START` | EXEC/SET | Start recording (optional mode parameter) |
 | `AT+STOP` | EXEC | Stop recording |
@@ -355,7 +350,7 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 
 **FR-4.2.10**: Display brightness shall be configurable via AT+BRIGHTNESS (0-255, stored in NVS)
 
-**FR-4.2.11**: Display shall show fullscreen low battery warning when displayed battery level falls to 15% or below while discharging (one-shot until recharged; no automatic shutdown)
+**FR-4.2.11**: Display shall show a fullscreen low-battery warning when the displayed battery level falls to 15% or below while discharging (one-shot until recharged). Automatic power-off is voltage-based (≤3.1V for 2 minutes, no charging/VBUS) and independent of the displayed percentage.
 
 **FR-4.2.12**: Display shall update every 50ms for animation (DISPLAY_ANIMATION_PERIOD)
 
@@ -382,6 +377,8 @@ the session directory and named `{NNNN}.opus` (e.g., `0/0001.opus`,
 **FR-5.1.3**: The system shall report battery level in AT+GSTAT response
 
 **FR-5.1.4**: The system shall display battery level on OLED
+
+**FR-5.1.5**: The system shall automatically power off at/below `CONFIG_CLIP_BATTERY_SHUTDOWN_MV` (default 3.1V) continuously for `CONFIG_CLIP_BATTERY_SHUTDOWN_CONFIRM_MS` (default 2 minutes), using valid sensor readings and only while not charging/VBUS. Any reading above the floor resets the confirmation. The shutdown uses the graceful chain (stop recording, close files, cancel transfer, save fuel-gauge/time, ship mode) and never uses the displayed/raw SoC as the trigger.
 
 #### 3.5.2 Charging Status
 
@@ -486,7 +483,7 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 **NFR-1.3**: File transfer speed over WiFi UDP shall be significantly faster than BLE
 
-**NFR-1.4**: Battery life for continuous recording: TBD — to be re-measured against the actual 240 mAh cell (the earlier ">8 hours" figure was derived from a wrong 500 mAh assumption; production idle is ~170µA)
+**NFR-1.4**: Battery life for continuous recording: TBD — to be re-measured against the actual 240 mAh cell (the earlier ">8 hours" figure was derived from a wrong 500 mAh assumption; production idle is ~250µA average / 170µA steady baseline)
 
 **NFR-1.5**: Button response time shall be < 100ms
 
@@ -687,12 +684,12 @@ Binary format (little-endian):
 
 ### 8.1 Bitrate and Storage
 
-| Mode | Channels | Bitrate (total) | Storage per Hour | Notes |
+| Preset | Channels | Bitrate (total) | Storage per Hour | Notes |
 |------|----------|-----------------|-------------------|-------|
-| Normal | Stereo | 64 kbps (32k x 2) | ~28.8 MB/hour | No DSP processing |
+| Normal | Mono | 32 kbps | ~14.4 MB/hour | SpeexDSP bypassed; merge + HPF + integer AGC |
 | Enhanced | Mono | 32 kbps | ~14.4 MB/hour | SpeexDSP noise suppress + dereverb + integer AGC |
 
-The capacity examples below are computed against the Enhanced-mode rate (~14.4 MB/hour); Normal (stereo) mode consumes about twice as much.
+The capacity examples below are computed against the current mono 32 kbps Opus rate (both presets, ~14.4 MB/hour).
 
 ### 8.2 Capacity Examples
 

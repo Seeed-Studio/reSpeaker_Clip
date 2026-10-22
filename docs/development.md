@@ -1,15 +1,15 @@
 # reSpeaker Clip - Development Log
 
-## Current State (2026-05-18)
+## Current State (2026-10-22)
 
 ### Implemented Features
 
 | Feature | Notes |
 |---------|-------|
-| PDM Microphone Capture | 16kHz, stereo/mono/merge modes |
+| PDM Microphone Capture | 16kHz, 2-channel PDM input; recorded as mono |
 | Opus Encoding | Mode-specific bitrate/complexity via Kconfig |
 | SpeexDSP Processing | Noise suppression, dereverberation (SpeexDSP AGC unavailable in FIXED_POINT; custom integer AGC + high-pass in Enhanced/MERGE mode) |
-| Audio Modes | Normal (stereo, 32kbps/ch = 64kbps total, complexity 1), Enhanced (mono, 32kbps, complexity 1) |
+| Audio Modes | Both mono (L+R merge); Normal = SpeexDSP off, Enhanced = SpeexDSP NS/DR; both 32kbps/complexity 1 (normal Kconfig unused) |
 | SD Card Storage | FAT32, timestamp buckets under `/SD:/REC/YYYYMMDD/HH/MM/SS/` with 100-file group directories |
 | SD Card Log Persistence | LOG_BACKEND_FS, /SD:/LOG/, 128KB files x20; AT+LOG=off\|info\|debug (debug default INF) |
 | Session Metadata | session.json and marks.bin per timestamp-bucket session |
@@ -23,7 +23,7 @@
 | WiFi AP Mode | SSID: ClipAP_XXXX, default password 12345678 (random 8-char password regenerated on first pairing), IP: 192.168.4.1, Port: 8089 |
 | WiFi Auto-Off | 3 min timeout (CONFIG_CLIP_WIFI_TIMEOUT_MS=180000) |
 | USB CDC Security | Disabled by default, AT+USB control, auto-off on disconnect |
-| NVS Configuration | 5 settings persist: mode, noise, autodel, dereverb, brightness |
+| NVS Configuration | 8 settings persist: mode, noise, dereverb, brightness, wifi password/name/channel/reg-domain; time and SN in separate subtrees |
 | Battery Monitoring | NPM1300 PMIC + nRF Fuel Gauge (directionally rate-limited, persisted SoC display) |
 | Button Handler | Custom input driver: long-press record, short-press bookmark, single-click status |
 | OLED Display | CH1115 driver (88x48, I2C), 24x24 icons, 8x16 font, status bar, recording time, battery/charging, low battery fullscreen |
@@ -44,7 +44,7 @@
 | Command | Type | Purpose |
 |---------|------|---------|
 | AT+GSTAT | EXEC | Get device status |
-| AT+BATT | QUERY/EXEC | Get battery status (%, charging, voltage, temp) |
+| AT+BATT | QUERY/EXEC | Get battery status (%, soc_raw, charging, voltage, temp) |
 | AT+STORAGE | QUERY/EXEC | SD card storage info |
 | AT+DEVICE | EXEC/GET | Device name |
 | AT+VERSION | EXEC | Version info |
@@ -59,7 +59,6 @@
 | AT+DELETE | SET | Delete session |
 | AT+MARKS | GET/SET | Get bookmarks |
 | AT+DOWNLOAD | SET | Download file/session |
-| AT+AUTODEL | GET/SET | Auto-delete policy |
 | AT+FORMAT | EXEC | Format SD card |
 | AT+POWEROFF | EXEC | Power off (ship mode) |
 | AT+WIFI | EXEC/GET/SET | WiFi AP control |
@@ -67,34 +66,40 @@
 | AT+MODE | GET/SET | Recording mode |
 | AT+BRIGHTNESS | GET/SET | OLED brightness |
 | AT+PAIR | GET/SET | BLE pairing |
+| AT+SN | GET/SET | Product serial number (write-once; rewrite needs MAC) |
 | AT+FACTORY | SET | Factory reset |
 | AT+REBOOT | EXEC | Reboot |
-| AT+USB | GET/SET | USB CDC control (default: off, auto-off on disconnect) |
+| AT+USB | GET/SET/EXEC | USB CDC control (default: off, auto-off on disconnect) |
 | AT+DFU | EXEC | Reboot into MCUboot recovery mode |
-| AT+LOG | SET | SD log backend level: off \| info \| debug (debug default info) |
+| AT+LOG | GET/SET | SD log backend level: off \| info \| debug (debug default info) |
 | AT+NAME | GET/SET | Custom BLE device name |
 
 ### Thread Architecture
 
 | Thread | Priority | Stack | Purpose |
 |--------|----------|-------|---------|
-| Main | 0 | Default | Event loop, status updates |
+| Main | 0 | Default (6144) | Event loop, status updates |
+| WiFi worker | 5 | 4096 | Blocking AP bring-up/teardown |
 | Audio | 0 | 32768 | PDM capture, DSP, Opus encode |
 | Transfer | 5 | 4096 | File transfer over BLE/UDP |
 | UDP Server | 5 | 2048 | WiFi UDP packet handling |
 | AT Server | 7 | 8192 | AT command parsing and dispatch |
+| RTC stream | 4 | 2048 | Live Opus stream queue consumer |
 
 ### Memory Usage
 
-- FLASH: ~915 KB (app core, secure + non-secure image)
-- RAM: ~445 KB (total system SRAM, secure + non-secure + shared)
+- FLASH: ~934 KB used of the 0xE9E00 (935.5 KB) app slot
+- RAM: ~450 KB used of 450,560 B (≈496 B free at the current static layout)
 
-### Recording Modes
+### Recording Presets
 
-| Mode | Audio | Bitrate | Complexity | DSP | Segment Duration |
-|------|-------|---------|------------|-----|-----------------|
-| Normal | Stereo (L+R) | 32kbps/ch (64kbps total) | 1 | Disabled | 60s (sync) / 300s (no sync) |
-| Enhanced | Mono (L+R merged) | 32kbps | 1 | Enabled | 60s (sync) / 300s (no sync) |
+| Preset | Audio | Bitrate | Complexity | DSP | Segment Duration |
+|--------|-------|---------|------------|-----|-----------------|
+| Normal | Mono (L+R merged) | 32kbps | 1 | SpeexDSP **off**; merge + HPF + integer AGC | 60s (sync) / 300s (no sync) |
+| Enhanced | Mono (L+R merged) | 32kbps | 1 | SpeexDSP NS + dereverb; merge + HPF + integer AGC | 60s (sync) / 300s (no sync) |
+
+> Both presets are mono. `CONFIG_CLIP_NORMAL_BITRATE/COMPLEXITY` are currently
+> unused — the encoder always runs MERGE and uses the ENHANCED constants.
 
 ### Build & Flash
 
@@ -117,12 +122,18 @@ minicom -D /dev/ttyACM0 -b 921600
 
 | Feature | Priority | Notes |
 |---------|----------|-------|
-| Low Power Mode | Medium | Sleep when idle |
-| Auto-Purge Execution | Medium | Background task to delete old transferred sessions |
+| Auto-Purge Execution | Low | `AT+AUTODEL` was removed (policy stored but never enforced); no background purge |
+| Hardware watchdog | Low | Only the settings-load software watchdog exists |
+
+> Low-power idle is implemented: the `production` snippet (console off) reaches
+> ~170 µA; see `docs/power.md`.
 
 ---
 
 ## Change History
+
+> Historical entries describe the firmware at the time they were written; the
+> sections above are the current behaviour.
 
 ### 2026-06-16 - v0.0.5 Release
 
