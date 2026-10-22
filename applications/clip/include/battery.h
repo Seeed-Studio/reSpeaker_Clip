@@ -53,4 +53,11 @@ bool battery_vbus_present(void);
  * (AT + button) gate on this. */
 bool battery_recording_allowed(void);
 
+/* WiFi AP allowed? Blocked while discharging below
+ * CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT (default 15%) or
+ * CONFIG_CLIP_WIFI_MIN_BATTERY_MV (default 3500 mV). Charging or VBUS
+ * bypasses both floors (external power), and the critical recording
+ * lockout also blocks. Used by AT+WIFI=on and the WIFI_ON transition. */
+bool battery_wifi_allowed(void);
+
 #endif /* CLIP_BATTERY_H */

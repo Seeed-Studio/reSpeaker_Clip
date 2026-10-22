@@ -366,7 +366,7 @@ static int udp_repair_missing(struct fs_file_t *file, uint32_t file_size, uint32
         }
     }
 
-    LOG_INF("selective repair: resent %d frame(s)", resent);
+    LOG_DBG("selective repair: resent %d frame(s)", resent);
     return resent;
 }
 

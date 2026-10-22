@@ -1010,6 +1010,28 @@ int ble_get_bond_addr(char *addr_buf, size_t len)
     return addr_buf[0] ? 0 : -ENOENT;
 }
 
+int ble_get_mac_str(char *buf, size_t len)
+{
+    if (buf == NULL || len < 18) {
+        return -EINVAL;
+    }
+
+    /* Own identity (public) address — the MAC the phone sees. */
+    bt_addr_le_t addrs[1];
+    size_t count = ARRAY_SIZE(addrs);
+    bt_id_get(addrs, &count);
+    if (count == 0) {
+        return -ENODATA;
+    }
+
+    bt_addr_le_to_str(&addrs[0], buf, len);   /* "xx:..:xx (public)" */
+    char *sp = strchr(buf, ' ');
+    if (sp) {
+        *sp = '\0';                           /* keep just the MAC */
+    }
+    return 0;
+}
+
 int ble_clear_bonds(void)
 {
     return bt_unpair(BT_ID_DEFAULT, NULL);

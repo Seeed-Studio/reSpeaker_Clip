@@ -127,6 +127,23 @@ void clip_storage_activity_notify(void);
 bool clip_log_fs_active(void);
 
 /**
+ * @brief Reflect the FS-log backend's actual state
+ *
+ * main.c activates/deactivates the backend at boot depending on whether the
+ * SD mounted; the flag used for idle power-off gating must follow it.
+ */
+void clip_log_fs_set_active(bool active);
+
+/**
+ * @brief Stop the FS log backend and wait for its file to close
+ *
+ * Must be called before unmounting/formatting the SD card or handing it to
+ * USB MSC; otherwise the backend's open file makes fs_unmount fail with its
+ * return value unchecked.
+ */
+void clip_log_fs_disable(void);
+
+/**
  * @brief Wait for events (called by main loop)
  *
  * Blocks until an event is posted or timeout expires.

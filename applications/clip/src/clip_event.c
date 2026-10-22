@@ -8,8 +8,11 @@
  * All state transitions and side effects (audio, haptic, display)
  * are handled here. Button and AT command modules only post events.
  *
- * Events are processed in the main thread (via clip_event_process()),
- * which provides a large enough stack for WiFi ON/OFF operations.
+ * Events are processed in the main thread (via clip_event_process()).
+ * WiFi ON/OFF are the exception: they block for seconds and run on the
+ * dedicated WiFi worker thread (wifi.c) — the dispatcher only queues the
+ * request and commits the state immediately, so buttons/UI stay alive
+ * during the whole nRF70 bring-up/teardown.
  */
 
 #include <zephyr/kernel.h>
@@ -655,7 +658,7 @@ static void shutdown_thread_fn(void)
 
         /* Signal the transfer to stop (flag only). */
         if (transfer_is_active()) {
-            LOG_INF("Cancelling transfer before power off");
+            LOG_DBG("Cancelling transfer before power off");
             transfer_cancel();
         }
 
@@ -666,6 +669,11 @@ static void shutdown_thread_fn(void)
             battery_fg_state_age_ms() > 60000) {
             battery_save_fg_state();
         }
+
+        /* Persist the current clock so a same-day reboot restores from
+         * power-off time, not from the last recording stop (the
+         * overnight gap itself is still unknowable — no RTC). */
+        config_sync_time();
 
         int64_t left = power_cut_earliest - k_uptime_get();
         if (left > 0) {
@@ -707,6 +715,13 @@ static void shutdown_thread_fn(void)
         /* Drop anything queued while gated (a replayed START would be
          * stale), then re-open the dispatcher and the UI. */
         k_msgq_purge(&clip_ev_msgq);
+        /* A WIFI_SYNC committed optimistically may have lost its revert
+         * to the purge (or the gate). Re-post WIFI_OFF — the handler
+         * sorts out pending/running and either tears a real AP down or
+         * just commits IDLE. */
+        if ((enum clip_state)atomic_get(&g_state) == CLIP_STATE_WIFI_SYNC) {
+            clip_post_event(CLIP_EVENT_WIFI_OFF);
+        }
         atomic_clear(&shutdown_active);
         button_shutdown_unlock();
         display_post_event(UI_EVENT_STATUS_SHOW);
@@ -804,7 +819,17 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_STOP:
     {
-        if (!audio_is_recording()) {
+        /* Do NOT gate on audio_is_recording(): during the recording-START
+         * window (id minted + sem given, but the audio thread is still
+         * inside its multi-second init — recording_active flips only at
+         * the very END), that gate silently swallowed the user's STOP —
+         * no log, no buzz, no state change — and the machine sat in
+         * RECORDING while the pipeline was wedged in session create.
+         * audio_stop_recording() itself handles the not-yet-active case
+         * (sets stop_requested so the audio thread skips the pending
+         * start). The transition table already confines STOP to
+         * RECORDING/PAUSED states. */
+        if (!audio_is_recording() && !audio_start_pending()) {
             return CLIP_EVENT_INVALID;
         }
 
@@ -918,13 +943,33 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_WIFI_ON:
     {
-        if (wifi_ap_is_running()) {
-            return CLIP_EVENT_OK;
+        /* Refuse to start the AP on a low cell unless charging/VBUS. The
+         * AT layer checks this first for a specific message; this guard
+         * covers any other future caller. An already-running AP is left
+         * alone (idempotent re-issue). */
+        if (!wifi_ap_is_running() && !battery_wifi_allowed()) {
+            LOG_WRN("WiFi start refused: battery too low");
+            display_post_error("Battery Low");
+            return CLIP_EVENT_INVALID;
         }
 
-        err = wifi_on();
+        /* Kick the WiFi worker and return NOW: wifi_on() blocks for
+         * seconds (RPU boot + AP-enable retries) and used to freeze the
+         * whole dispatcher — button events queued unseen, no UI events
+         * posted. The state commits to WIFI_SYNC optimistically; the
+         * worker reverts via WIFI_OFF if bring-up fails. AT+WIFI keeps
+         * its old "ok:true => AP is up" timing by waiting on the worker
+         * from the AT thread (wifi_wait_ops_done).
+         *
+         * Always enqueue — no wifi_ap_is_running() early-return: with
+         * async teardown, ap_running stays true up to ~3 s after WIFI_OFF
+         * dispatched, and an ON arriving in that window would early-return
+         * WITHOUT queueing anything (AP down, state wedged in WIFI_SYNC,
+         * recording refused). wifi_on() itself no-ops fast when the AP is
+         * already up, so the idempotent re-queue is harmless. */
+        err = wifi_request_async(true);
         if (err) {
-            LOG_ERR("wifi_on failed: %d", err);
+            LOG_ERR("wifi on request failed: %d", err);
             display_post_error("WiFi Fail");
             return CLIP_EVENT_ERROR;
         }
@@ -933,9 +978,30 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_WIFI_OFF:
     {
-        err = wifi_off();
+        /* Same worker handoff as WIFI_ON: wifi_off() waits on the AP
+         * disable round trip (~3 s) — not runnable on the dispatcher. */
+        if (wifi_on_pending()) {
+            /* A bring-up is queued or in flight. Either this OFF is the
+             * worker's own failure-revert for an OLDER ON (the newer ON
+             * supersedes it — executing it would tear down the newer
+             * bring-up), or a host OFF raced a bring-up. Drop it and keep
+             * WIFI_SYNC: non-OK result refuses the state commit. The ON's
+             * own outcome (or a retried OFF once it settles) resolves the
+             * state. */
+            LOG_INF("wifi off dropped, bring-up pending");
+            return CLIP_EVENT_BUSY;
+        }
+        if (!wifi_ap_is_running()) {
+            /* Pure state commit (failure-revert landing after the worker
+             * gave up): no AP to tear down. Must NOT enqueue a no-op OFF —
+             * its rc=0 would overwrite the just-broadcast failure rc
+             * before the AT waiter reads it, answering ok:true to a
+             * failed bring-up. */
+            return CLIP_EVENT_OK;
+        }
+        err = wifi_request_async(false);
         if (err) {
-            LOG_ERR("wifi_off failed: %d", err);
+            LOG_ERR("wifi off request failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
         return CLIP_EVENT_OK;

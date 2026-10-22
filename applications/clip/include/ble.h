@@ -142,6 +142,15 @@ bool ble_is_audio_vis_subscribed(void);
 int ble_get_bond_addr(char *addr_buf, size_t len);
 
 /**
+ * @brief Get the device's own BLE MAC (identity/public address)
+ *
+ * The address the phone sees. Output "AA:BB:CC:DD:EE:FF" (17 chars + NUL).
+ *
+ * @return 0 on success, -ENODATA before the stack provides an identity
+ */
+int ble_get_mac_str(char *buf, size_t len);
+
+/**
  * @brief Clear all BLE bonds
  *
  * @return 0 on success, negative error code on failure

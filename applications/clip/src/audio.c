@@ -78,6 +78,11 @@ static int16_t processed_buffer[AUDIO_OPUS_FRAME_SIZE];
 
 /* Recording state */
 static bool recording_active = false;
+/* True from audio_start_common's sem-give until the audio thread finishes
+ * (or skips) audio_start_recording_internal — the window where the state
+ * machine says RECORDING but recording_active is still false and a STOP
+ * must reach audio_stop_recording's pending-start path, not be gated out. */
+static bool start_pending;
 static enum audio_mode current_mode = AUDIO_MODE_MERGE;
 static int opus_channels = 1;
 
@@ -252,7 +257,7 @@ int audio_init(void)
     }
     k_thread_name_set(&audio_thread_data, "audio_rec");
 
-    LOG_INF("audio: pri=%d stk=%u",
+    LOG_DBG("audio: pri=%d stk=%u",
         CONFIG_CLIP_AUDIO_THREAD_PRIORITY,
         CONFIG_CLIP_AUDIO_STACK_SIZE);
 
@@ -310,6 +315,7 @@ static int audio_start_common(enum audio_mode mode, bool persists)
     /* Reset counters */
     recording_frame_count = 0;
     stop_requested = false;
+    start_pending = true;
     k_sem_reset(&stop_done_sem);
 
     /* Wake up audio thread by giving semaphore */
@@ -375,7 +381,7 @@ int audio_pause_recording(void)
     pause_requested = true;
     k_mutex_unlock(&audio_state_mutex);
 
-    LOG_INF("Recording pause requested");
+    LOG_DBG("Recording pause requested");
     return 0;
 }
 
@@ -392,7 +398,7 @@ int audio_resume_recording(void)
     is_paused = false;
     k_mutex_unlock(&audio_state_mutex);
 
-    LOG_INF("Recording resume requested");
+    LOG_DBG("Recording resume requested");
     return 0;
 }
 
@@ -495,6 +501,15 @@ bool audio_is_paused(void)
     k_mutex_unlock(&audio_state_mutex);
 
     return paused;
+}
+
+bool audio_start_pending(void)
+{
+    k_mutex_lock(&audio_state_mutex, K_FOREVER);
+    bool pending = start_pending;
+    k_mutex_unlock(&audio_state_mutex);
+
+    return pending;
 }
 
 /* The haptic motor's mechanical noise couples into the PDM mics; a
@@ -727,11 +742,13 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
         /* Check if stop was requested before we started */
         if (stop_requested) {
             stop_requested = false;
+            start_pending = false;   /* single-word store; we own it here */
             continue;
         }
 
         /* Perform initialization in audio thread context */
         ret = audio_start_recording_internal(current_mode);
+        start_pending = false;
         if (ret < 0) {
             LOG_ERR("Failed to start recording: %d", ret);
             continue;

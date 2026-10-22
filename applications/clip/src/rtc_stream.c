@@ -144,7 +144,7 @@ static void start_timeout_fn(struct k_work *work)
         return;
     }
 
-    LOG_INF("no DOWNLOAD within %us, ending RTC session",
+    LOG_DBG("no DOWNLOAD within %us, ending RTC session",
             CONFIG_CLIP_RTC_START_TIMEOUT_SEC);
     ble_notify_event("rtc", "timeout");
     rtc_stream_session_end();
@@ -159,7 +159,7 @@ static void disconnect_work_fn(struct k_work *work)
         return;
     }
 
-    LOG_INF("BLE disconnected, ending RTC session");
+    LOG_DBG("BLE disconnected, ending RTC session");
     rtc_stream_session_end();
     clip_post_event(CLIP_EVENT_STOP);
 }
@@ -195,7 +195,7 @@ static void rtc_stream_go(void)
 
     atomic_set(&start_pending, 0);
     atomic_set(&stream_active, 1);
-    LOG_INF("stream started: %s (wait=%ums interval=%u)", rtc_session_id,
+    LOG_DBG("stream started: %s (wait=%ums interval=%u)", rtc_session_id,
             param_wait_ms, ble_get_conn_interval());
 }
 
@@ -217,7 +217,7 @@ static void param_wait_fn(struct k_work *work)
             return;
         }
         if (param_wait_ms == RTC_PARAM_WAIT_MAX_MS) {
-            LOG_INF("connection parameter wait expired (interval=%u)",
+            LOG_DBG("connection parameter wait expired (interval=%u)",
                     ble_get_conn_interval());
         }
         if (param_wait_ms >= 2 * RTC_PARAM_WAIT_MAX_MS) {
@@ -281,7 +281,7 @@ int rtc_stream_session_begin(const char *session_id)
     k_work_schedule(&start_timeout_work,
                     K_SECONDS(CONFIG_CLIP_RTC_START_TIMEOUT_SEC));
 
-    LOG_INF("session %s (start timeout %us)", rtc_session_id,
+    LOG_DBG("session %s (start timeout %us)", rtc_session_id,
             CONFIG_CLIP_RTC_START_TIMEOUT_SEC);
     return 0;
 }
@@ -301,7 +301,7 @@ void rtc_stream_session_end(void)
     rtc_stream_flush();
     rtc_session_id[0] = '\0';
 
-    LOG_INF("session ended: pushed=%u sent=%u drop_q=%u drop_tx=%u",
+    LOG_DBG("session ended: pushed=%u sent=%u drop_q=%u drop_tx=%u",
             frames_pushed, frames_consumed, frames_dropped_queue,
             frames_dropped_tx);
 }
@@ -369,20 +369,20 @@ void rtc_stream_stop(uint8_t reason)
         (void)transport_ble_send_stream_end(reason);
     }
 
-    LOG_INF("stream stopped (reason=%u)", reason);
+    LOG_DBG("stream stopped (reason=%u)", reason);
 }
 
 void rtc_stream_pause(void)
 {
     atomic_set(&stream_paused, 1);
     rtc_stream_flush(); /* paused = discard everything queued */
-    LOG_INF("stream paused");
+    LOG_DBG("stream paused");
 }
 
 void rtc_stream_resume(void)
 {
     atomic_set(&stream_paused, 0);
-    LOG_INF("stream resumed");
+    LOG_DBG("stream resumed");
 }
 
 bool rtc_stream_is_streaming(void)

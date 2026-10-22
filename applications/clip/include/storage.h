@@ -61,9 +61,15 @@ struct storage_session_info {
 int storage_init(void);
 
 /**
- * @brief Cleanup storage subsystem
+ * @brief Cleanup storage subsystem (unmount the SD)
+ *
+ * Callers handing the raw card to another owner (USB MSC) must check the
+ * result: a failed unmount means the filesystem is still in use and the
+ * other owner must not touch the card.
+ *
+ * @return 0 on success (or already unmounted), negative error code on failure
  */
-void storage_cleanup(void);
+int storage_cleanup(void);
 
 /**
  * @brief Remount SD card after MSC disable

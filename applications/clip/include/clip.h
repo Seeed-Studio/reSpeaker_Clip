@@ -80,6 +80,7 @@ struct clip_context {
     /* Status */
     struct clip_status {
         uint8_t battery_percent;
+        uint8_t battery_soc_raw;    /* un-smoothed fuel-gauge SoC, for diagnostics */
         bool battery_charging;
         int8_t battery_temp;        /* Battery temperature (°C, NTC) */
         uint16_t battery_mv;        /* Battery voltage (mV) */
@@ -98,6 +99,12 @@ struct clip_context {
         uint8_t sec;
         int64_t base_uptime_ms;
         bool valid;
+        /* True while the clock was restored from persisted settings at
+         * boot and no live AT+TIME sync has arrived since. The board has
+         * no RTC, so time across the power-off gap is unknowable — the
+         * app should push AT+TIME when it sees this (AT+TIME? reports it
+         * as "restored":true). */
+        bool restored;
     } time;
 };
 

@@ -8,6 +8,7 @@
 #define CLIP_WIFI_H
 
 #include <stdbool.h>
+#include <zephyr/kernel.h>   /* k_timeout_t for wifi_wait_ops_done */
 
 /**
  * @brief WiFi AP configuration
@@ -34,22 +35,43 @@
 int wifi_init(void);
 
 /**
- * @brief Power on WiFi interface and start AP
+ * @brief Queue an AP on/off request on the WiFi worker thread
  *
- * Brings up the WiFi network interface and starts AP mode.
+ * The actual bring-up/teardown blocks for seconds (nRF70 RPU boot,
+ * AP-enable round trips and retries) and must never run on the event
+ * dispatcher — the worker exists so buttons/UI stay responsive during
+ * it. Callers that need the old synchronous timing (AT+WIFI) follow up
+ * with wifi_wait_ops_done().
  *
- * @return 0 on success, negative error code on failure
+ * @param on true to start the AP, false to stop it
+ *
+ * @return 0 once queued, negative error code if the request queue is full
  */
-int wifi_on(void);
+int wifi_request_async(bool on);
 
 /**
- * @brief Power off WiFi interface
+ * @brief Block until every queued WiFi operation has finished
  *
- * Stops AP mode and powers off the radio.
+ * Worst-case bring-up is ~3 s ready wait + 3 x 5 s AP-enable retries —
+ * pass a timeout >= 25 s for "on" requests.
  *
- * @return 0 on success, negative error code on failure
+ * @param timeout maximum wait
+ *
+ * @return 0 if the last operation succeeded
+ * @return negative error code from the operation, or -EAGAIN on timeout
  */
-int wifi_off(void);
+int wifi_wait_ops_done(k_timeout_t timeout);
+
+/**
+ * @brief Check whether an AP bring-up is queued or in flight
+ *
+ * Lets the event dispatcher distinguish a stale failure-revert WIFI_OFF
+ * (a newer ON supersedes it) and see through the ap_running window while
+ * an ON is still mid-flight.
+ *
+ * @return true if at least one ON request has not executed yet
+ */
+bool wifi_on_pending(void);
 
 /**
  * @brief Check if WiFi interface is up

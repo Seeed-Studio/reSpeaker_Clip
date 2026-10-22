@@ -457,13 +457,25 @@ int storage_init(void)
     return 0;
 }
 
-void storage_cleanup(void)
+int storage_cleanup(void)
 {
+    int rc = 0;
+
     if (sd_mounted)
     {
-        fs_unmount(&mp);
-        sd_mounted = false;
+        rc = fs_unmount(&mp);
+        if (rc == 0)
+        {
+            sd_mounted = false;
+        }
+        else
+        {
+            /* Keep sd_mounted set: the volume is still in use, so the
+             * caller must not hand it to another owner. */
+            LOG_ERR("SD unmount failed: %d", rc);
+        }
     }
+    return rc;
 }
 
 int storage_idle_poweroff(void)
@@ -594,7 +606,7 @@ int storage_resume(void)
     sd_powered = true;
     update_free_space();
     k_mutex_unlock(&sd_lifecycle_mutex);
-    LOG_INF("SD resumed (mounted)");
+    LOG_DBG("SD resumed (mounted)");
     return 0;
 }
 
@@ -759,7 +771,7 @@ int storage_close_session(const char *session_id, uint32_t duration_sec,
      * would leave a phantom "untransferred" session forever — session.json
      * is the only thing the scan qualifies sessions by. Remove the tree. */
     if (chunk_count == 0) {
-        LOG_INF("session %s closed with 0 files, removing", session_id);
+        LOG_DBG("session %s closed with 0 files, removing", session_id);
         if (strcmp(current_session_id, session_id) == 0)
         {
             current_session_id[0] = '\0';
@@ -1380,13 +1392,19 @@ int storage_list_sessions_paginated(struct storage_session_info *sessions,
                                     int offset, int limit)
 {
     char ids[200][16];
-    int wanted = MIN(offset + limit, (int)ARRAY_SIZE(ids));
     int id_count;
     int result = 0;
 
     if (!sd_mounted || !sessions || offset < 0 || limit <= 0) {
         return -EINVAL;
     }
+
+    /* 64-bit: offset + limit can overflow int for a huge page argument and
+     * make `wanted` negative (storage_list_session_ids then returns
+     * -EINVAL). Clamp before narrowing. */
+    int64_t end64 = (int64_t)offset + limit;
+    int wanted = (end64 > (int64_t)ARRAY_SIZE(ids)) ? (int)ARRAY_SIZE(ids)
+                                                    : (int)end64;
     id_count = storage_list_session_ids(ids, wanted);
     if (id_count < 0) {
         return id_count;
@@ -1812,7 +1830,7 @@ int storage_sweep_empty_sessions(void)
 	}
 	k_mutex_unlock(&session_scan_mutex);
 	if (removed > 0) {
-		LOG_INF("swept %d empty sessions", removed);
+		LOG_DBG("swept %d empty sessions", removed);
 	}
 	return removed;
 }
@@ -1984,8 +2002,22 @@ int storage_format_card(void)
         return rc;
     }
 
-    /* 1. Unmount */
-    fs_unmount(&mp);
+    /* Serialize against the idle power-gate: it takes the same mutex, so
+     * it cannot cut LDO2 or unmount the card between our unmount and the
+     * remount below. (storage_ensure_mounted() above takes it itself, so
+     * it must be called before this lock.) */
+    k_mutex_lock(&sd_lifecycle_mutex, K_FOREVER);
+
+    /* 1. Unmount. Check the result: if an open file still holds the volume
+     * (FS log backend, transfer handle), f_mkfs() on the still-mounted
+     * volume would fail or corrupt it. */
+    rc = fs_unmount(&mp);
+    if (rc != 0 && rc != -EINVAL)
+    {
+        LOG_ERR("Unmount before format failed: %d", rc);
+        k_mutex_unlock(&sd_lifecycle_mutex);
+        return rc;
+    }
     sd_mounted = false;
 
     /* 2. Format */
@@ -2003,6 +2035,13 @@ int storage_format_card(void)
     if (rc != FR_OK)
     {
         LOG_ERR("f_mkfs failed: %d", rc);
+        /* Best effort: put the old volume back so a failed format does not
+         * leave the device with an unmounted card. */
+        if (fs_mount(&mp) == 0)
+        {
+            sd_mounted = true;
+        }
+        k_mutex_unlock(&sd_lifecycle_mutex);
         return -EIO;
     }
 
@@ -2011,6 +2050,7 @@ int storage_format_card(void)
     if (rc != 0)
     {
         LOG_ERR("Remount failed after format: %d", rc);
+        k_mutex_unlock(&sd_lifecycle_mutex);
         return rc;
     }
 
@@ -2021,6 +2061,7 @@ int storage_format_card(void)
 
     storage_set_unsynced(false);
 
+    k_mutex_unlock(&sd_lifecycle_mutex);
     return 0;
 }
 
@@ -2562,14 +2603,17 @@ int storage_get_bookmarks(const char *session_id, int page, int per_page,
         count = 0;
     }
 
-    /* Calculate pagination bounds */
-    start_index = (page - 1) * per_page;
-    if (start_index >= count)
+    /* Calculate pagination bounds. Compute in 64-bit: page/per_page come from
+     * an unbounded AT argument and (page - 1) * per_page used to wrap
+     * negative, producing a negative fs_seek() offset. */
+    int64_t start64 = (int64_t)(page - 1) * per_page;
+    if (start64 >= count)
     {
         /* Page beyond available data */
         fs_close(&file);
         return 0;
     }
+    start_index = (int)start64;
 
     end_index = start_index + per_page;
     if (end_index > (int)count)

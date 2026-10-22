@@ -20,9 +20,9 @@
 #include "wifi_udp.h"
 #include "transport_udp.h"
 #include "config.h"
-#include "config.h"
 #include "clip_event.h"
 #include "ble.h"
+#include "display.h"
 #include "transfer.h"
 
 
@@ -51,7 +51,7 @@ static void wifi_timeout_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
 	if (ap_running && !sta_connected) {
-		LOG_INF("WiFi timeout, auto-off");
+		LOG_WRN("WiFi timeout, auto-off");
 		clip_post_event(CLIP_EVENT_WIFI_OFF);
 	}
 }
@@ -316,7 +316,7 @@ static int wifi_start_dhcp_server(struct net_if *iface)
 	return ret;
 }
 
-int wifi_on(void)
+static int wifi_on(void)
 {
 	struct net_if *iface;
 	int ret;
@@ -418,7 +418,7 @@ int wifi_on(void)
 	return 0;
 }
 
-int wifi_off(void)
+static int wifi_off(void)
 {
 	struct net_if *iface = net_if_get_first_wifi();
 	int ret;
@@ -488,6 +488,150 @@ bool wifi_is_interface_up(void)
 		return false;
 	}
 	return net_if_is_up(iface);
+}
+
+/* ========================================================================== */
+/* WiFi worker thread                                                          */
+/* ========================================================================== */
+
+/*
+ * wifi_on()/wifi_off() block for seconds (nRF70 RPU boot, AP-enable round
+ * trips, up to 3 x 5 s enable retries, AP-disable wait). They used to run on
+ * the main event thread — for the whole bring-up the dispatcher processed
+ * nothing: button events queued unseen and no UI events were posted (the
+ * "WiFi turning on, buttons and UI frozen" window). The dispatcher now only
+ * queues a request here (wifi_request_async) and commits the state
+ * transition immediately; the blocking work runs on this thread. AT+WIFI
+ * keeps its old response timing (ok:true => AP actually up) by blocking on
+ * wifi_wait_ops_done() from the AT server thread only.
+ */
+struct wifi_req {
+	uint8_t on;
+};
+
+K_MSGQ_DEFINE(wifi_req_q, sizeof(struct wifi_req), 4, 2);
+
+static K_MUTEX_DEFINE(wifi_op_mu);
+static K_CONDVAR_DEFINE(wifi_op_cv);
+/* True from request enqueue until the worker finishes the last queued op. */
+static bool wifi_op_busy;
+static int wifi_op_rc;
+/* ON requests enqueued-but-not-yet-executed. The dispatcher's WIFI_OFF
+ * handler uses this to drop a stale failure-revert OFF that would tear
+ * down a newer bring-up (and to see through the ap_running window while
+ * an ON is mid-flight). */
+static atomic_t wifi_on_pending_ct = ATOMIC_INIT(0);
+
+static void wifi_worker_fn(void *p1, void *p2, void *p3)
+{
+	struct wifi_req req;
+
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	while (true) {
+		k_msgq_get(&wifi_req_q, &req, K_FOREVER);
+
+		int rc = req.on ? wifi_on() : wifi_off();
+		if (req.on) {
+			atomic_dec(&wifi_on_pending_ct);
+		}
+
+		k_mutex_lock(&wifi_op_mu, K_FOREVER);
+		wifi_op_rc = rc;
+		if (k_msgq_num_used_get(&wifi_req_q) == 0) {
+			wifi_op_busy = false;
+		}
+		k_condvar_broadcast(&wifi_op_cv);
+		k_mutex_unlock(&wifi_op_mu);
+
+		if (rc == 0) {
+			LOG_DBG("WiFi %s done", req.on ? "on" : "off");
+		} else {
+			LOG_WRN("WiFi %s failed: %d", req.on ? "on" : "off", rc);
+		}
+
+		if (req.on && rc != 0) {
+			/* The dispatcher already committed WIFI_SYNC when the
+			 * request was accepted; bring-up failed, so revert. The
+			 * OFF request this re-posts is a fast no-op (the AP
+			 * never came up). Retry the post: a dropped revert
+			 * (8-deep event queue full at just the wrong moment)
+			 * would wedge the machine in WIFI_SYNC, where recording
+			 * is refused. */
+			display_post_error("WiFi Fail");
+			while (clip_post_event(CLIP_EVENT_WIFI_OFF) != 0) {
+				k_sleep(K_MSEC(100));
+			}
+		}
+	}
+}
+
+/* 4096: runs the net bring-up path (net_mgmt, DHCP server, coex config)
+ * that previously lived on the 6K main stack alongside much more. */
+K_THREAD_DEFINE(wifi_worker_thread, 4096,
+		wifi_worker_fn, NULL, NULL, NULL,
+		5, 0, 0);
+
+int wifi_request_async(bool on)
+{
+	struct wifi_req req = { .on = on };
+	int ret;
+
+	/* Mark busy BEFORE enqueueing: a waiter that follows the dispatcher's
+	 * done-sem must never observe idle between the two. */
+	k_mutex_lock(&wifi_op_mu, K_FOREVER);
+	wifi_op_busy = true;
+	k_mutex_unlock(&wifi_op_mu);
+
+	if (on) {
+		atomic_inc(&wifi_on_pending_ct);
+	}
+
+	ret = k_msgq_put(&wifi_req_q, &req, K_NO_WAIT);
+	if (ret) {
+		LOG_WRN("WiFi request queue full (%s)", on ? "on" : "off");
+		if (on) {
+			atomic_dec(&wifi_on_pending_ct);
+		}
+		/* The request was not enqueued, so "busy" must not stay set
+		 * with an empty queue: a later AT+WIFI would wait the full
+		 * 30 s timeout for a worker that has nothing to do. Only
+		 * clear it when nothing else is queued (otherwise the worker
+		 * will clear it when it drains). */
+		k_mutex_lock(&wifi_op_mu, K_FOREVER);
+		if (k_msgq_num_used_get(&wifi_req_q) == 0) {
+			wifi_op_busy = false;
+		}
+		k_condvar_broadcast(&wifi_op_cv);
+		k_mutex_unlock(&wifi_op_mu);
+	}
+
+	return ret;
+}
+
+bool wifi_on_pending(void)
+{
+	return atomic_get(&wifi_on_pending_ct) > 0;
+}
+
+int wifi_wait_ops_done(k_timeout_t timeout)
+{
+	int rc;
+
+	k_mutex_lock(&wifi_op_mu, K_FOREVER);
+	rc = wifi_op_rc;
+	while (wifi_op_busy || k_msgq_num_used_get(&wifi_req_q) > 0) {
+		if (k_condvar_wait(&wifi_op_cv, &wifi_op_mu, timeout) != 0) {
+			rc = -EAGAIN;
+			break;
+		}
+		rc = wifi_op_rc;
+	}
+	k_mutex_unlock(&wifi_op_mu);
+
+	return rc;
 }
 
 bool wifi_ap_is_running(void)

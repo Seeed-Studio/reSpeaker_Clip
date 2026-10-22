@@ -110,6 +110,44 @@ int config_set_time_ymd(uint16_t year, uint8_t month, uint8_t day,
 void config_sync_time(void);
 
 /**
+ * @brief Product serial number (factory-written, write-once)
+ *
+ * Stored in the "sn" settings subtree — survives AT+FACTORY (which only
+ * resets the config keys) and app reflash (external flash). Charset
+ * [A-Za-z0-9._-], max 32 chars.
+ */
+/** @brief Get the SN ("" when unset) */
+const char *config_get_sn(void);
+
+/** @brief True when an SN has been written */
+bool config_sn_is_set(void);
+
+/**
+ * @brief Write the SN (first write only)
+ *
+ * @return 0 on success, -EINVAL bad charset/length, -EALREADY already set
+ */
+int config_set_sn(const char *sn);
+
+/**
+ * @brief Write the SN, overwriting an existing value (validated first)
+ *
+ * Used by the AT+SN rewrite path after the MAC proof has been verified.
+ * The new value is validated BEFORE the settings store is touched, so a
+ * rejected value leaves the old SN intact.
+ *
+ * @return 0 on success, -EINVAL bad charset/length, negative on flash error
+ */
+int config_set_sn_force(const char *sn);
+
+/**
+ * @brief Clear the SN (factory rework; AT+SN rewrite uses set_force instead)
+ *
+ * @return 0 on success, negative error code on failure
+ */
+int config_clear_sn(void);
+
+/**
  * @brief Set recording mode
  *
  * @param mode Recording mode

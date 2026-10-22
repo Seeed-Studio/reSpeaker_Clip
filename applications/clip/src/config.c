@@ -30,6 +30,13 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_WRN); /* flash budget: INF kept for batter
 #define SETTING_WIFI_CHANNEL    "config/wifi_channel"
 #define SETTING_WIFI_REG_DOMAIN "config/wifi_reg_domain"
 #define SETTING_TIME_UNIX       "time/unix_timestamp"
+#define SETTING_SN              "sn/value"
+
+/* Product serial number (written once at the factory; lives in its own
+ * settings subtree so AT+FACTORY — which only resets config/ keys —
+ * preserves it). ASCII [A-Za-z0-9._-], 1..CLIP_SN_MAX_LEN chars. */
+#define CLIP_SN_MAX_LEN 32
+static char g_serial_number[CLIP_SN_MAX_LEN + 1];
 
 /* settings_load is normally <100 ms. A corrupt settings file (typically
  * from repeated BLE pair/unpair churning bond records) makes it block for
@@ -120,6 +127,9 @@ static int time_settings_set(const char *name, size_t len,
     ctx->time.sec = tm.tm_sec;
     ctx->time.base_uptime_ms = k_uptime_get();
     ctx->time.valid = true;
+    /* Restored, not synced: the power-off gap is unknowable (no RTC).
+     * Stays true until a live AT+TIME sync arrives. */
+    ctx->time.restored = true;
 
     return 0;
 }
@@ -127,6 +137,35 @@ static int time_settings_set(const char *name, size_t len,
 static struct settings_handler time_handler = {
     .name = "time",
     .h_set = time_settings_set,
+};
+
+/* Settings handler for the factory SN */
+static int sn_settings_set(const char *name, size_t len,
+                           settings_read_cb read_cb, void *cb_arg)
+{
+    if (!name || strcmp(name, "value") != 0) {
+        return -ENOENT;
+    }
+
+    /* LittleFS settings may hand us more than the buffer holds: read into
+     * a bounded stack copy, then validate the length. */
+    char buf[sizeof(g_serial_number)];
+    ssize_t rc = read_cb(cb_arg, buf, sizeof(buf) - 1);
+    if (rc < 0) {
+        return rc;
+    }
+    if (rc == 0 || (size_t)rc >= sizeof(g_serial_number)) {
+        return -EINVAL;
+    }
+    buf[rc] = '\0';
+
+    memcpy(g_serial_number, buf, (size_t)rc + 1);
+    return 0;
+}
+
+static struct settings_handler sn_handler = {
+    .name = "sn",
+    .h_set = sn_settings_set,
 };
 
 /* LittleFS mount configuration */
@@ -163,20 +202,32 @@ static void config_set_defaults(struct clip_context *ctx)
     strncpy(ctx->config.wifi_reg_domain, CONFIG_CLIP_WIFI_AP_REG_DOMAIN, 3);
 }
 
-/* settings_load watchdog. `done` is set by the main thread once
- * settings_load returns; the watchdog (on the system workqueue) reads it. */
-static volatile bool settings_load_done;
+/* settings_load watchdog. `done` is published by the thread that called
+ * settings_load once it returns; the watchdog (on the system workqueue)
+ * checks it under settings_load_mu. The lock closes a TOCTOU where the
+ * handler had already read false and would unlink+reboot even though the
+ * load had just completed successfully. */
+static K_MUTEX_DEFINE(settings_load_mu);
+static bool settings_load_done;
 
 static void settings_load_watchdog_handler(struct k_work *work)
 {
+    (void)work;
+
+    k_mutex_lock(&settings_load_mu, K_FOREVER);
+
     if (settings_load_done) {
+        k_mutex_unlock(&settings_load_mu);
         return;
     }
+
     /* settings_load is still blocked past the timeout: the settings file
      * is corrupt and the load can't be interrupted. Wipe and reboot so
      * the next boot loads clean defaults in <100 ms. */
     LOG_WRN("settings_load stuck >%dms, wiping + reboot", SETTINGS_LOAD_TIMEOUT_MS);
     fs_unlink(CONFIG_SETTINGS_FILE_PATH);
+
+    k_mutex_unlock(&settings_load_mu);
     sys_reboot(SYS_REBOOT_COLD);
 }
 
@@ -186,14 +237,23 @@ K_WORK_DELAYABLE_DEFINE(settings_load_watchdog, settings_load_watchdog_handler);
  * guard their own settings_load_subtree() calls against a corrupt file. */
 void settings_load_watchdog_arm(void)
 {
+    k_mutex_lock(&settings_load_mu, K_FOREVER);
     settings_load_done = false;
+    k_mutex_unlock(&settings_load_mu);
     k_work_schedule(&settings_load_watchdog, K_MSEC(SETTINGS_LOAD_TIMEOUT_MS));
 }
 
 void settings_load_watchdog_disarm(void)
 {
+    /* Publish completion before cancelling: if the handler already started,
+     * it blocks on settings_load_mu until we release, then sees done=true
+     * and returns without touching the file. */
+    k_mutex_lock(&settings_load_mu, K_FOREVER);
     settings_load_done = true;
-    k_work_cancel_delayable(&settings_load_watchdog);
+    k_mutex_unlock(&settings_load_mu);
+
+    struct k_work_sync sync;
+    k_work_cancel_delayable_sync(&settings_load_watchdog, &sync);
 }
 
 int config_init(void)
@@ -238,6 +298,11 @@ int config_init(void)
     err = settings_register(&time_handler);
     if (err && err != -EEXIST) {
         LOG_WRN("Time handler register failed: %d", err);
+    }
+
+    err = settings_register(&sn_handler);
+    if (err && err != -EEXIST) {
+        LOG_WRN("SN handler register failed: %d", err);
     }
 
     /* Arm the settings-load watchdog before the blocking load. */
@@ -476,6 +541,7 @@ int config_set_time(int64_t unix_time)
     ctx->time.sec = tm.tm_sec;
     ctx->time.base_uptime_ms = k_uptime_get();
     ctx->time.valid = true;
+    ctx->time.restored = false;   /* live sync */
 
     /* Save to storage */
     return settings_save_one(SETTING_TIME_UNIX, &unix_time, sizeof(unix_time));
@@ -539,6 +605,7 @@ int config_set_time_ymd(uint16_t year, uint8_t month, uint8_t day,
     ctx->time.sec = sec;
     ctx->time.base_uptime_ms = k_uptime_get();
     ctx->time.valid = true;
+    ctx->time.restored = false;   /* live sync */
 
     return settings_save_one(SETTING_TIME_UNIX, &unix_time, sizeof(unix_time));
 }
@@ -569,6 +636,79 @@ void config_sync_time(void)
     ctx->time.base_uptime_ms = k_uptime_get();
 
     settings_save_one(SETTING_TIME_UNIX, &unix_time, sizeof(unix_time));
+}
+
+const char *config_get_sn(void)
+{
+    return g_serial_number;
+}
+
+bool config_sn_is_set(void)
+{
+    return g_serial_number[0] != '\0';
+}
+
+/* Charset/length validation shared by both SN writers. */
+static int sn_validate(const char *sn)
+{
+    if (!sn || !sn[0]) {
+        return -EINVAL;
+    }
+
+    size_t len = strlen(sn);
+    if (len > CLIP_SN_MAX_LEN) {
+        return -EINVAL;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = sn[i];
+        bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!ok) {
+            return -EINVAL;
+        }
+    }
+    return 0;
+}
+
+static int sn_write(const char *sn, bool allow_overwrite)
+{
+    int ret = sn_validate(sn);
+    if (ret != 0) {
+        return ret;
+    }
+
+    /* Write-once unless the caller verified the rewrite proof. Validation
+     * happens BEFORE this check and before settings_save_one(), so a bad
+     * new value can never destroy an existing SN. */
+    if (!allow_overwrite && config_sn_is_set()) {
+        return -EALREADY;
+    }
+
+    size_t len = strlen(sn);
+    ret = settings_save_one(SETTING_SN, sn, len);
+    if (ret == 0) {
+        memcpy(g_serial_number, sn, len + 1);
+    }
+    return ret;
+}
+
+int config_set_sn(const char *sn)
+{
+    return sn_write(sn, false);
+}
+
+int config_set_sn_force(const char *sn)
+{
+    return sn_write(sn, true);
+}
+
+int config_clear_sn(void)
+{
+    int ret = settings_delete(SETTING_SN);
+    if (ret == 0) {
+        g_serial_number[0] = '\0';
+    }
+    return ret;
 }
 
 int config_set_mode(enum recording_mode mode)

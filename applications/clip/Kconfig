@@ -390,6 +390,25 @@ config CLIP_WIFI_TIMEOUT_MS
 	  Timer starts after AP is enabled, restarts on client disconnect.
 	  Set to 0 to disable auto-off.
 
+config CLIP_WIFI_MIN_BATTERY_PERCENT
+	int "Minimum battery level (%) to start the WiFi AP (0 = disabled)"
+	default 15
+	range 0 100
+	help
+	  AT+WIFI=on is refused while the displayed SoC is below this value and
+	  the device is discharging without USB power. Charging/VBUS bypasses the
+	  check (the charger feeds the system). Set 0 to disable the percent floor.
+
+config CLIP_WIFI_MIN_BATTERY_MV
+	int "Minimum battery voltage (mV) to start the WiFi AP (0 = disabled)"
+	default 3500
+	range 0 5000
+	help
+	  Additional voltage floor for starting WiFi. Catches a sagging cell even
+	  when the (rate-limited) displayed SoC has not caught up yet. Ignored
+	  while charging/VBUS is present, and when the measured voltage is 0
+	  (unknown). Set 0 to disable.
+
 config COEX_SEP_ANTENNAS
 	bool "WiFi and BLE use separate antennas"
 	default n
@@ -437,7 +456,7 @@ config CLIP_BATTERY_WIFI_TX_LOAD_MA
 
 config CLIP_BATTERY_IDLE_CURRENT_UA
 	int "Average battery current while idle, fed to the fuel gauge (uA)"
-	default 400
+	default 250
 	help
 	  At idle the PMIC's one-shot IBAT sample is taken while the CPU runs the
 	  60 s poll itself (mA-level draw, ~1.09 mA LSB) and integrating that
@@ -445,9 +464,9 @@ config CLIP_BATTERY_IDLE_CURRENT_UA
 	  phantom). Nordic's guidance for low-power periods is that the idle
 	  current is known ahead of time: when not charging/recording/
 	  transferring, this value is fed to nrf_fuel_gauge_process instead of
-	  the measurement (and passed to nrf_fuel_gauge_idle_set). Calibrate from
-	  the idle power budget (production ~170 uA + BLE advertising + OLED
-	  wakeups).
+	  the measurement (and passed to nrf_fuel_gauge_idle_set). On Clip the
+	  measured standby average is ~250 uA (production build, BLE advertising
+	  and OLED wakeups active); re-calibrate if the standby profile changes.
 
 config CLIP_BATTERY_DISPLAY_MAX_STEP
 	int "Max displayed SoC change per poll (%)"
@@ -464,6 +483,38 @@ config CLIP_BATTERY_DISPLAY_MAX_STEP
 	  Set 0 to disable smoothing (display the raw gauge SoC directly). The
 	  displayed value is persisted across reboot so it resumes from the value
 	  shown before reboot (no cross-reboot lag accumulation).
+
+config CLIP_BATTERY_SHUTDOWN_ENABLE
+	bool "Automatic power-off at critical battery voltage"
+	default y
+	help
+	  Power off gracefully when the measured battery voltage stays at or
+	  below CLIP_BATTERY_SHUTDOWN_MV for CLIP_BATTERY_SHUTDOWN_CONFIRM_MS.
+	  This is voltage-based only: the displayed/raw SoC is never used to
+	  trigger it (SoC can be wrong, voltage cannot). Charging/VBUS always
+	  cancels the count, and a recovery above MV+100 also resets it.
+
+config CLIP_BATTERY_SHUTDOWN_MV
+	int "Critical battery shutdown voltage (mV)"
+	default 3100
+	range 2500 3600
+	depends on CLIP_BATTERY_SHUTDOWN_ENABLE
+	help
+	  Hard voltage floor for automatic power-off. 3100 mV leaves margin
+	  above the cell protection trip point while avoiding a long dwell at
+	  a deeply discharged voltage.
+
+config CLIP_BATTERY_SHUTDOWN_CONFIRM_MS
+	int "Continuous low-voltage time before shutdown (ms)"
+	default 120000
+	range 60000 1800000
+	depends on CLIP_BATTERY_SHUTDOWN_ENABLE
+	help
+	  How long the voltage must remain at/below CLIP_BATTERY_SHUTDOWN_MV
+	  before the shutdown request. Time-based, not poll-count-based, so
+	  extra AT+BATT/UI polls cannot shorten the confirmation window.
+	  120000 ms = 2 minutes; long enough for several 60 s polls, short
+	  enough not to dwell at ~3.1 V.
 
 # =============================================================================
 # Debug Configuration

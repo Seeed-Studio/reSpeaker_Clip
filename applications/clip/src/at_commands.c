@@ -17,6 +17,8 @@
 #include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <limits.h>
 #include "at_commands.h"
 #include "at_server.h"
 #include "clip.h"
@@ -43,7 +45,8 @@ static struct k_work_delayable reboot_work;
  * take long enough for the BLE client request to time out. */
 static struct k_work_delayable pair_reset_work;
 static bool reboot_clear_bonds;
-static bool log_fs_active = IS_ENABLED(CONFIG_CLIP_LOG_FS_DEFAULT_ON);
+static bool log_fs_active; /* set true only once main/AT+LOG activates the backend */
+static bool log_fs_debug;  /* backend filter level is DBG (AT+LOG=debug) */
 
 static void reboot_work_handler(struct k_work *work)
 {
@@ -133,6 +136,25 @@ static int create_json_response(bool success, const char *message,
     return AT_ERR_NOMEM;
 }
 
+/*
+ * While USB MSC is enabled the SD card is unmounted and owned by the host.
+ * Any AT command that would call storage_ensure_mounted() (LIST/DOWNLOAD/
+ * DELETE/FORMAT/MARKS/LOG/FACTORY/PAIR) must refuse instead of racing the
+ * host's filesystem accesses.
+ *
+ * @return true when the command was rejected (response already filled in).
+ */
+static bool reject_if_usb_msc(char *response, size_t len)
+{
+    if (!usb_cdc_is_enabled()) {
+        return false;
+    }
+
+    (void)create_json_response(false, "USB MSC active, disable USB first",
+                               NULL, response, len);
+    return true;
+}
+
 /* Validate session_id: must be exactly 14 digits (YYYYMMDDHHMMSS) */
 static bool is_valid_session_id(const char *id)
 {
@@ -145,6 +167,75 @@ static bool is_valid_session_id(const char *id)
         }
     }
     return true;
+}
+
+/*
+ * Parse a decimal int with an explicit range. atoi() has undefined
+ * behaviour on overflow, so pagination/channel arguments go through this
+ * (strtol saturates and sets ERANGE). Returns @p fallback for malformed
+ * input; values outside [min_v, max_v] are clamped.
+ */
+static int parse_int_clamped(const char *s, int min_v, int max_v, int fallback)
+{
+    if (!s || s[0] == '\0') {
+        return fallback;
+    }
+
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE) {
+        return fallback;
+    }
+    if (v < min_v) {
+        return min_v;
+    }
+    if (v > max_v) {
+        return max_v;
+    }
+    return (int)v;
+}
+
+/*
+ * Copy @p src into @p dst with JSON string escaping (" -> \", \ -> \\,
+ * control bytes -> \u00XX). AT has no escaping layer of its own, so a
+ * user-supplied device name containing a quote would otherwise make every
+ * response that echoes it invalid JSON.
+ *
+ * @return 0 on success, -ENOMEM if the escaped form does not fit.
+ */
+static int json_escape_string(char *dst, size_t dst_len, const char *src)
+{
+    size_t out = 0;
+
+    for (const char *p = src; *p != '\0'; p++) {
+        unsigned char c = (unsigned char)*p;
+        char tmp[8];
+        size_t n;
+
+        if (c == '"' || c == '\\') {
+            tmp[0] = '\\';
+            tmp[1] = (char)c;
+            tmp[2] = '\0';
+            n = 2;
+        } else if (c < 0x20) {
+            snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+            n = strlen(tmp);
+        } else {
+            tmp[0] = (char)c;
+            tmp[1] = '\0';
+            n = 1;
+        }
+
+        if (out + n >= dst_len) {
+            return -ENOMEM;
+        }
+        memcpy(&dst[out], tmp, n);
+        out += n;
+    }
+
+    dst[out] = '\0';
+    return 0;
 }
 
 /* DOWNLOAD filenames are logical protocol names, not paths. */
@@ -176,8 +267,9 @@ static int cmd_batt_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
     struct clip_context *c = clip_get_context();
     int n = snprintf(response, len,
-        "{\"ok\":true,\"data\":{\"battery\":%u,\"charging\":%s,\"voltage\":%u,\"temp\":%d}}",
+        "{\"ok\":true,\"data\":{\"battery\":%u,\"soc_raw\":%u,\"charging\":%s,\"voltage\":%u,\"temp\":%d}}",
         c->status.battery_percent,
+        c->status.battery_soc_raw,
         c->status.battery_charging ? "true" : "false",
         c->status.battery_mv,
         c->status.battery_temp);
@@ -342,8 +434,14 @@ static int cmd_time_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 
         /* Parse 64-bit timestamp directly (extract_int only handles 32-bit) */
         char *end;
+        errno = 0;
         int64_t timestamp = strtoll(ctx->args, &end, 10);
-        if (end == ctx->args || *end != '\0') {
+        if (end == ctx->args || *end != '\0' || errno == ERANGE) {
+            return create_json_response(false, "Invalid timestamp", NULL, response, len);
+        }
+        /* -INT64_MIN is UB; reject it before localtime()/the manual
+         * negative-to-string conversion below. */
+        if (timestamp == INT64_MIN) {
             return create_json_response(false, "Invalid timestamp", NULL, response, len);
         }
 
@@ -369,6 +467,7 @@ static int cmd_time_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         c->time.sec = sec;
         c->time.base_uptime_ms = k_uptime_get();
         c->time.valid = true;
+        c->time.restored = false;   /* live sync arrived */
 
         /* Save to storage */
         config_set_time_ymd(year, month, day, hour, min, sec);
@@ -414,14 +513,23 @@ static int cmd_time_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             return create_json_response(false, "Time error", NULL, response, len);
         }
 
-        /* Return ISO 8601 format to be compatible with clip */
+        /* Return ISO 8601 format to be compatible with clip.
+         * "restored":true — clock came from the boot settings restore, no
+         * live sync since; the power-off gap is unknowable (no RTC), so
+         * the app should push AT+TIME=<ts> to correct it.
+         * "uptime": seconds since boot — if this is small while the device
+         * has "been on for days", it silently rebooted (crash/brownout),
+         * which is how a stale clock appears without a user power-off. */
         char time_buf[64];
         snprintf(time_buf, sizeof(time_buf),
                  "\"%04u-%02u-%02uT%02u:%02u:%02uZ\"",
                  year, month, day, hour, min, sec);
 
-        char data[128];
-        snprintf(data, sizeof(data), "{\"time\":%s}", time_buf);
+        char data[144];
+        snprintf(data, sizeof(data),
+                 "{\"time\":%s,\"restored\":%s,\"uptime\":%lu}",
+                 time_buf, c->time.restored ? "true" : "false",
+                 (unsigned long)(k_uptime_get() / 1000));
         return create_json_response(true, NULL, data, response, len);
     }
 }
@@ -492,6 +600,7 @@ static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 
         if (strcmp(mode, "off") == 0) {
             log_fs_active = false;
+            log_fs_debug = false;
             const struct log_backend *fs_be = log_backend_get_by_name("log_backend_fs");
             if (fs_be) {
                 log_backend_deactivate(fs_be);
@@ -507,6 +616,10 @@ static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         }
 
         uint32_t level = (strcmp(mode, "debug") == 0) ? LOG_LEVEL_DBG : LOG_LEVEL_INF;
+
+        if (reject_if_usb_msc(response, len)) {
+            return 0;
+        }
 
         /* SD may be idle-powered-off; bring it up before enabling the backend */
         if (storage_ensure_mounted() != 0) {
@@ -524,6 +637,7 @@ static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             log_filter_set(fs_be, 0, (int16_t)i, level);
         }
         log_fs_active = true;
+        log_fs_debug = (level == LOG_LEVEL_DBG);
         clip_storage_activity_notify();
 
         char data[32];
@@ -531,7 +645,7 @@ static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         return create_json_response(true, NULL, data, response, len);
     } else {
         /* AT+LOG? */
-        const char *m = log_fs_active ? "info" : "off";
+        const char *m = log_fs_active ? (log_fs_debug ? "debug" : "info") : "off";
         char data[32];
         snprintf(data, sizeof(data), "{\"log\":\"%s\"}", m);
         return create_json_response(true, NULL, data, response, len);
@@ -541,6 +655,43 @@ static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 bool clip_log_fs_active(void)
 {
     return log_fs_active;
+}
+
+/*
+ * Reflect the backend's actual state. main.c activates/deactivates the FS
+ * backend at boot (and skips it entirely when the SD failed to mount), so
+ * the idle-power-off gate must follow main rather than the Kconfig default.
+ */
+void clip_log_fs_set_active(bool active)
+{
+    log_fs_active = active;
+    if (!active) {
+        log_fs_debug = false;
+    }
+}
+
+/*
+ * Release the FS log backend and wait for it to close its file.
+ *
+ * Any operation that unmounts/formats the SD card (AT+FORMAT, AT+FACTORY)
+ * or hands the raw card to USB MSC must call this first: the backend holds
+ * an open file in /SD:/LOG, fs_unmount then fails with no error checked,
+ * and the card ends up mounted while the caller believes it is not.
+ */
+void clip_log_fs_disable(void)
+{
+    if (!log_fs_active) {
+        return;
+    }
+
+    log_fs_active = false;
+    log_fs_debug = false;
+    const struct log_backend *fs_be = log_backend_get_by_name("log_backend_fs");
+    if (fs_be) {
+        log_backend_deactivate(fs_be);
+    }
+    /* Give the backend a moment to close its file. */
+    k_sleep(K_MSEC(100));
 }
 
 /* BRIGHTNESS Command Handler - Get/Set OLED brightness */
@@ -610,6 +761,10 @@ static int cmd_poweroff_handler(struct at_cmd_ctx *ctx, char *response, size_t l
 /* FACTORY Command Handler - Factory reset */
 static int cmd_factory_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+    if (reject_if_usb_msc(response, len)) {
+        return 0;
+    }
+
     /* Check for confirmation parameter */
     char confirm_str[32];
     if (ctx->args && strlen(ctx->args) > 0) {
@@ -642,20 +797,10 @@ static int cmd_factory_handler(struct at_cmd_ctx *ctx, char *response, size_t le
         return create_json_response(false, "Factory reset failed", NULL, response, len);
     }
 
-    /* Release the SD log file BEFORE formatting: the FS log backend holds
-     * /SD:/LOG open, storage_format_card()'s unmount then fails -EBUSY
-     * (its rc is ignored) and f_mkfs on the still-mounted volume fails —
-     * the AT response said success while every recording survived and the
-     * "unsynced audio" indicator came back after the reboot. */
-    if (log_fs_active) {
-        log_fs_active = false;
-        const struct log_backend *fs_be = log_backend_get_by_name("log_backend_fs");
-        if (fs_be) {
-            log_backend_deactivate(fs_be);
-        }
-        /* Give the backend a moment to close its file. */
-        k_sleep(K_MSEC(100));
-    }
+    /* Release the SD log file before formatting: the FS log backend holds
+     * /SD:/LOG open, so fs_unmount fails and f_mkfs runs on a still-mounted
+     * volume. clip_log_fs_disable() also waits for the file to close. */
+    clip_log_fs_disable();
 
     /* Format SD card (clear FATFS recordings) */
     err = storage_format_card();
@@ -719,6 +864,10 @@ static int cmd_pair_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         /* AT+PAIR=reset - Clear bonds and reboot */
         if (!ctx->args || strcmp(ctx->args, "reset") != 0) {
             return create_json_response(false, "Use AT+PAIR=reset", NULL, response, len);
+        }
+
+        if (reject_if_usb_msc(response, len)) {
+            return 0;
         }
 
         /* Destructive guard: the reset wipes the SD card in the background
@@ -788,14 +937,12 @@ static int parse_pagination(const char *query, int *page, int *per_page, int max
 
     char *token = strtok(buf, "&");
     if (token) {
-        *page = atoi(token);
-        if (*page < 1) *page = 1;
+        *page = parse_int_clamped(token, 1, INT_MAX, 1);
     }
     token = strtok(NULL, "&");
     if (token) {
-        *per_page = atoi(token);
-        if (*per_page < 1) *per_page = 10;
-        if (*per_page > max_pp) *per_page = max_pp;
+        int pp = parse_int_clamped(token, 1, max_pp, 10);
+        *per_page = pp;
     }
     return 0;
 }
@@ -803,13 +950,25 @@ static int parse_pagination(const char *query, int *page, int *per_page, int max
 /* FORMAT Command Handler - Format SD card (delete all sessions) */
 static int cmd_format_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+    if (reject_if_usb_msc(response, len)) {
+        return 0;
+    }
+
     if (storage_ensure_mounted() != 0) {
         return create_json_response(false, "SD card not mounted", NULL, response, len);
     }
 
-    if (audio_is_recording()) {
-        return create_json_response(false, "Cannot format while recording", NULL, response, len);
+    /* Refuse while anything still owns the card: formatting unmounts it and
+     * f_mkfs on a volume the transfer thread is still reading corrupts FAT
+     * or leaves the card unmounted. FACTORY and PAIR already guard this. */
+    if (audio_is_recording() || transfer_is_active()) {
+        return create_json_response(false, "Recording or transfer active, stop first",
+                                    NULL, response, len);
     }
+
+    /* The FS log backend keeps /SD:/LOG open, which makes fs_unmount fail.
+     * Release it before formatting (same as AT+FACTORY). */
+    clip_log_fs_disable();
 
     int err = storage_format_card();
     if (err) {
@@ -1034,6 +1193,19 @@ static int cmd_mark_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         return create_json_response(false, "No active session", NULL, response, len);
     }
 
+    /*
+     * audio_get_session_id() deliberately keeps the LAST session after a
+     * stop (GSTAT/IDLE notifications read it), so a non-NULL id does not
+     * mean a recording is running. The event layer rejects MARK with
+     * CLIP_EVENT_INVALID when !audio_is_recording(), but this handler posts
+     * asynchronously and used to return ok:true regardless — the host
+     * showed a bookmark that was never written. Check the ground truth
+     * here (pause keeps recording_active set, so PAUSED still works).
+     */
+    if (!audio_is_recording()) {
+        return create_json_response(false, "Not recording", NULL, response, len);
+    }
+
     if (rtc_stream_session_active()) {
         LOG_WRN("MARK not supported in RTC mode");
         return create_json_response(false, "MARK not supported in RTC mode",
@@ -1074,6 +1246,10 @@ static int cmd_list_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 
     LOG_DBG("AT+LIST: args='%s'", ctx->args ? ctx->args : "(null)");
 
+    if (reject_if_usb_msc(response, len)) {
+        return 0;
+    }
+
     if (storage_ensure_mounted() != 0) {
         LOG_WRN("SD card not mounted for AT+LIST");
         return create_json_response(false, "SD card not mounted", NULL, response, len);
@@ -1091,15 +1267,24 @@ static int cmd_list_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
                 return create_json_response(false, "Failed to list sessions", NULL, response, len);
             }
 
-            int offset = (page - 1) * per_page;
+            /*
+             * Compute the page offset in 64-bit: page comes from an
+             * unbounded user argument, and the old 32-bit expression
+             * ((page - 1) * per_page) wrapped negative for e.g.
+             * AT+LIST?42949674&50. The wrapped offset passed the
+             * "offset >= total_count" check, then indexed list_ids[] with
+             * a negative subscript and hard-faulted the device.
+             */
+            int64_t offset64 = (int64_t)(page - 1) * per_page;
 
-            if (offset >= total_count) {
+            if (offset64 < 0 || offset64 >= total_count) {
                 int n = snprintf(response, len,
                     "{\"ok\":true,\"data\":{\"total\":%d,\"page\":%d,\"per_page\":%d,\"sessions\":[]}}\n",
                     total_count, page, per_page);
                 return (n < 0 || n >= len) ? AT_ERR_NOMEM : n;
             }
 
+            int offset = (int)offset64;
             int end = offset + per_page;
             if (end > total_count) end = total_count;
 
@@ -1112,6 +1297,12 @@ static int cmd_list_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
                 total_count, page, per_page);
             if (n < 0 || n >= rem) return AT_ERR_NOMEM;
             p += n; rem -= n; written += n;
+
+            /* Track whether an object was actually emitted: the first
+             * entries can be skipped (unreadable session.json, auto-deleted
+             * empty session), and keying the comma off "i > offset" then
+             * produced a leading comma and invalid JSON. */
+            bool first = true;
 
             for (int i = offset; i < end && rem > 100; i++) {
                 struct storage_session_info info;
@@ -1126,11 +1317,12 @@ static int cmd_list_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
                 int bm = storage_count_bookmarks(list_ids[i]);
                 if (bm < 0) bm = 0;
 
-                if (i > offset) {
+                if (!first) {
                     n = snprintf(p, rem, ",");
                     if (n < 0 || n >= rem) return AT_ERR_NOMEM;
                     p += n; rem -= n; written += n;
                 }
+                first = false;
 
                 n = snprintf(p, rem,
                     "{\"id\":\"%s\",\"files\":%u,\"size\":%u,\"bookmarks\":%d}",
@@ -1313,6 +1505,10 @@ static int cmd_marks_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         return create_json_response(false, "Missing session_id", NULL, response, len);
     }
 
+    if (reject_if_usb_msc(response, len)) {
+        return 0;
+    }
+
     /* Check if SD card is mounted */
     if (storage_ensure_mounted() != 0) {
         return create_json_response(false, "SD card not mounted", NULL, response, len);
@@ -1341,14 +1537,19 @@ static int cmd_marks_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         /* Parse pagination: page&per_page */
         char *token = strtok(query, "&");
         if (token) {
-            page = atoi(token);
-            if (page < 1) page = 1;
+            page = parse_int_clamped(token, 1, INT_MAX, 1);
         }
         token = strtok(NULL, "&");
         if (token) {
-            per_page = atoi(token);
-            if (per_page < 1) per_page = 20;
-            if (per_page > 100) per_page = 100;
+            per_page = parse_int_clamped(token, 1, 100, 20);
+        }
+
+        /* storage_get_bookmarks() computes (page - 1) * per_page in int.
+         * Cap the page BEFORE that multiplication: a huge page wrapped
+         * negative, produced a negative fs_seek() offset and turned the
+         * query into a generic failure. */
+        if (page > INT_MAX / per_page) {
+            page = INT_MAX / per_page;
         }
     }
 
@@ -1503,6 +1704,10 @@ static int cmd_download_handler(struct at_cmd_ctx *ctx, char *response, size_t l
     }
 
     /* Check if SD card is mounted */
+    if (reject_if_usb_msc(response, len)) {
+        return 0;
+    }
+
     if (storage_ensure_mounted() != 0) {
         return create_json_response(false, "SD card not mounted", NULL, response, len);
     }
@@ -1591,6 +1796,10 @@ static int cmd_delete_handler(struct at_cmd_ctx *ctx, char *response, size_t len
         return create_json_response(false, "Missing session_id", NULL, response, len);
     }
 
+    if (reject_if_usb_msc(response, len)) {
+        return 0;
+    }
+
     /* Check if SD card is mounted */
     if (storage_ensure_mounted() != 0) {
         return create_json_response(false, "SD card not mounted", NULL, response, len);
@@ -1601,15 +1810,32 @@ static int cmd_delete_handler(struct at_cmd_ctx *ctx, char *response, size_t len
     strncpy(session_id, ctx->args, sizeof(session_id) - 1);
     session_id[sizeof(session_id) - 1] = '\0';
 
-    /* Trim whitespace */
-    char *end = session_id + strlen(session_id) - 1;
-    while (end > session_id && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) {
-        *end-- = '\0';
+    /* Trim trailing whitespace. Use a length, not session_id + strlen - 1:
+     * for an empty string the old expression formed a pointer before the
+     * array (UB) even though the loop short-circuited. */
+    size_t sid_len = strlen(session_id);
+    while (sid_len > 0 &&
+           (session_id[sid_len - 1] == ' ' || session_id[sid_len - 1] == '\t' ||
+            session_id[sid_len - 1] == '\r' || session_id[sid_len - 1] == '\n')) {
+        session_id[--sid_len] = '\0';
     }
 
     /* Validate session_id: must be exactly 14 digits */
     if (!is_valid_session_id(session_id)) {
         return create_json_response(false, "Invalid session ID", NULL, response, len);
+    }
+
+    /* Deleting the session a transfer is reading from frees its clusters
+     * under the transfer thread's open file; subsequent reads return stale
+     * data or errors and the host sees a corrupt download. storage.c only
+     * protects the ACTIVE RECORDING session, not the transfer one. */
+    if (transfer_is_active()) {
+        char xfer_sid[32] = {0};
+        if (transfer_get_current_session(xfer_sid, sizeof(xfer_sid), NULL, 0) == 0 &&
+            strcmp(xfer_sid, session_id) == 0) {
+            return create_json_response(false, "Transfer active",
+                                       NULL, response, len);
+        }
     }
 
     int err = storage_delete_session(session_id);
@@ -1655,12 +1881,14 @@ static int cmd_name_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 
         bool has_printable = false;
         for (size_t i = 0; i < src_len; i++) {
-            if ((unsigned char)name_buf[i] < 0x20) {
+            unsigned char c = (unsigned char)name_buf[i];
+            /* Control characters are invalid in a device name; quotes and
+             * backslashes are allowed and escaped when the name is echoed
+             * in JSON below. */
+            if (c < 0x20) {
                 return create_json_response(false, "Invalid characters", NULL, response, len);
             }
-            if ((unsigned char)name_buf[i] >= 0x20) {
-                has_printable = true;
-            }
+            has_printable = true;
         }
 
         if (!has_printable) {
@@ -1672,15 +1900,138 @@ static int cmd_name_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             return create_json_response(false, "Save failed", NULL, response, len);
         }
 
-        char data[300];
-        snprintf(data, sizeof(data), "{\"name\":\"%s\"}", name_buf);
+        char escaped[520];
+        char data[560];
+        if (json_escape_string(escaped, sizeof(escaped), name_buf) != 0) {
+            return create_json_response(false, "Name too long", NULL, response, len);
+        }
+        snprintf(data, sizeof(data), "{\"name\":\"%s\"}", escaped);
         return create_json_response(true, NULL, data, response, len);
     }
 
     const char *name = config_get_device_name();
-    char data[300];
-    snprintf(data, sizeof(data), "{\"name\":\"%s\"}", name);
+    char escaped[520];
+    char data[560];
+    if (json_escape_string(escaped, sizeof(escaped), name) != 0) {
+        return create_json_response(false, "Name too long", NULL, response, len);
+    }
+    snprintf(data, sizeof(data), "{\"name\":\"%s\"}", escaped);
     return create_json_response(true, NULL, data, response, len);
+}
+
+/* SN rewrite verification: AT+SN=<sn>,<mac>. Once an SN is set, rewriting
+ * requires echoing the device's own MAC — casual users can't produce it
+ * (phones don't show BLE MACs, the app console has no SN writer), while
+ * the factory station already holds it from its AT+SN? query. Matches
+ * with or without ':' separators, case-insensitive. */
+static bool sn_mac_match(const char *input, const char *own)
+{
+    char a[18], b[18];
+    size_t ia = 0, ib = 0;
+
+    for (const char *p = input; *p && ia < sizeof(a) - 1; p++) {
+        char c = (*p >= 'A' && *p <= 'Z') ? (char)(*p + 32) : *p;
+        if (c == ':' || c == '-' || c == ' ') {
+            continue;
+        }
+        a[ia++] = c;
+    }
+    a[ia] = '\0';
+
+    for (const char *p = own; *p && ib < sizeof(b) - 1; p++) {
+        char c = (*p >= 'A' && *p <= 'Z') ? (char)(*p + 32) : *p;
+        if (c == ':' || c == '-' || c == ' ') {
+            continue;
+        }
+        b[ib++] = c;
+    }
+    b[ib] = '\0';
+
+    return ia > 0 && strcmp(a, b) == 0;
+}
+
+static int cmd_sn_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
+{
+    /*
+     * AT+SN=<sn>       - Write the product SN (first write)
+     * AT+SN=<sn>,<mac> - Rewrite: requires the device's own MAC as proof
+     *                    (see sn_mac_match above)
+     * AT+SN?           - Read SN + the device MAC (factory tooling queries
+     *                    this, asks its system for the SN bound to that
+     *                    MAC, writes it)
+     *
+     * Charset [A-Za-z0-9._-], 1-32 chars. Stored under the "sn" settings
+     * subtree — survives AT+FACTORY and app reflash.
+     */
+
+    if (ctx->type == AT_CMD_TYPE_SET || ctx->type == AT_CMD_TYPE_EXEC) {
+        if (!ctx->args || strlen(ctx->args) == 0) {
+            return create_json_response(false, "Missing argument (SN)", NULL, response, len);
+        }
+
+        char args[64];
+        strncpy(args, ctx->args, sizeof(args) - 1);
+        args[sizeof(args) - 1] = '\0';
+
+        /* Optional second parameter: the device MAC (rewrite proof). */
+        char *mac_arg = strchr(args, ',');
+        if (mac_arg) {
+            *mac_arg++ = '\0';
+        }
+
+        if (config_sn_is_set()) {
+            /* Rewrite path: requires the MAC. */
+            if (mac_arg == NULL) {
+                return create_json_response(false, "SN locked (rewrite needs ,<mac>)",
+                                           NULL, response, len);
+            }
+            char mac[18];
+            if (ble_get_mac_str(mac, sizeof(mac)) != 0) {
+                return create_json_response(false, "MAC unavailable", NULL, response, len);
+            }
+            if (!sn_mac_match(mac_arg, mac)) {
+                return create_json_response(false, "MAC mismatch", NULL, response, len);
+            }
+            /* Do NOT clear the old SN here: config_set_sn_force() validates
+             * the new value first and overwrites the settings key in one
+             * write. The previous clear-then-set sequence deleted the SN
+             * even when the new value was rejected (e.g. AT+SN=,<mac>), and
+             * a flash failure after the clear lost it as well. */
+        } else if (mac_arg != NULL) {
+            /* First write with a MAC supplied: verify it too (catches a
+             * station addressing the wrong device). */
+            char mac[18];
+            if (ble_get_mac_str(mac, sizeof(mac)) != 0 ||
+                !sn_mac_match(mac_arg, mac)) {
+                return create_json_response(false, "MAC mismatch", NULL, response, len);
+            }
+        }
+
+        int err = config_set_sn_force(args);
+        if (err == -EINVAL) {
+            return create_json_response(false, "Invalid SN", NULL, response, len);
+        }
+        if (err) {
+            return create_json_response(false, "SN write failed", NULL, response, len);
+        }
+
+        char data[64];
+        snprintf(data, sizeof(data), "{\"sn\":\"%s\"}", config_get_sn());
+        return create_json_response(true, NULL, data, response, len);
+    } else {
+        char mac[18];
+        bool have_mac = (ble_get_mac_str(mac, sizeof(mac)) == 0);
+
+        char data[96];
+        if (config_sn_is_set()) {
+            snprintf(data, sizeof(data), "{\"mac\":\"%s\",\"sn\":\"%s\"}",
+                     have_mac ? mac : "", config_get_sn());
+        } else {
+            snprintf(data, sizeof(data), "{\"mac\":\"%s\",\"sn\":null}",
+                     have_mac ? mac : "");
+        }
+        return create_json_response(true, NULL, data, response, len);
+    }
 }
 
 static int cmd_wifi_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
@@ -1709,12 +2060,37 @@ static int cmd_wifi_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         }
 
         if (strcmp(arg, "on") == 0 || strcmp(arg, "1") == 0) {
+            /* WiFi AP is a tens-of-mA load; don't let a host start it on a
+             * low cell (brown-out risk). Charging/VBUS bypasses the check
+             * inside battery_wifi_allowed(). If the AP is already up, keep
+             * answering with its credentials instead of failing. */
+            if (!wifi_ap_is_running() && !battery_wifi_allowed()) {
+                return create_json_response(false, "Battery too low, charge first",
+                                           NULL, response, len);
+            }
+
             struct clip_event_result_info info;
             int ret = clip_post_event_sync(CLIP_EVENT_WIFI_ON, &info);
 
             if (ret != 0 || info.result != CLIP_EVENT_OK) {
                 if (info.result == CLIP_EVENT_INVALID) {
                     return create_json_response(false, "Cannot start WiFi in current state",
+                                               NULL, response, len);
+                }
+                return create_json_response(false, "Failed to start WiFi AP",
+                                           NULL, response, len);
+            }
+
+            /* Bring-up runs on the WiFi worker now (dispatcher stays
+             * responsive for buttons/UI). Block THIS thread until the
+             * worker drains so the response keeps its old meaning. The
+             * verdict comes from the AP's actual state — the worker's
+             * global rc can be overwritten by a follow-up op (e.g. the
+             * failure revert) before it is read. */
+            ret = wifi_wait_ops_done(K_SECONDS(30));
+            if (!wifi_ap_is_running()) {
+                if (ret == -EAGAIN) {
+                    return create_json_response(false, "WiFi start timed out",
                                                NULL, response, len);
                 }
                 return create_json_response(false, "Failed to start WiFi AP",
@@ -1732,6 +2108,23 @@ static int cmd_wifi_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             int ret = clip_post_event_sync(CLIP_EVENT_WIFI_OFF, &info);
 
             if (ret != 0 || info.result != CLIP_EVENT_OK) {
+                if (info.result == CLIP_EVENT_BUSY) {
+                    /* A newer WIFI_ON bring-up is queued/in flight; this
+                     * OFF was dropped, not failed. Say so instead of the
+                     * generic "Failed to stop" (hosts otherwise retry OFF
+                     * and tear down the AP they just asked for). */
+                    return create_json_response(false, "WiFi busy",
+                                               NULL, response, len);
+                }
+                return create_json_response(false, "Failed to stop WiFi AP",
+                                           NULL, response, len);
+            }
+
+            /* Same as above: wait for the worker's teardown (AP disable
+             * round trip ~3 s + UDP stop), then verify the AP is actually
+             * down before claiming success. */
+            wifi_wait_ops_done(K_SECONDS(10));
+            if (wifi_ap_is_running()) {
                 return create_json_response(false, "Failed to stop WiFi AP",
                                            NULL, response, len);
             }
@@ -1964,6 +2357,15 @@ int at_commands_register(void)
         .handler = cmd_pair_handler,
     };
     err = at_server_register_cmd(&pair_cmd);
+    if (err) return err;
+
+    /* SN - Product serial number (factory write-once) */
+    static const struct at_command sn_cmd = {
+        .name = "SN",
+        .flags = AT_CMD_SET | AT_CMD_QUERY,
+        .handler = cmd_sn_handler,
+    };
+    err = at_server_register_cmd(&sn_cmd);
     if (err) return err;
 
     /* REBOOT - Reboot the device */

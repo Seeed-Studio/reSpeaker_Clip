@@ -123,6 +123,16 @@ int audio_resume_recording(void);
 bool audio_is_paused(void);
 
 /**
+ * @brief True while a START is minted-but-not-yet-materialized
+ *
+ * Window: audio_start_common gave the sem, the audio thread is still inside
+ * its multi-second init (recording_active not yet set). Lets the dispatcher
+ * route a STOP to audio_stop_recording()'s pending-start path instead of
+ * silently rejecting it.
+ */
+bool audio_start_pending(void);
+
+/**
  * @brief Check if recording is active
  *
  * @return true if recording, false otherwise
