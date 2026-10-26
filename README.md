@@ -215,16 +215,15 @@ The companion phone app and SDKs (Flutter, Android, iOS) live under
 [`mobile/`](mobile/README.md). They talk to the Clip over BLE and the device
 Wi-Fi AP — no API key or backend required. See the mobile monorepo README for
 the layout, running the example/sample apps, and the integration & verification
-guides in `mobile/docs/`. **The mobile SDKs are separately licensed** (see each
-`mobile/sdk/*/LICENSE`) and are not covered by the repository Apache-2.0
-license below.
+guides in `mobile/docs/`. The mobile SDKs are licensed under the same
+[Apache License 2.0](LICENSE) as the firmware.
 
 ## License
 
-This firmware is licensed under the [Apache License 2.0](LICENSE). See
-individual files for `SPDX-License-Identifier` details. Third-party libraries
-(Opus, SpeexDSP, Lua) retain their respective licenses. The `mobile/` SDKs are
-separately licensed (see above).
+This firmware and the mobile SDKs (Flutter, Android, and iOS) are licensed
+under the [Apache License 2.0](LICENSE). See individual files for
+`SPDX-License-Identifier` details. Third-party libraries (Opus, SpeexDSP, Lua)
+retain their respective licenses.
 
 ## Acknowledgements
 
