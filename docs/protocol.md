@@ -251,6 +251,7 @@ Set configuration or execute with parameters:
 - `AT+BRIGHTNESS=<0-255>` - Set OLED brightness
 - `AT+TIME=<unix_ts>` - Set system time
 - `AT+PAIR=<reset>` - Reset BLE pairing
+- `AT+GC` - Clean up empty session leftovers (on demand)
 - `AT+SN=<sn>[,<mac>]` - Write product serial number (rewrite needs the MAC)
 - `AT+FACTORY=<confirm>` - Factory reset
 - `AT+START=<mode>` - Start recording with mode override
@@ -273,6 +274,7 @@ Query current configuration:
 - `AT+BRIGHTNESS?` - Get OLED brightness
 - `AT+TIME?` - Get current time
 - `AT+PAIR?` - Get pairing status
+- `AT+GC` - Same as the SET form (EXEC command)
 - `AT+SN?` - Get serial number + device MAC
 - `AT+WIFI?` - Get WiFi AP status
 - `AT+USB?` - Get USB status
@@ -1563,6 +1565,39 @@ AT+PAIR=reset
 > happens only after the background erase finishes, so the device is
 > guaranteed to come back unbonded with a clean SD card.
 
+
+---
+
+##### AT+GC - Cleanup Empty Sessions (on demand)
+
+Reclaims two classes of sessions and prunes empty REC/date/hour/minute
+directories:
+
+- **empty leftovers**: no audio bytes on disk (power-cut starts, husks with
+  a 0-byte chunk, stale-json phantoms — the on-disk walk is the authority).
+  Bookmarks never block reclamation: a mark is a position inside audio, and
+  without the audio it points at nothing
+- **fully synced sessions**: every file already transferred to a host
+  (`synced >= files` in session.json); the app deletes on merge, leftovers
+  are reclaimed here
+
+Never deletes a session with unsynced audio bytes, the current session, or
+a session being created. Refused while recording, transferring, USB MSC is
+enabled, or an OTA is in progress.
+
+**Request:**
+```
+AT+GC
+```
+
+**Response:**
+```json
+{ "ok": true, "data": { "removed": 5, "empty": 2, "synced": 3 } }
+```
+
+**Error Cases:**
+- `{"ok":false,"msg":"Recording active, stop first"}` / `"Transfer active, wait for it to finish"` / `"USB MSC active, eject first"` / `"OTA in progress"`
+- `"SD not mounted"` / `"Audio file open, retry in a moment"` / `"Cleanup failed"`
 
 ---
 

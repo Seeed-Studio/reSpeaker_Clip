@@ -222,6 +222,7 @@ MTU 越大 = 通知越少 = 吞吐越高。
 - `AT+BRIGHTNESS=<0-255>` - 设置 OLED 亮度
 - `AT+TIME=<unix_ts>` - 设置系统时间
 - `AT+PAIR=<reset>` - 重置 BLE 配对
+- `AT+GC` - 按需清理空会话残留
 - `AT+SN=<sn>[,<mac>]` - 写入产品序列号（重写需附 MAC）
 - `AT+FACTORY=<confirm>` - 恢复出厂
 - `AT+START=<mode>` - 以指定模式开始录音
@@ -244,6 +245,7 @@ MTU 越大 = 通知越少 = 吞吐越高。
 - `AT+BRIGHTNESS?` - 获取 OLED 亮度
 - `AT+TIME?` - 获取当前时间
 - `AT+PAIR?` - 获取配对状态
+- `AT+GC` - 同 SET 形式（EXEC 命令）
 - `AT+SN?` - 获取序列号 + 设备 MAC
 - `AT+WIFI?` - 获取 WiFi AP 状态
 - `AT+USB?` - 获取 USB 状态
@@ -1432,6 +1434,35 @@ AT+PAIR=reset
 - 需要重新配对
 
 > 应答（`"sd_erase":"pending"`）在擦除前发出；重启只在后台擦除完成后发生，因此设备保证以"未绑定 + 干净 SD"回来。
+
+---
+
+##### AT+GC - 清理空会话（按需）
+
+回收两类会话并修剪空的 REC/日期/小时/分钟目录：
+
+- **空残留**：磁盘上没有任何音频字节（掉电启动残壳、带 0 字节分片的 husk、
+  json 过期的 phantom——以磁盘实查为准）。书签不阻止回收：书签是音频里的
+  位置标记，没有音频它指向的就是空
+- **已完全同步的会话**：所有文件都已传输到主机（session.json 中
+  `synced >= files`）；App 合并后本会删除，残留的在这里回收
+
+永不删除含未同步音频的会话、当前会话、创建中的会话。录音中、传输中、
+USB MSC 开启、OTA 进行中时拒绝执行。
+
+**请求：**
+```
+AT+GC
+```
+
+**响应：**
+```json
+{ "ok": true, "data": { "removed": 5, "empty": 2, "synced": 3 } }
+```
+
+**错误情况：**
+- `{"ok":false,"msg":"Recording active, stop first"}` / `"Transfer active, wait for it to finish"` / `"USB MSC active, eject first"` / `"OTA in progress"`
+- `"SD not mounted"` / `"Audio file open, retry in a moment"` / `"Cleanup failed"`
 
 ---
 

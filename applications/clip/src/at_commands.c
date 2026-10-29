@@ -2043,6 +2043,69 @@ static int cmd_sn_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     }
 }
 
+/* GC - On-demand cleanup of empty session leftovers (AT+GC) */
+static int cmd_gc_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
+{
+    /*
+     * Reclaims two classes of sessions and prunes empty
+     * REC/date/hour/minute buckets:
+     *  - empty leftovers (power-cut starts, husks, stale-json phantoms —
+     *    the disk walk is the authority; no audio bytes anywhere.
+     *    Bookmarks never block reclamation: a mark is a position inside
+     *    audio and without the audio it points at nothing)
+     *  - fully-synced sessions (every audio file already on the host;
+     *    bookmarks do NOT protect this class — a synced session's marks
+     *    were delivered with it. The app deletes on merge, leftovers are
+     *    reclaimed here)
+     * Live sessions are excluded by the current-id and creating guards
+     * inside storage.
+     */
+    enum clip_state state = clip_event_get_state();
+    int removed = 0;
+    int err;
+
+    if (ctx->type != AT_CMD_TYPE_EXEC && ctx->type != AT_CMD_TYPE_TEST) {
+        return create_json_response(false, "Use AT+GC", NULL, response, len);
+    }
+    if (state == CLIP_STATE_RECORDING || state == CLIP_STATE_PAUSED) {
+        return create_json_response(false, "Recording active, stop first",
+                                    NULL, response, len);
+    }
+    if (transfer_is_active()) {
+        return create_json_response(false, "Transfer active, wait for it to finish",
+                                    NULL, response, len);
+    }
+    if (usb_cdc_is_enabled()) {
+        return create_json_response(false, "USB MSC active, eject first",
+                                    NULL, response, len);
+    }
+    if (clip_event_ota_in_progress()) {
+        return create_json_response(false, "OTA in progress", NULL, response, len);
+    }
+
+    err = storage_cleanup_empty(&removed);
+    if (err == -ENODEV) {
+        return create_json_response(false, "SD not mounted", NULL, response, len);
+    }
+    if (err == -EBUSY) {
+        return create_json_response(false, "Audio file open, retry in a moment",
+                                    NULL, response, len);
+    }
+    if (err) {
+        return create_json_response(false, "Cleanup failed", NULL, response, len);
+    }
+
+    int removed_empty = 0;
+    int removed_synced = 0;
+
+    storage_gc_breakdown(&removed_empty, &removed_synced);
+    char data[72];
+    snprintf(data, sizeof(data),
+             "{\"removed\":%d,\"empty\":%d,\"synced\":%d}",
+             removed, removed_empty, removed_synced);
+    return create_json_response(true, NULL, data, response, len);
+}
+
 static int cmd_wifi_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
     /*
@@ -2366,6 +2429,15 @@ int at_commands_register(void)
         .handler = cmd_pair_handler,
     };
     err = at_server_register_cmd(&pair_cmd);
+    if (err) return err;
+
+    /* GC - On-demand cleanup of empty session leftovers */
+    static const struct at_command gc_cmd = {
+        .name = "GC",
+        .flags = AT_CMD_EXEC,
+        .handler = cmd_gc_handler,
+    };
+    err = at_server_register_cmd(&gc_cmd);
     if (err) return err;
 
     /* SN - Product serial number (factory write-once) */

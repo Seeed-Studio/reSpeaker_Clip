@@ -369,6 +369,25 @@ int storage_abort_session(const char *session_id);
  * the transfer path replaced the boot sweep.) */
 int storage_sweep_empty_sessions(void);
 
+/**
+ * @brief On-demand empty-session cleanup (AT+GC)
+ *
+ * Sweeps metadata-only session leftovers and prunes empty time buckets.
+ * Refuses (-EBUSY) while an audio file is open; app-level busyness
+ * (recording/transfer/MSC/OTA) is checked by the AT layer first.
+ *
+ * @return 0 on success, -ENODEV if the SD is not mounted, -EBUSY mid-write
+ */
+int storage_cleanup_empty(int *removed_out);
+
+/**
+ * @brief Breakdown of the last storage_cleanup_empty() run
+ *
+ * @param empty_out sessions removed for holding no audio (may be NULL)
+ * @param synced_out sessions removed for being fully synced (may be NULL)
+ */
+void storage_gc_breakdown(int *empty_out, int *synced_out);
+
 /* True if the session holds at least one non-empty .opus file. */
 int storage_session_has_audio(const char *session_id);
 
