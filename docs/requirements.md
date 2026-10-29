@@ -27,7 +27,7 @@ reSpeaker Clip is a portable Bluetooth recording device that provides high-quali
 - High-quality audio processing (SpeexDSP + Opus encoding)
 - Dual transport: BLE for mobile app, WiFi UDP for high-speed local sync
 - Simple single-button operation with OLED display feedback
-- Long battery life (recording duration target TBD with the 240 mAh cell; production idle ~250µA average, 170µA steady baseline)
+- Long battery life (recording duration target TBD with the 240 mAh cell; production idle ~350µA at 3.7V, 170µA steady baseline)
 
 ## 2. User Stories
 
@@ -483,7 +483,7 @@ ERROR           RECORDING   -        -        -        -        -        -      
 
 **NFR-1.3**: File transfer speed over WiFi UDP shall be significantly faster than BLE
 
-**NFR-1.4**: Battery life for continuous recording: TBD — to be re-measured against the actual 240 mAh cell (the earlier ">8 hours" figure was derived from a wrong 500 mAh assumption; production idle is ~250µA average / 170µA steady baseline)
+**NFR-1.4**: Battery life for continuous recording: TBD — to be re-measured against the actual 240 mAh cell (the earlier ">8 hours" figure was derived from a wrong 500 mAh assumption; production idle is ~350µA at 3.7V / 170µA steady baseline)
 
 **NFR-1.5**: Button response time shall be < 100ms
 

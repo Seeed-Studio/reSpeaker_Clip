@@ -58,7 +58,7 @@ minicom -D /dev/ttyACM0 -b 921600  # Clip UART0 debug console @921600 (board def
 
 ### Power Management
 
-`CONFIG_PM_DEVICE_RUNTIME=y` enables automatic peripheral power management (UART/I2C/SPI suspend when idle). The debug UART console leaks ~570µA at idle; the `production` snippet disables it, reaching ~250µA average (170µA steady baseline). Full idle power budget, regulator map, and measurement procedure: **docs/power.md** (that file owns the power figures).
+`CONFIG_PM_DEVICE_RUNTIME=y` enables automatic peripheral power management (UART/I2C/SPI suspend when idle). The debug UART console leaks ~570µA at idle; the `production` snippet disables it, reaching ~350µA at 3.7V (170µA steady baseline). Full idle power budget, regulator map, and measurement procedure: **docs/power.md** (that file owns the power figures).
 
 ### Build Snippets
 
@@ -66,7 +66,7 @@ Snippets are in `applications/clip/snippets/`. Each snippet has a conf file, opt
 
 | Snippet | Purpose | Changes |
 |---------|---------|---------|
-| `production` | Low-power production firmware | Disables UART console + UART log backend (`CONFIG_CONSOLE=n`, `CONFIG_UART_CONSOLE=n`, `CONFIG_LOG_BACKEND_UART=n`); FS log default follows (off). Idle ~250µA average vs ~higher for the debug build. |
+| `production` | Low-power production firmware | Disables UART console + UART log backend (`CONFIG_CONSOLE=n`, `CONFIG_UART_CONSOLE=n`, `CONFIG_LOG_BACKEND_UART=n`); FS log default follows (off). Idle ~350µA at 3.7V vs ~higher for the debug build. |
 
 The default (no-snippet) build is the **debug** image: UART console on, FS log to `/SD:/LOG` at INF level (`CLIP_LOG_FS_DEFAULT_ON` defaults to `LOG_BACKEND_UART`). Use the `production` snippet for battery/production builds where the console leak matters.
 
@@ -245,7 +245,7 @@ Binary frame protocol with per-file CRC32 verification:
 - `icons.c` - XBM-format display icons
 - `button.c` - Multi-press, long-press support via custom input driver
 - `haptic.c` - Vibration motor feedback via PMIC GPIO
-- `battery.c` - NPM1300 PMIC battery monitoring + nRF Fuel Gauge (model in `battery_model.inc`). Polls every 60 s. Displayed % is a directionally rate-limited view of the fuel-gauge SoC (`CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP`, default 3%/poll, 0=raw), persisted across reboot; `AT+BATT` also exposes `soc_raw` (un-smoothed). Idle feed is `CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA=250`µA (measured standby average; the old 400µA over-counted). Charge termination 4.25V. `vbatlow-charge-enable` lets the charger recover a deeply discharged/protected cell. Automatic power-off is voltage-based: ≤`CLIP_BATTERY_SHUTDOWN_MV` (3.1V) for `CLIP_BATTERY_SHUTDOWN_CONFIRM_MS` (2 min), valid readings, no charging/VBUS; graceful stop/save/ship mode. SoC is never the trigger; low battery still shows a UI warning (≤15%).
+- `battery.c` - NPM1300 PMIC battery monitoring + nRF Fuel Gauge (model in `battery_model.inc`). Polls every 60 s. Displayed % is a directionally rate-limited view of the fuel-gauge SoC (`CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP`, default 3%/poll, 0=raw), persisted across reboot; `AT+BATT` also exposes `soc_raw` (un-smoothed). Idle feed is `CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA=350`µA (measured at 3.7V; the old 400µA over-counted). Charge termination 4.25V. `vbatlow-charge-enable` lets the charger recover a deeply discharged/protected cell. Automatic power-off is voltage-based: ≤`CLIP_BATTERY_SHUTDOWN_MV` (3.1V) for `CLIP_BATTERY_SHUTDOWN_CONFIRM_MS` (2 min), valid readings, no charging/VBUS; graceful stop/save/ship mode. SoC is never the trigger; low battery still shows a UI warning (≤15%).
 
 ## Known Pitfalls
 
@@ -296,7 +296,7 @@ The DTS is split across includes: `clip-pinctrl.dtsi`, `clip-cpuapp_partitioning
 
 ### Power Management
 
-`CONFIG_PM_DEVICE_RUNTIME=y` (UART/I2C/SPI suspend when idle, resume on access). Debug UART console leaks ~570µA at idle (baud-independent); the `production` snippet disables it → ~250µA average. Full idle-power budget (DCDC ~500–600µA saving, SD idle power-gating after 45s, NRF70 QSPI low power, BLE advertising adder), regulator map, and how to measure: **docs/power.md**.
+`CONFIG_PM_DEVICE_RUNTIME=y` (UART/I2C/SPI suspend when idle, resume on access). Debug UART console leaks ~570µA at idle (baud-independent); the `production` snippet disables it → ~350µA at 3.7V. Full idle-power budget (DCDC ~500–600µA saving, SD idle power-gating after 45s, NRF70 QSPI low power, BLE advertising adder), regulator map, and how to measure: **docs/power.md**.
 
 ### PMIC & Regulators
 

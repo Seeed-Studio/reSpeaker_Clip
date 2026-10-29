@@ -118,7 +118,7 @@ static float last_wifi_load_a = -1.0f;  /* logs WiFi-comp state transitions */
  * make a new firmware resume an incompatible estimate. */
 #define FG_STATE_KEY             "battery/fg_state"
 #define FG_STATE_MAGIC           0x46475331U /* "FGS1" */
-#define FG_STATE_FORMAT_VERSION  3U  /* v3: idle current feed 400 -> 250 uA */
+#define FG_STATE_FORMAT_VERSION  4U  /* v4: idle feed 250 -> 350 uA (measured at 3.7 V) */
 #define FG_STATE_BUF_SIZE        512U
 
 struct fg_state_record {

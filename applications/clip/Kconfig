@@ -456,7 +456,7 @@ config CLIP_BATTERY_WIFI_TX_LOAD_MA
 
 config CLIP_BATTERY_IDLE_CURRENT_UA
 	int "Average battery current while idle, fed to the fuel gauge (uA)"
-	default 250
+	default 350
 	help
 	  At idle the PMIC's one-shot IBAT sample is taken while the CPU runs the
 	  60 s poll itself (mA-level draw, ~1.09 mA LSB) and integrating that
@@ -464,9 +464,9 @@ config CLIP_BATTERY_IDLE_CURRENT_UA
 	  phantom). Nordic's guidance for low-power periods is that the idle
 	  current is known ahead of time: when not charging/recording/
 	  transferring, this value is fed to nrf_fuel_gauge_process instead of
-	  the measurement (and passed to nrf_fuel_gauge_idle_set). On Clip the
-	  measured standby average is ~250 uA (production build, BLE advertising
-	  and OLED wakeups active); re-calibrate if the standby profile changes.
+	  the measurement (and passed to nrf_fuel_gauge_idle_set). Measured
+	  standby current at 3.7 V is ~350 uA (production build, BLE advertising
+	  and OLED wakeups active); re-calibrate if the profile changes.
 
 config CLIP_BATTERY_DISPLAY_MAX_STEP
 	int "Max displayed SoC change per poll (%)"

@@ -642,8 +642,8 @@ that rule would latch a 0% display while the gauge still reads 1–19%, so the
 low-display path now tracks upward at the normal 3%/poll step. The boot-time
 stale-state heal uses a 5-point voltage gap for persisted seeds ≤5% (instead of
 20), so an OTA/reboot cannot resume a phantom-drained 0%. The idle current fed
-to the gauge defaults to **250µA** (`CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA`,
-measured standby average); the previous 400µA over-counted by 150µA and drained
+to the gauge defaults to **350µA** (`CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA`,
+measured at 3.7V); the previous 400µA over-counted by 50µA and drained
 the gauge to 0% while the cell still held charge.
 
 **Reporting**: Battery level (0-100%), charging status reported via AT+GSTAT and displayed on OLED status bar. A low-battery warning (15% or below, discharging) shows a UI event. Automatic power-off is **voltage-based**: at/below `CONFIG_CLIP_BATTERY_SHUTDOWN_MV` (default 3.1V) continuously for `CONFIG_CLIP_BATTERY_SHUTDOWN_CONFIRM_MS` (default 2 minutes), with valid sensor readings and no charging/VBUS; any reading above the floor resets the confirmation. It calls the normal graceful shutdown chain (stop recording, close files, cancel transfer, save fuel-gauge/time, ship mode). The displayed/raw SoC is never used to trigger shutdown; manual `AT+POWEROFF` / button still works.
@@ -988,7 +988,7 @@ Managed independently by the transfer subsystem. Does not affect device state di
 | CLIP_DEFAULT_NOISE | 12 | Default noise suppression (dB) |
 | CLIP_DEFAULT_DEREVERB | y | Default dereverberation enabled |
 | CLIP_DEFAULT_BRIGHTNESS | 32 | Default OLED brightness (0-255) |
-| CLIP_BATTERY_IDLE_CURRENT_UA | 250 | Average idle current fed to the fuel gauge (µA) |
+| CLIP_BATTERY_IDLE_CURRENT_UA | 350 | Idle current fed to the fuel gauge, measured at 3.7V (µA) |
 | CLIP_BATTERY_DISPLAY_MAX_STEP | 3 | Max displayed SoC change per 60s poll (%) |
 | CLIP_BATTERY_SHUTDOWN_ENABLE | y | Voltage-based critical auto power-off |
 | CLIP_BATTERY_SHUTDOWN_MV | 3100 | Auto power-off voltage floor (mV) |

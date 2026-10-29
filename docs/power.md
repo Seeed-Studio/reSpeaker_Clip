@@ -9,9 +9,9 @@ All measurements are on the **3V3 rail** (firmware v0.0.5 baseline).
 
 | Configuration | Idle current |
 |---------------|--------------|
-| Production snippet (console off), all gating active | **~250µA average** (170µA steady baseline + BLE/OLED wakeups) |
-| Debug build (UART console on) | ~250µA + ~570µA console leak |
-| BLE slow advertising (100–150 ms interval; see `ble.c`) | included in the ~250µA average (not separately measured) |
+| Production snippet (console off), all gating active | **~350µA at 3.7V** (170µA steady baseline + BLE/OLED wakeups) |
+| Debug build (UART console on) | ~350µA at 3.7V + ~570µA console leak |
+| BLE slow advertising (100–150 ms interval; see `ble.c`) | included in the ~350µA at 3.7V (not separately measured) |
 | Main/radio regulators on LDO instead of DCDC | add ~500–600µA |
 
 ## Budget breakdown
@@ -21,7 +21,7 @@ All measurements are on the **3V3 rail** (firmware v0.0.5 baseline).
 - **UART console leak (debug builds only)** — the UARTE peripheral stays
   enabled between log outputs, leaking **~570µA** at idle (baud-independent;
   115200 and 921600 leak the same). The `production` snippet disables the
-  console + UART log backend, which is what brings production to ~250µA average
+  console + UART log backend, which is what brings production to ~350µA at 3.7V
   (170µA steady baseline plus BLE/OLED wakeups).
 - **SD card idle power-gating** — after `CLIP_SD_IDLE_DELAY_MS` (default 45s,
   `applications/clip/Kconfig`) of no SD access: unmount → disk deinit → SPI4
@@ -31,13 +31,13 @@ All measurements are on the **3V3 rail** (firmware v0.0.5 baseline).
   in low power whenever WiFi is not in use.
 - **BLE advertising** — slow advertising uses a **100–150 ms** interval
   (`BT_GAP_ADV_FAST_INT_MIN_2`/`MAX_2` in `ble.c`); its current is included in
-  the ~250µA average. (The earlier “~1 s / ~0.1 mA” note was stale: a
+  the ~350µA at 3.7V. (The earlier “~1 s / ~0.1 mA” note was stale: a
   1–2 s interval was tried and rejected because phones connected unreliably.)
 - **Fuel-gauge idle feed** — `battery.c` feeds
-  `CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA` (default **250µA**) to the nRF Fuel
-  Gauge instead of the noisy one-shot IBAT sample. This is the measured standby
-  average (170µA steady baseline + BLE/OLED wakeups), not the steady baseline.
-  The previous 400µA value over-counted by 150µA and could drain the gauge to
+  `CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA` (default **350µA**) to the nRF Fuel
+  Gauge instead of the noisy one-shot IBAT sample. Measured at 3.7V
+  (170µA steady baseline + BLE/OLED wakeups). The previous 400µA value
+  over-counted by 50µA and could drain the gauge to
   0% while the cell still had charge.
 - **Critical battery auto power-off** — at/below `CLIP_BATTERY_SHUTDOWN_MV`
   (default **3.1V**) continuously for `CLIP_BATTERY_SHUTDOWN_CONFIRM_MS`
