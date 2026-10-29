@@ -40,9 +40,12 @@ LOG_MODULE_REGISTER(battery, CONFIG_CLIP_LOG_LEVEL);
 /* Battery full threshold (SoC %) */
 #define BATTERY_FULL_THRESHOLD  99
 
-/* Low-battery auto-shutdown removed — unreliable SoC during PMIC I2C
- * failures caused false shutdowns / boot loops. Low battery shows a UI
- * warning only; manual power-off via AT+POWEROFF / button still works. */
+/* Automatic power-off is voltage-based (not SoC-based): at/below
+ * CONFIG_CLIP_BATTERY_SHUTDOWN_MV for CONFIG_CLIP_BATTERY_SHUTDOWN_CONFIRM_MS,
+ * valid readings, no charging/VBUS. This avoids the old SoC-based false
+ * shutdowns (unreliable PMIC I2C/SoC) while still preventing a deep
+ * over-discharge. Low battery also shows the 15% UI warning; manual
+ * AT+POWEROFF / button power-off still works. */
 
 /* Low-battery warning threshold (displayed % = actual SoC; no reserve). */
 #define BATTERY_LOW_WARNING_THRESHOLD  15
@@ -115,7 +118,7 @@ static float last_wifi_load_a = -1.0f;  /* logs WiFi-comp state transitions */
  * make a new firmware resume an incompatible estimate. */
 #define FG_STATE_KEY             "battery/fg_state"
 #define FG_STATE_MAGIC           0x46475331U /* "FGS1" */
-#define FG_STATE_FORMAT_VERSION  2U
+#define FG_STATE_FORMAT_VERSION  4U  /* v4: idle feed 250 -> 350 uA (measured at 3.7 V) */
 #define FG_STATE_BUF_SIZE        512U
 
 struct fg_state_record {
@@ -143,6 +146,25 @@ static int64_t last_display_change_ms = -BATTERY_DISPLAY_RATE_WINDOW_MS;
 static int64_t vbus_plugin_ms = -1;
 static bool charger_complete_seen;   /* charge completed this VBUS session */
 static int64_t post_full_until_ms;    /* hold 100% until this (unplug from full) */
+/* Cached VBUS presence, refreshed each poll (and seeded at init) —
+ * battery_vbus_present() consumers need it OUTSIDE the poll cadence. */
+static bool vbus_present_cached;
+
+/* Recording lockout thresholds (see the poll-side latch logic):
+ * latch below 3% raw SoC or 3.45V, unlock on charge/VBUS or >=8%. */
+#define BATTERY_REC_MIN_SOC     3
+#define BATTERY_REC_UNLOCK_SOC  8
+#define BATTERY_REC_MIN_MV      3450
+static atomic_t rec_lockout = ATOMIC_INIT(0);
+
+#if CONFIG_CLIP_BATTERY_SHUTDOWN_ENABLE
+/* Time-based critical-voltage confirmation. Deliberately not a poll count:
+ * AT+BATT / UI refresh also call read_and_update(), and a poll counter would
+ * let repeated reads collapse the confirmation window. The voltage must stay
+ * at/below the threshold for CONFIRM_MS of wall time. */
+static int64_t shutdown_low_since_ms;
+static bool shutdown_requested;
+#endif
 
 static uint32_t fg_model_crc(void)
 {
@@ -227,6 +249,7 @@ static bool init_complete;
 
 static void read_and_update_locked(void);
 static void read_and_update(void);
+static uint8_t voltage_soc_estimate(float voltage);
 
 void battery_poll(void)
 {
@@ -299,6 +322,60 @@ void battery_save_fg_state(void)
 	k_mutex_unlock(&battery_mutex);
 }
 
+/* VBUS present (USB plugged), regardless of whether the charger is actively
+ * charging — a full battery on USB still has VBUS up, and the PMIC will not
+ * enter ship mode in that state. Power-off paths gate on THIS, not on
+ * status.battery_charging (which reads false once the charge completes). */
+bool battery_vbus_present(void)
+{
+	return vbus_present_cached;
+}
+
+/* Recording allowed? Cleared at critical battery (a graceful STOP ran
+ * there); latched until charging/VBUS or recovery — the latch is what
+ * stops a hovering SoC from flapping start/stop. VBUS alone unlocks
+ * recording (external power, the charger feeds the system). */
+bool battery_recording_allowed(void)
+{
+	return !atomic_get(&rec_lockout) || vbus_present_cached;
+}
+
+/* WiFi is a tens-of-mA load; starting the AP on a low cell can brown the
+ * board out. Refuse below the configured SoC/voltage floors unless external
+ * power (VBUS/charging) is present. The critical recording lockout also
+ * applies: it is latched from the raw gauge, so it catches a sag even when
+ * the rate-limited displayed SoC has not caught up. */
+bool battery_wifi_allowed(void)
+{
+	struct clip_context *ctx = clip_get_context();
+
+	if (vbus_present_cached || ctx->status.battery_charging) {
+		return true;
+	}
+	if (!battery_recording_allowed()) {
+		return false;
+	}
+
+	/* Use the raw gauge SoC, not the directional display value: at low SoC
+	 * the display can sit below the gauge while it waits to re-anchor.
+	 * If the gauge has no reading yet, fall back to the resting-voltage
+	 * estimate so a boot-time 0 does not block a healthy pack. */
+	uint8_t soc = ctx->status.battery_soc_raw;
+	if (soc == 0 && ctx->status.battery_mv > 0) {
+		soc = voltage_soc_estimate((float)ctx->status.battery_mv / 1000.0f);
+	}
+	if (CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT > 0 &&
+	    soc < CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT) {
+		return false;
+	}
+	if (CONFIG_CLIP_WIFI_MIN_BATTERY_MV > 0 &&
+	    ctx->status.battery_mv > 0 &&
+	    ctx->status.battery_mv < CONFIG_CLIP_WIFI_MIN_BATTERY_MV) {
+		return false;
+	}
+	return true;
+}
+
 static int read_sensors(float *voltage, float *current, float *temp, int32_t *chg_status)
 {
 	struct sensor_value val;
@@ -348,7 +425,17 @@ static int charge_status_inform(int32_t chg_status)
 static bool poll_vbus_status(void)
 {
 	struct sensor_value val;
-	int ret = sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS, &val);
+	int ret;
+
+	/* MUST go through sensor_attr_get(VBUS_PRESENT): channel_get returns
+	 * the RAW VBUSSTATUS register (a bitfield of presence/current-limit/
+	 * over-/under-voltage flags) and "!= 0" misread any set status bit
+	 * as VBUS present — power-off was refused on battery ("USB power
+	 * present" false positive). The attr variant applies the presence
+	 * mask inside the driver. */
+	ret = sensor_attr_get(charger_dev,
+			      SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS,
+			      SENSOR_ATTR_NPM13XX_CHARGER_VBUS_PRESENT, &val);
 	if (ret < 0) {
 		return false;
 	}
@@ -421,11 +508,16 @@ static void read_and_update_locked(void)
 	/* Read sensors */
 	ret = read_sensors(&voltage, &current, &temp, &chg_status);
 	if (ret < 0) {
+#if CONFIG_CLIP_BATTERY_SHUTDOWN_ENABLE
+		/* Invalid reading breaks the continuous-low confirmation. */
+		shutdown_low_since_ms = 0;
+#endif
 		return;
 	}
 
 	/* Get VBUS status */
 	vbus_connected = poll_vbus_status();
+	vbus_present_cached = vbus_connected;
 
 	/* ---- High-temperature charge gating (software hysteresis) ----
 	 * The HW hot threshold (45C, thermistor-hot-millidegrees in DTS)
@@ -515,13 +607,22 @@ static void read_and_update_locked(void)
 			float wifi_load_a = wifi_load_estimate_a();
 			if (wifi_load_a != last_wifi_load_a) {
 				last_wifi_load_a = wifi_load_a;
-				LOG_INF("Battery fg: ibat=%d mA, wifi_comp=%d mA",
+				LOG_DBG("Battery fg: ibat=%d mA, wifi_comp=%d mA",
 					(int)(current * 1000.0f),
 					(int)(wifi_load_a * 1000.0f));
 			}
 			i_feed = -current + wifi_load_a;
 		} else {
-			i_feed = (float)CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA / 1000000.0f;
+			/* Idle feed: configured average + any unseen WiFi load.
+			 * A client merely ASSOCIATED keeps the AP up (auto-off only
+			 * fires with no STA) without being fg_active — without
+			 * folding the estimate in here too, the AP-idle tier
+			 * (~59 mA) goes un-billed (~24%/h on the 240 mAh pack)
+			 * and SoC reads high. wifi_load_estimate_a() is 0 when
+			 * the AP is down. */
+			i_feed = (float)CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA /
+					 1000000.0f +
+				 wifi_load_estimate_a();
 			nrf_fuel_gauge_idle_set(voltage, temp, i_feed);
 		}
 
@@ -535,6 +636,30 @@ static void read_and_update_locked(void)
 		bool battery_full = (percent >= BATTERY_FULL_THRESHOLD);
 		charging = charger_connected && (!charger_complete || !battery_full);
 
+		/* Recording lockout at critical battery — RAW gauge values (the
+		 * displayed % is rate-limited/latched and lags). Latch below 3%
+		 * SoC or 3.45V; clear only on charging/VBUS or recovery to >=8%
+		 * (hysteresis against flapping at the threshold). The first
+		 * crossing while recording posts a graceful STOP so files flush
+		 * and session metadata finalizes, instead of the pack dying
+		 * mid-write. VBUS exempts from the refusal (external power). */
+		if (!atomic_get(&rec_lockout)) {
+			if (percent <= BATTERY_REC_MIN_SOC ||
+			    voltage * 1000.0f <= (float)BATTERY_REC_MIN_MV) {
+				atomic_set(&rec_lockout, 1);
+				LOG_WRN("battery critical (%u%%, %dmV): recording lockout",
+					percent, (int)(voltage * 1000.0f));
+				ble_notify_event("battery", "low");
+				if (audio_is_recording()) {
+					clip_post_event(CLIP_EVENT_STOP);
+				}
+			}
+		} else if (charging || vbus_connected ||
+			   percent >= BATTERY_REC_UNLOCK_SOC) {
+			atomic_clear(&rec_lockout);
+			LOG_WRN("battery recovered: recording unlocked");
+		}
+
 		/* Debug log for charging state */
 		if (charger_connected && !last_charging) {
 			LOG_DBG("Chg: VBUS=%d trk=%d CC=%d CV=%d done=%d SoC=%u%% full=%d",
@@ -546,6 +671,43 @@ static void read_and_update_locked(void)
 		bool battery_full = (percent >= BATTERY_FULL_THRESHOLD);
 		charging = charger_connected && (!charger_complete || !battery_full);
 	}
+
+#if CONFIG_CLIP_BATTERY_SHUTDOWN_ENABLE
+	/* Critical-voltage auto power-off. Voltage only — never SoC. A single
+	 * reading above the floor, charging/VBUS, or a failed sensor read
+	 * resets the confirmation window. 3.1 V sustained for 2 minutes is
+	 * already far below the recording lockout (3.45 V). */
+	int shutdown_mv = (int)(voltage * 1000.0f);
+	int64_t shutdown_now_ms = k_uptime_get();
+
+	if (vbus_connected || charging ||
+	    shutdown_mv > CONFIG_CLIP_BATTERY_SHUTDOWN_MV) {
+		shutdown_low_since_ms = 0;
+		shutdown_requested = false;
+	} else if (shutdown_mv <= CONFIG_CLIP_BATTERY_SHUTDOWN_MV) {
+		if (shutdown_low_since_ms == 0) {
+			shutdown_low_since_ms = shutdown_now_ms;
+		}
+		if (!shutdown_requested &&
+		    shutdown_now_ms - shutdown_low_since_ms >=
+			    CONFIG_CLIP_BATTERY_SHUTDOWN_CONFIRM_MS) {
+			LOG_WRN("battery shutdown: %dmV sustained %us",
+				shutdown_mv,
+				(unsigned int)((shutdown_now_ms - shutdown_low_since_ms) / 1000));
+			display_post_error("Battery Empty");
+			ble_notify_event("battery", "critical");
+			shutdown_requested = true;
+			/* Full graceful chain: stop recording, close files,
+			 * cancel transfer, save fg/time, then ship mode. */
+			clip_request_shutdown();
+		}
+	}
+#endif
+
+	/* Raw gauge SoC before display smoothing. Exposed as AT+BATT soc_raw
+	 * and used by policy checks (WiFi) so a rate-limited/latched display
+	 * value cannot make a healthy pack look empty. */
+	ctx->status.battery_soc_raw = percent;
 
 	/* Directional-smoothed display SoC (CLIP_BATTERY_DISPLAY_MAX_STEP).
 	 * The gauge already estimates SoC from V/I/T/time; we only smooth the
@@ -628,10 +790,22 @@ static void read_and_update_locked(void)
 			/* Re-anchor escape: a LARGE upward gap is the gauge
 			 * recovering from a phantom-drained counter, not
 			 * display churn. Let it catch up at the time-limited
-			 * rate; small corrections stay held (anti-churn). */
-			diff = (diff >= BATTERY_DISPLAY_REANCHOR_THRESHOLD)
-				       ? allowed_step
-				       : 0;
+			 * rate; small corrections stay held (anti-churn).
+			 *
+			 * Below the re-anchor threshold, holding a small
+			 * correction is what can latch the display at 0%
+			 * while the gauge still says 10-19%. At low SoC,
+			 * track upward instead: a 0% display is far more
+			 * misleading than 3%/poll of upward movement. */
+			bool low_display =
+				displayed_percent <= BATTERY_DISPLAY_REANCHOR_THRESHOLD;
+			if (diff >= BATTERY_DISPLAY_REANCHOR_THRESHOLD || low_display) {
+				if (allowed_step < diff) {
+					diff = allowed_step;
+				}
+			} else {
+				diff = 0;
+			}
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
@@ -645,7 +819,7 @@ static void read_and_update_locked(void)
 		last_percent = display_percent;
 		bt_bas_set_battery_level(display_percent);
 		ctx->status.battery_percent = display_percent;
-		LOG_INF("Battery: %u%% (actual %u%%, %u mV)",
+		LOG_DBG("Battery: %u%% (actual %u%%, %u mV)",
 			display_percent, percent, (uint32_t)(voltage * 1000));
 
 		/* Low battery warning and auto-shutdown use displayed percentage */
@@ -730,13 +904,13 @@ static void pmic_event_callback(const struct device *dev, struct gpio_callback *
 	}
 
 	if (pins & BIT(NPM13XX_EVENT_VBUS_DETECTED)) {
-		LOG_INF("PMIC event: VBUS detected");
+		LOG_DBG("PMIC event: VBUS detected");
 		clip_post_event(CLIP_EVENT_USB_CONNECTED);
 		/* Re-read after charger has started (takes ~2-3s) */
 		k_work_schedule(&battery_delayed_update_work, K_SECONDS(3));
 	}
 	if (pins & BIT(NPM13XX_EVENT_VBUS_REMOVED)) {
-		LOG_INF("PMIC event: VBUS removed");
+		LOG_DBG("PMIC event: VBUS removed");
 	}
 	if (pins & BIT(NPM13XX_EVENT_CHG_COMPLETED)) {
 		LOG_DBG("PMIC: charge complete");
@@ -801,7 +975,7 @@ int battery_init(void)
 	 * resumed instead of silently discarded on every reboot. */
 	fg_state_load();
 
-	LOG_INF("Battery: 240mAh, fuel gauge %s", nrf_fuel_gauge_version);
+	LOG_DBG("Battery: 240mAh, fuel gauge %s", nrf_fuel_gauge_version);
 
 	/* Read initial sensor values */
 	ret = read_sensors(&init_params.v0, &init_params.i0, &init_params.t0, &chg_status);
@@ -809,10 +983,19 @@ int battery_init(void)
 		LOG_WRN("fg init: sensor read %d", ret);
 		/* Continue with basic battery monitoring */
 	} else {
-		/* Print initial readings (sensor convention: I negative = discharging) */
-		LOG_INF("init: V=%.3f I=%.3f T=%.1f chg=0x%02x",
-			init_params.v0, init_params.i0, init_params.t0,
+		/* Print initial readings (sensor convention: I negative = discharging).
+		 * Integer formatting on purpose: CONFIG_CBPRINTF_FP_SUPPORT is off
+		 * (flash budget) and LOG_MAX_LEVEL still compiles DBG in, so %f
+		 * would be silently dropped if debug logging is enabled. */
+		LOG_DBG("init: V=%dmV I=%dmA T=%d.%01dC chg=0x%02x",
+			(int)(init_params.v0 * 1000.0f),
+			(int)(init_params.i0 * 1000.0f),
+			(int)init_params.t0,
+			((int)(init_params.t0 * 10.0f) % 10 + 10) % 10,
 			(unsigned int)chg_status);
+
+		/* Seed the VBUS cache before the first power-off gate read */
+		vbus_present_cached = poll_vbus_status();
 
 		/* Zephyr sensor API: negative = discharging; nrf_fuel_gauge expects
 		 * negative = charging -- negate i0 so the fuel gauge starts correct. */
@@ -831,14 +1014,34 @@ int battery_init(void)
 		 * WiFi over-compensation, or the pack charged while the device
 		 * was off). Drop the blob so init re-estimates from voltage,
 		 * and leave the display unseeded so the first poll adopts the
-		 * fresh estimate. */
+		 * fresh estimate.
+		 *
+		 * Gated on VBUS absent: while USB is attached the NPM1300
+		 * charger runs autonomously and the terminal voltage is
+		 * I*R-elevated (CC) or pinned at the CV target — the same
+		 * artifact BATTERY_PLUGIN_HOLD_MS documents as ~+10%. A pack
+		 * at 75-85% rebooted during late charging would otherwise
+		 * show an inflated voltage estimate 20-30 points above the
+		 * seed and the heal would wrongly discard a healthy coulomb
+		 * counter, un-seeding the display until the next full cycle. */
+		/* A persisted display seed at 0-5% must not survive when the resting
+		 * voltage says there is meaningful charge left. The normal 20-point
+		 * heal threshold is meant to ignore noisy mid-range corrections, but
+		 * at 0% a 15-20 point gap is exactly the phantom-drained case: use a
+		 * 5-point threshold for a near-empty seed so the gauge re-estimates
+		 * from voltage instead of resuming a stale 0%. */
+		int seed = (int)fg_state_record.displayed_soc;
+		int gap = (int)voltage_soc_estimate(init_params.v0) - seed;
+		int heal_threshold = (seed <= 5)
+					     ? 5
+					     : BATTERY_DISPLAY_REANCHOR_THRESHOLD;
+
 		if (fg_state_loaded &&
-		    (int)voltage_soc_estimate(init_params.v0) -
-			    (int)fg_state_record.displayed_soc >=
-			    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
-			LOG_WRN("stale fg state: %.3fV vs seed %u%% -> new estimate",
-				init_params.v0,
-				(unsigned int)fg_state_record.displayed_soc);
+		    !poll_vbus_status() &&
+		    gap >= heal_threshold) {
+			LOG_DBG("stale fg state: %dmV vs seed %u%% -> new estimate",
+				(int)(init_params.v0 * 1000.0f),
+				(unsigned int)seed);
 			fg_state_loaded = false;
 			init_params.state = NULL;
 			displayed_percent = 0xFF;
@@ -851,7 +1054,7 @@ int battery_init(void)
 		} else {
 			fg_initialized = true;
 
-			LOG_INF("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
+			LOG_DBG("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
 
 			/* Seed the directional-smoothed display from the persisted value so
 			 * it resumes from the pre-reboot reading (no cross-reboot lag). */
@@ -904,7 +1107,7 @@ int battery_init(void)
 	/* Initialize delayed update work for VBUS detection */
 	k_work_init_delayable(&battery_delayed_update_work, battery_delayed_update_handler);
 
-	LOG_INF("Battery init (poll=60s, fg=%s)",
+	LOG_DBG("Battery init (poll=60s, fg=%s)",
 		fg_initialized ? "enabled" : "disabled");
 
 	/* Allow read_and_update to post events now that we return to main. */

@@ -8,8 +8,11 @@
  * All state transitions and side effects (audio, haptic, display)
  * are handled here. Button and AT command modules only post events.
  *
- * Events are processed in the main thread (via clip_event_process()),
- * which provides a large enough stack for WiFi ON/OFF operations.
+ * Events are processed in the main thread (via clip_event_process()).
+ * WiFi ON/OFF are the exception: they block for seconds and run on the
+ * dedicated WiFi worker thread (wifi.c) — the dispatcher only queues the
+ * request and commits the state immediately, so buttons/UI stay alive
+ * during the whole nRF70 bring-up/teardown.
  */
 
 #include <zephyr/kernel.h>
@@ -29,6 +32,7 @@
 #include "wifi.h"
 #include "storage.h"
 #include "transfer.h"
+#include "rtc_stream.h"
 #include "usb_cdc.h"
 #include "button.h"
 #include "config.h"
@@ -86,6 +90,7 @@ static const uint8_t transition_table[CLIP_STATE_OTA + 1][CLIP_EVENT_COUNT] = {
 
 struct clip_event_item {
     enum clip_event event;
+    bool start_rtc;
     struct k_sem *done_sem;
     struct clip_event_result_info *result;
 };
@@ -100,12 +105,25 @@ struct clip_event_item {
  * semaphore directly; a dedicated thread with its own stack runs the
  * shutdown sequence without depending on the event thread. */
 static K_SEM_DEFINE(shutdown_sem, 0, 1);
-#define SHUTDOWN_THREAD_STACK 2048
+/* 4096: this thread runs the FULL stop chain (audio_stop_recording →
+ * storage close/session.json with ~1 KiB frames, battery fg save →
+ * settings/LittleFS write) — 2048 was flagged tight and is the same
+ * stack-overflow class as the transfer-thread freeze. Was 2048. */
+#define SHUTDOWN_THREAD_STACK 4096
 static K_THREAD_STACK_DEFINE(shutdown_thread_stack, SHUTDOWN_THREAD_STACK);
 static struct k_thread shutdown_thread_data;
 static void shutdown_thread_fn(void);
 K_MSGQ_DEFINE(clip_ev_msgq, sizeof(struct clip_event_item),
               EVENT_QUEUE_SIZE, 4);
+
+/* Set while the dedicated shutdown thread is tearing the system down.
+ * The shutdown sequence runs OUTSIDE this file's event loop, so without
+ * this gate an AT-posted START (clip_post_event_sync from BLE/USB) during
+ * the multi-second window would be dispatched after audio_stop_recording()
+ * completed — opening a fresh recording that ship mode (or the 8 s
+ * failsafe reboot) then cuts power into mid-write. Cleared only by the
+ * failed-ship-mode recovery path (a successful ship mode never returns). */
+static atomic_t shutdown_active = ATOMIC_INIT(0);
 
 /* ========================================================================== */
 /* Event Notification Semaphore                                               */
@@ -159,6 +177,7 @@ static void ota_progress_work_handler(struct k_work *work)
 
 static atomic_t g_state;
 static atomic_t g_boost_refcnt;
+static bool current_start_rtc;
 
 /* OTA progress tracking - protected by ota_mutex (accessed from MCUmgr cb + work queue) */
 static K_MUTEX_DEFINE(ota_mutex);
@@ -440,9 +459,12 @@ enum clip_state clip_event_get_state(void)
 /* Event Submission                                                            */
 /* ========================================================================== */
 
-int clip_post_event(enum clip_event event)
+static int post_event_async(enum clip_event event, bool start_rtc)
 {
-    struct clip_event_item item = { .event = event };
+    struct clip_event_item item = {
+        .event = event,
+        .start_rtc = start_rtc,
+    };
 
     int ret = k_msgq_put(&clip_ev_msgq, &item, K_NO_WAIT);
     if (ret != 0) {
@@ -454,14 +476,15 @@ int clip_post_event(enum clip_event event)
     return 0;
 }
 
-int clip_post_event_sync(enum clip_event event,
-                         struct clip_event_result_info *info)
+static int post_event_sync(enum clip_event event, bool start_rtc,
+                           struct clip_event_result_info *info)
 {
     struct k_sem sem;
     k_sem_init(&sem, 0, 1);
 
     struct clip_event_item item = {
         .event = event,
+        .start_rtc = start_rtc,
         .done_sem = &sem,
         .result = info,
     };
@@ -480,6 +503,28 @@ int clip_post_event_sync(enum clip_event event,
     return 0;
 }
 
+int clip_post_event(enum clip_event event)
+{
+    return post_event_async(event, false);
+}
+
+int clip_post_start_event(bool rtc)
+{
+    return post_event_async(CLIP_EVENT_START, rtc);
+}
+
+int clip_post_event_sync(enum clip_event event,
+                         struct clip_event_result_info *info)
+{
+    return post_event_sync(event, false, info);
+}
+
+int clip_post_start_event_sync(bool rtc,
+                               struct clip_event_result_info *info)
+{
+    return post_event_sync(CLIP_EVENT_START, rtc, info);
+}
+
 /* ========================================================================== */
 /* Event Processing — called from main thread                                   */
 /* ========================================================================== */
@@ -496,10 +541,25 @@ void clip_event_process(void)
     while (k_msgq_get(&clip_ev_msgq, &item, K_NO_WAIT) == 0) {
         enum clip_state current = (enum clip_state)atomic_get(&g_state);
 
+        /* Shutdown in progress: refuse new work (see shutdown_active).
+         * Drop the event — a queued START replayed after recovery would
+         * be stale — and hand sync callers CLIP_EVENT_BUSY. */
+        if (atomic_get(&shutdown_active)) {
+            LOG_INF("shutdown active, refusing event %d", item.event);
+            if (item.result) {
+                item.result->result = CLIP_EVENT_BUSY;
+            }
+            goto notify;
+        }
+
         if (item.event >= CLIP_EVENT_COUNT) {
             LOG_WRN("Invalid event: %d", item.event);
             goto notify;
         }
+
+        /* The START mode is carried by this queue item, so concurrent
+         * producers cannot redirect one another's request. */
+        current_start_rtc = item.event == CLIP_EVENT_START && item.start_rtc;
 
         /* Special case: recording blocked while WiFi active */
         if (current == CLIP_STATE_WIFI_SYNC && item.event == CLIP_EVENT_START) {
@@ -511,8 +571,11 @@ void clip_event_process(void)
             goto notify;
         }
 
-        /* Special case: recording blocked while USB MSC active */
-        if (usb_cdc_is_enabled() && item.event == CLIP_EVENT_START) {
+		/* Special case: recording blocked while USB MSC active. RTC is
+		 * exempt: it streams over BLE and never touches the SD, so it
+		 * cannot conflict with MSC's exclusive SD access. */
+		if (usb_cdc_is_enabled() && item.event == CLIP_EVENT_START &&
+		    !current_start_rtc) {
             LOG_INF("Recording blocked: USB MSC active");
             display_post_event(UI_EVENT_USB_BLOCKED);
             if (item.result) {
@@ -567,6 +630,10 @@ static void shutdown_thread_fn(void)
     while (true) {
         k_sem_take(&shutdown_sem, K_FOREVER);
 
+        /* Gate the dispatcher for the whole sequence (see shutdown_active
+         * above): everything below runs outside its serialization. */
+        atomic_set(&shutdown_active, 1);
+
         /* Failsafe armed FIRST: everything below is best-effort. If ship
          * mode has not killed us within 8 s, force a clean reboot. */
         k_timer_start(&shutdown_failsafe, K_SECONDS(8), K_NO_WAIT);
@@ -591,7 +658,7 @@ static void shutdown_thread_fn(void)
 
         /* Signal the transfer to stop (flag only). */
         if (transfer_is_active()) {
-            LOG_INF("Cancelling transfer before power off");
+            LOG_DBG("Cancelling transfer before power off");
             transfer_cancel();
         }
 
@@ -602,6 +669,11 @@ static void shutdown_thread_fn(void)
             battery_fg_state_age_ms() > 60000) {
             battery_save_fg_state();
         }
+
+        /* Persist the current clock so a same-day reboot restores from
+         * power-off time, not from the last recording stop (the
+         * overnight gap itself is still unknowable — no RTC). */
+        config_sync_time();
 
         int64_t left = power_cut_earliest - k_uptime_get();
         if (left > 0) {
@@ -627,6 +699,30 @@ static void shutdown_thread_fn(void)
         /* Still alive: ship mode could not be entered. Recover. */
         LOG_ERR("power-off failed (%d), recovering", err);
         k_timer_stop(&shutdown_failsafe);
+
+        /* The dispatcher was gated and this thread may have force-stopped
+         * audio while the machine still said RECORDING/PAUSED. A STOP
+         * through the dispatcher would be INVALID (audio is no longer
+         * recording), wedging the machine in a phantom RECORDING state
+         * where START/STATUS are table-invalid — re-sync by hand. */
+        enum clip_state now = (enum clip_state)atomic_get(&g_state);
+        if (now == CLIP_STATE_RECORDING || now == CLIP_STATE_PAUSED) {
+            display_set_recording(false, false);
+            ble_notify_state_change("IDLE", audio_get_session_id(), -1);
+            atomic_set(&g_state, CLIP_STATE_IDLE);
+        }
+
+        /* Drop anything queued while gated (a replayed START would be
+         * stale), then re-open the dispatcher and the UI. */
+        k_msgq_purge(&clip_ev_msgq);
+        /* A WIFI_SYNC committed optimistically may have lost its revert
+         * to the purge (or the gate). Re-post WIFI_OFF — the handler
+         * sorts out pending/running and either tears a real AP down or
+         * just commits IDLE. */
+        if ((enum clip_state)atomic_get(&g_state) == CLIP_STATE_WIFI_SYNC) {
+            clip_post_event(CLIP_EVENT_WIFI_OFF);
+        }
+        atomic_clear(&shutdown_active);
         button_shutdown_unlock();
         display_post_event(UI_EVENT_STATUS_SHOW);
         ble_notify_event("poweroff", "failed");
@@ -648,6 +744,45 @@ static enum clip_event_result execute_transition(enum clip_event event,
     case CLIP_EVENT_START:
     {
         struct clip_context *ctx = clip_get_context();
+
+        /* Critical-battery lockout: a graceful STOP already ran at 3%;
+         * refuse new recordings until charging/recovery (VBUS exempts —
+         * external power feeds the system). */
+        if (!battery_recording_allowed()) {
+            LOG_WRN("START refused: battery critical");
+            display_post_error("Battery Low");
+            return CLIP_EVENT_ERROR;
+        }
+
+        if (current_start_rtc) {
+            /* RTC session: pipeline only — no SD session, works on a full
+             * card, but requires a BLE consumer ready to subscribe. */
+            if (!ble_is_connected() || !ble_is_file_data_notify_enabled()) {
+                LOG_WRN("RTC refused: BLE link or data notify not ready");
+                return CLIP_EVENT_INVALID;
+            }
+
+            /* Ask for tight connection parameters now so they have the
+             * whole session-setup round trip to apply before streaming
+             * begins (rtc_stream_start waits for them). */
+            ble_request_rtc_conn_params(true);
+
+            err = audio_start_rtc();
+            if (err) {
+                if (err == -EBUSY) {
+                    return CLIP_EVENT_BUSY;
+                }
+                LOG_ERR("audio_start_rtc failed: %d", err);
+                display_post_error("Rec Fail");
+                return CLIP_EVENT_ERROR;
+            }
+
+            rtc_stream_session_begin(audio_get_session_id());
+            display_post_event(UI_EVENT_REC_START);
+            display_set_recording(true, true);
+            ble_notify_state_change("STREAMING", audio_get_session_id(), -1);
+            return CLIP_EVENT_OK;
+        }
 
         /* SD may be idle-powered-off — bring it up before recording writes */
         err = storage_ensure_mounted();
@@ -684,7 +819,17 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_STOP:
     {
-        if (!audio_is_recording()) {
+        /* Do NOT gate on audio_is_recording(): during the recording-START
+         * window (id minted + sem given, but the audio thread is still
+         * inside its multi-second init — recording_active flips only at
+         * the very END), that gate silently swallowed the user's STOP —
+         * no log, no buzz, no state change — and the machine sat in
+         * RECORDING while the pipeline was wedged in session create.
+         * audio_stop_recording() itself handles the not-yet-active case
+         * (sets stop_requested so the audio thread skips the pending
+         * start). The transition table already confines STOP to
+         * RECORDING/PAUSED states. */
+        if (!audio_is_recording() && !audio_start_pending()) {
             return CLIP_EVENT_INVALID;
         }
 
@@ -709,6 +854,16 @@ static enum clip_event_result execute_transition(enum clip_event event,
             LOG_ERR("audio_stop_recording failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
+
+        /* RTC teardown: STREAM_END first (if the stream is up), then state.
+         * No-op when STOP was posted by rtc_stream itself (timeout / BLE
+         * disconnect already ended the session). (Haptic/UI feedback for
+         * the stop already fired in the Feedback-FIRST block above.) */
+        if (rtc_stream_session_active()) {
+            rtc_stream_stop(RTC_END_REASON_STOPPED);
+            rtc_stream_session_end();
+        }
+
         {
             struct audio_stats stats;
             int dur = -1;
@@ -718,6 +873,7 @@ static enum clip_event_result execute_transition(enum clip_event event,
             }
             ble_notify_state_change("IDLE", audio_get_session_id(), dur);
         }
+
         return CLIP_EVENT_OK;
     }
 
@@ -760,6 +916,14 @@ static enum clip_event_result execute_transition(enum clip_event event,
             return CLIP_EVENT_INVALID;
         }
 
+        /* RTC sessions have no on-card session to bookmark (button path;
+         * AT+MARK is rejected earlier in the AT layer). */
+        if (rtc_stream_session_active()) {
+            LOG_WRN("MARK not supported in RTC mode");
+            haptic_play_pattern(HAPTIC_SHORT);
+            return CLIP_EVENT_OK;
+        }
+
         err = audio_add_bookmark();
         if (err) {
             LOG_ERR("audio_add_bookmark failed: %d", err);
@@ -779,13 +943,33 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_WIFI_ON:
     {
-        if (wifi_ap_is_running()) {
-            return CLIP_EVENT_OK;
+        /* Refuse to start the AP on a low cell unless charging/VBUS. The
+         * AT layer checks this first for a specific message; this guard
+         * covers any other future caller. An already-running AP is left
+         * alone (idempotent re-issue). */
+        if (!wifi_ap_is_running() && !battery_wifi_allowed()) {
+            LOG_WRN("WiFi start refused: battery too low");
+            display_post_error("Battery Low");
+            return CLIP_EVENT_INVALID;
         }
 
-        err = wifi_on();
+        /* Kick the WiFi worker and return NOW: wifi_on() blocks for
+         * seconds (RPU boot + AP-enable retries) and used to freeze the
+         * whole dispatcher — button events queued unseen, no UI events
+         * posted. The state commits to WIFI_SYNC optimistically; the
+         * worker reverts via WIFI_OFF if bring-up fails. AT+WIFI keeps
+         * its old "ok:true => AP is up" timing by waiting on the worker
+         * from the AT thread (wifi_wait_ops_done).
+         *
+         * Always enqueue — no wifi_ap_is_running() early-return: with
+         * async teardown, ap_running stays true up to ~3 s after WIFI_OFF
+         * dispatched, and an ON arriving in that window would early-return
+         * WITHOUT queueing anything (AP down, state wedged in WIFI_SYNC,
+         * recording refused). wifi_on() itself no-ops fast when the AP is
+         * already up, so the idempotent re-queue is harmless. */
+        err = wifi_request_async(true);
         if (err) {
-            LOG_ERR("wifi_on failed: %d", err);
+            LOG_ERR("wifi on request failed: %d", err);
             display_post_error("WiFi Fail");
             return CLIP_EVENT_ERROR;
         }
@@ -794,9 +978,30 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_WIFI_OFF:
     {
-        err = wifi_off();
+        /* Same worker handoff as WIFI_ON: wifi_off() waits on the AP
+         * disable round trip (~3 s) — not runnable on the dispatcher. */
+        if (wifi_on_pending()) {
+            /* A bring-up is queued or in flight. Either this OFF is the
+             * worker's own failure-revert for an OLDER ON (the newer ON
+             * supersedes it — executing it would tear down the newer
+             * bring-up), or a host OFF raced a bring-up. Drop it and keep
+             * WIFI_SYNC: non-OK result refuses the state commit. The ON's
+             * own outcome (or a retried OFF once it settles) resolves the
+             * state. */
+            LOG_INF("wifi off dropped, bring-up pending");
+            return CLIP_EVENT_BUSY;
+        }
+        if (!wifi_ap_is_running()) {
+            /* Pure state commit (failure-revert landing after the worker
+             * gave up): no AP to tear down. Must NOT enqueue a no-op OFF —
+             * its rc=0 would overwrite the just-broadcast failure rc
+             * before the AT waiter reads it, answering ok:true to a
+             * failed bring-up. */
+            return CLIP_EVENT_OK;
+        }
+        err = wifi_request_async(false);
         if (err) {
-            LOG_ERR("wifi_off failed: %d", err);
+            LOG_ERR("wifi off request failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
         return CLIP_EVENT_OK;

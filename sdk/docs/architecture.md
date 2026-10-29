@@ -8,11 +8,18 @@ collection.
 ClipClient
   ├─ typed current-firmware AT commands
   ├─ command lock (one outstanding request)
-  └─ streaming download coordinator
-       └─ FileReceiver
-            ├─ .opus.part writer
-            ├─ byte count + CRC32 validation
-            └─ atomic rename to .opus
+  ├─ streaming download coordinator
+  │    └─ FileReceiver
+  │         ├─ .opus.part writer
+  │         ├─ byte count + CRC32 validation
+  │         └─ atomic rename to .opus
+  └─ RTC live streaming (AT+START=rtc + AT+DOWNLOAD)
+       └─ StreamReceiver (producer -> consumer fan-out)
+            ├─ on_frame / add_sink raw taps (fail-fast)
+            ├─ sequence-gap + arrival-timing accounting
+            ├─ StreamCapture: received-packet .bin log (.part -> rename)
+            ├─ StreamConsumer: bounded async chunk/stack push (live edge)
+            └─ clip.jitter.JitterBuffer available to application consumers
 
 BaseTransport
   ├─ BleTransport   optional bleak dependency; GATT notifications
@@ -31,6 +38,22 @@ validates each datagram's CRC32 and sends the firmware `FILE_ACK` only after the
 complete file has passed sequence, size, and final CRC32 validation.  A failed
 UDP file is discarded and NACKed for retransmission; a failed BLE file is a
 terminal transfer error.
+
+RTC live streaming reuses the same file-frame notification path with
+STREAM_START/STREAM_DATA/STREAM_END frames: `StreamReceiver` hands each Opus
+payload to a callback as it arrives, tracking sequence discontinuities and
+inter-arrival timing instead of persisting anything.  Consumers attach
+explicitly — `StreamCapture` logs raw arrivals to a length-prefixed `.bin`
+(renamed from `.part` only on a normal end), and `StreamConsumer` pushes the
+newest data through a byte-budget async queue as 4 KB chunks / ~1 MB stacks,
+dropping the oldest undelivered chunks under backpressure (async-only
+callbacks, per-callback timeout, `wait_closed` lifecycle).  The handler slot
+is released through a lease token (atomic conditional detach).
+`clip.jitter.JitterBuffer` remains available to applications that need to
+decouple bursty arrivals from a steady 20 ms consume rate (initial fill,
+underrun handling and catch-up drops that bound latency to the live edge),
+and `simulate_playback()` replays recorded arrival gaps through the same
+model offline to size the buffer.
 
 For hosts that start on BLE, `clip.wifi.handoff_to_wifi()` provides an explicit
 control-plane/data-plane handoff: it sends `AT+WIFI=on` over BLE, joins the host

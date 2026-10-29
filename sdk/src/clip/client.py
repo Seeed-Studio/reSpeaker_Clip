@@ -21,6 +21,7 @@ from .models import (
     Storage,
     WifiAccessPoint,
 )
+from .stream import StreamReceiver, stream_session as _stream_session
 from .transfer import ProgressCallback, download_session as _download_session
 from .transports.base import BaseTransport
 from .validation import chunk_name, page, session_id
@@ -53,8 +54,15 @@ class ClipClient:
         await self.connect()
         return self
 
-    async def __aexit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
-        await self.disconnect()
+    async def __aexit__(self, exc_type: object, _exc: object, _traceback: object) -> None:
+        try:
+            await self.disconnect()
+        except Exception:
+            # A disconnect failure must never replace the primary error that
+            # is already propagating out of the body.  With no primary error
+            # the disconnect failure is the failure, so it propagates.
+            if exc_type is None:
+                raise
 
     @property
     def is_connected(self) -> bool:
@@ -220,6 +228,11 @@ class ClipClient:
         value = _data(response).get("session")
         return value if isinstance(value, str) else None
 
+    async def start_rtc(self) -> str:
+        """Start a live RTC session: Opus over BLE, nothing written to SD."""
+        response = await self.request("AT+START=rtc")
+        return _required_str(_data(response), "session")
+
     async def stop_recording(self) -> dict[str, Any]:
         return _data(await self.request("AT+STOP"))
 
@@ -311,6 +324,16 @@ class ClipClient:
 
     async def cancel_download(self) -> None:
         await self.request("AT+CANCEL")
+
+    async def stream_rtc(self, value: str, receiver: StreamReceiver) -> int | None:
+        """Start an RTC stream: frames flow into receiver until STREAM_END.
+
+        Returns the file-frame handler lease token. AT+STOP
+        (stop_recording) ends the stream; the caller then detaches with
+        ``transport.detach_file_frame_handler(token)``, which clears the
+        handler slot only if this stream still owns it.
+        """
+        return await _stream_session(self, value, receiver)
 
     async def download_session(
         self,

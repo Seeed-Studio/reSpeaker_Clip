@@ -17,9 +17,17 @@ west build --build-dir build-re --pristine --board clip/nrf5340/cpuapp tests/re
 west flash --build-dir build-re && nrfutil device reset
 ```
 
-> **No MCUboot**: `sysbuild.conf` sets `SB_CONFIG_BOOTLOADER_NONE=y` (plus
-> `SB_CONFIG_PARTITION_MANAGER=n` so the image links at 0x0) — factory test
-> firmware flashed directly via J-Link.
+> **MCUboot build** (default): inherits the board sysbuild defaults — signed
+> dual-image MCUboot + NETCORE ipc_radio — the same bootloader as the
+> application firmware. Flash `build-re/merged.hex` via J-Link once
+> (`nrfutil device program --firmware build-re/merged.hex --serial-number <SN>`),
+> then upgrade over USB serial DFU: hold the button while plugging USB
+> (VBUS-gated; enumerates as PID `8069` "reSpeaker Clip DFU") and
+> `nrfutil mcu-manager serial image-upload --firmware build-re/re/zephyr/zephyr.signed.bin --serial-port /dev/ttyACMx`.
+> Note `west flash` programs the unsigned default app image — slot 0 then
+> fails MCUboot's signature check; program `merged.hex` instead.
+> The old no-bootloader J-Link-direct variant is kept as commented lines in
+> `sysbuild.conf`.
 
 ## Serial Configuration
 

@@ -347,7 +347,6 @@ async def api_config_set(req: ConfigSetRequest):
         "mode": f"AT+MODE={req.value}",
         "noise": f"AT+NOISE={req.value}",
         "dereverb": f"AT+DEREVERB={req.value}",
-        "autodel": f"AT+AUTODEL={req.value}",
     }
     cmd = cmd_map.get(req.key)
     if not cmd:

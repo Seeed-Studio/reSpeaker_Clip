@@ -1,5 +1,10 @@
 # reSpeaker Clip - BLE AT Protocol Specification
 
+> **中文版：** [`protocol.zh-CN.md`](protocol.zh-CN.md) — full Chinese translation,
+> kept in sync with this file. On any divergence the English version is
+> authoritative; code blocks, field names, and error messages are the
+> device's literal bytes and are never translated.
+
 ## 1. Protocol Overview
 
 ### 1.1 Design Principles
@@ -136,6 +141,9 @@ Frame types sent on this characteristic:
 - `0x10` FILE_START — begin file transfer
 - `0x11` FILE_END — end file (with CRC32)
 - `0x12` TRANSFER_DONE — all files complete
+- `0x13` STREAM_START — begin RTC live stream
+- `0x14` STREAM_DATA — RTC live Opus frame
+- `0x15` STREAM_END — end RTC live stream
 
 #### 2.2.4 Audio Visualization (Notify)
 
@@ -239,11 +247,12 @@ Execute an operation or retrieve status:
 Format: `AT+XX=<value>`
 
 Set configuration or execute with parameters:
-- `AT+MODE=<normal|enhanced>` - Set recording mode (`AT+START=<mode>` additionally accepts the legacy aliases `stereo`/`merge`)
-- `AT+AUTODEL=<off|0|1-30>` - Set auto-delete policy
+- `AT+MODE=<normal|enhanced>` - Set recording mode (`AT+START=<mode>` additionally accepts the legacy alias `merge`)
 - `AT+BRIGHTNESS=<0-255>` - Set OLED brightness
 - `AT+TIME=<unix_ts>` - Set system time
 - `AT+PAIR=<reset>` - Reset BLE pairing
+- `AT+GC` - Clean up empty session leftovers (on demand)
+- `AT+SN=<sn>[,<mac>]` - Write product serial number (rewrite needs the MAC)
 - `AT+FACTORY=<confirm>` - Factory reset
 - `AT+START=<mode>` - Start recording with mode override
 - `AT+MARK=<note>` - Add bookmark with note
@@ -262,10 +271,11 @@ Query current configuration:
 - `AT+DEVICE?` - Get device name
 - `AT+NAME?` - Get user-defined device name
 - `AT+MODE?` - Get current mode
-- `AT+AUTODEL?` - Get auto-delete policy
 - `AT+BRIGHTNESS?` - Get OLED brightness
 - `AT+TIME?` - Get current time
 - `AT+PAIR?` - Get pairing status
+- `AT+GC` - Same as the SET form (EXEC command)
+- `AT+SN?` - Get serial number + device MAC
 - `AT+WIFI?` - Get WiFi AP status
 - `AT+USB?` - Get USB status
 - `AT+LOG?` - Get SD log backend status
@@ -328,7 +338,7 @@ AT+GSTAT
     "temp": 26,
     "voltage": 3980,
     "mode": "normal",
-    "bitrate": 16000,
+    "bitrate": 32000,
     "free_space": 1024,
     "device": "Clip"
   }
@@ -336,16 +346,16 @@ AT+GSTAT
 ```
 
 **Fields:**
-- `state`: Current device state (IDLE/RECORDING/TRANSMITTING/WIFI_SYNC/PAUSED/ERROR)
+- `state`: Current device state (IDLE/RECORDING/TRANSMITTING/WIFI_SYNC/PAUSED/ERROR; OTA is defined but never entered during an upload)
 - `recording`: Whether actively recording (true/false)
-- `session`: Current session ID or null
-- `duration`: Current recording duration in seconds
+- `session`: Current session ID or null — **reported only while recording**; after stop it is `null` (the last id is kept internally for the stop notification only)
+- `duration`: Current recording duration in seconds — only while recording; `0` when stopped
 - `battery`: Battery percentage (0-100)
-- `charging`: Charging status (true/false)
+- `charging`: Charging status (true/false). Reads false when the battery is full even with USB attached — VBUS presence gates power-off, not this field
 - `temp`: Battery temperature in °C (NTC via NPM1300)
 - `voltage`: Battery voltage in mV
-- `mode`: Recording mode (normal/enhanced)
-- `bitrate`: Bitrate for current mode (normal=16000, enhanced=32000)
+- `mode`: Recording preset (normal/enhanced)
+- `bitrate`: Reported bitrate for the current preset. Both presets currently report 32000 (the encoder uses `CONFIG_CLIP_ENHANCED_BITRATE`; the normal constant is unused).
 - `free_space`: Free space in MB
 - `device`: Device name string
 
@@ -380,13 +390,25 @@ AT+TIME?
 ```json
 {
   "ok": true,
-  "data": { "time": "2024-02-03T10:00:30Z" }
+  "data": { "time": "2024-02-03T10:00:30Z", "restored": false, "uptime": 3612 }
 }
 ```
 
 > Set echoes the Unix timestamp back in `data.time` (integer); Get returns an
 > ISO-8601 string in `data.time`. If time was never set, Get returns
 > `{"ok":false,"msg":"Time not set (use AT+TIME=<timestamp>)"}`.
+>
+> `"restored":true` means the clock was restored from persisted settings at
+> boot and no live sync has arrived since: the board has no RTC, so time
+> elapsed while powered off is lost and the reported time is stale by the
+> power-off duration. **Hosts should answer `restored:true` by pushing
+> `AT+TIME=<ts>`** (once; the flag clears) before trusting session
+> timestamps. Time is persisted at recording stop and at power-off, so the
+> stale amount starts from the last of those, not from the last sync.
+>
+> `"uptime"` is seconds since boot — a small value on a device that has
+> "been on for days" reveals a silent reboot (crash/brownout), which is how
+> a stale clock can appear without anyone powering the device off.
 
 **Error Cases:**
 - `{"ok":false,"msg":"Missing timestamp"}` / `"Invalid timestamp"` / `"Invalid time"`
@@ -430,6 +452,7 @@ AT+BATT
   "ok": true,
   "data": {
     "battery": 85,
+    "soc_raw": 86,
     "charging": true,
     "voltage": 3980,
     "temp": 26
@@ -438,7 +461,8 @@ AT+BATT
 ```
 
 **Fields:**
-- `battery`: Battery percentage (0-100, fuel-gauge SoC estimate)
+- `battery`: Displayed battery percentage (0-100, directionally smoothed fuel-gauge SoC)
+- `soc_raw`: Un-smoothed fuel-gauge SoC (0-100). Can be higher than `battery` while the display is rate-limited/re-anchoring; use this for diagnostics and field reports.
 - `charging`: Charging status (true/false)
 - `voltage`: Battery voltage in mV
 - `temp`: Battery temperature in °C (NTC via NPM1300; useful for verifying the charge cutoff)
@@ -501,7 +525,10 @@ AT+START=normal
 ```
 
 **Parameters:**
-- `mode`: "normal" or "enhanced" (legacy aliases: "stereo" = normal, "merge" = enhanced; case-insensitive). Omitted → current mode.
+- `mode`: "normal", "enhanced", or "rtc" (legacy alias: "merge" = enhanced; case-insensitive). Omitted → current mode.
+  `rtc` starts a live stream instead of an SD recording — BLE only, with the
+  File Data characteristic subscribed (Section 4.8). The button cannot start
+  RTC; a button hold-release always starts the SD pipeline.
 
 **Response:**
 ```json
@@ -513,14 +540,29 @@ AT+START=normal
 }
 ```
 
+RTC sessions additionally report the mode:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "session": "20240203100000",
+    "mode": "rtc"
+  }
+}
+```
+
 > `data` contains only the `session` id (an empty object if the id isn't ready yet).
 
 **Error Cases:**
-- `{"ok":false,"msg":"invalid mode (normal/stereo/enhanced/merge)"}` (bad mode argument)
+- `{"ok":false,"msg":"invalid mode (normal/enhanced/merge/rtc)"}` (bad mode argument)
+- `{"ok":false,"msg":"Battery too low, charge first"}` (critical-battery lockout; recording also refuses over the button — buzz + "Battery Low" screen). A recording already running stops gracefully when the raw SoC crosses 3% (or 3.45V); the lockout clears on charging/VBUS or recovery to >=8%
 - `{"ok":false,"msg":"Already recording or invalid state"}` / `"Audio module busy"` / `"Failed to start recording"`
 - `"WiFi active, cannot record"` / `"USB MSC active, disable USB first"` (recording blocked while WiFi/USB active)
+- `"RTC requires BLE connected and file data notify enabled"` (RTC preconditions not met)
 
-**State Change:** IDLE → RECORDING
+**State Change:** IDLE → RECORDING (state broadcast: `"RECORDING"`, or
+`"STREAMING"` for RTC sessions)
 
 **Side Effects:**
 - Creates new session directory
@@ -601,6 +643,7 @@ AT+MARK
 
 **Error Cases:**
 - `{"ok":false,"msg":"No active session"}` / `"Not recording"` (can only bookmark while recording)
+- `{"ok":false,"msg":"MARK not supported in RTC mode"}` (RTC sessions store nothing on-card)
 
 **Side Effects:**
 - Writes bookmark to marks.bin
@@ -662,9 +705,9 @@ AT+LIST=20240203100000?1&20
     "size": 5242880,
     "synced": 15,
     "bookmarks": 5,
-    "channels": 2,
+    "channels": 1,
     "sample_rate": 16000,
-    "mode": "normal"
+    "mode": "mono"
   }
 }
 ```
@@ -698,9 +741,9 @@ AT+LIST=20240203100000?1&20
 - `files`: Array of file names (file list pagination)
 - `id`: Session ID (non-paginated response, deprecated)
 - `synced`: Number of files successfully transferred (only in session details)
-- `channels`: Audio channels - 1=mono, 2=stereo (only in session details)
+- `channels`: Audio channels — currently 1 (mono) for both presets; 2 is reserved (only in session details)
 - `sample_rate`: Sample rate in Hz, e.g., 16000 (only in session details)
-- `mode`: Recording mode - "normal" (stereo) or "enhanced" (mono with DSP) (only in session details)
+- `mode`: Audio-layout string written by the recorder — currently `"mono"` (`"stereo"` reserved). It does **not** identify the AT+MODE preset; the firmware currently stores the audio mode, not the normal/enhanced preset. (only in session details)
 
 **Usage Examples:**
 ```
@@ -752,6 +795,9 @@ AT+DELETE=20240203100000
 
 **Error Cases:**
 - `{"ok":false,"msg":"Session not found"}` / `"Invalid session ID"` / `"cannot delete active session"` / `"Missing session_id"` / `"SD card not mounted"`
+- `"Transfer active"` — the session is currently being downloaded; cancel the
+  transfer first (`AT+CANCEL`). Deleting it would free the clusters under the
+  transfer thread's open file.
 
 **Side Effects:**
 - Deletes the session directory and all its files
@@ -852,6 +898,23 @@ AT+DOWNLOAD=20250225143000:0016.opus
 > Only the `:` separator is parsed. A `/` separator (`session/file`) is **not**
 > supported — use `:` for single-file / resume mode.
 
+**RTC Session Case:**
+
+If the requested session is the active RTC session (`AT+START=RTC`), the
+command starts the live stream instead of a file transfer (see Section 4.8):
+
+```json
+{
+  "ok": true,
+  "data": { "state": "streaming", "session": "20250225143000" }
+}
+```
+
+followed by `STREAM_START` / `STREAM_DATA` frames on the File Data
+characteristic. The `session:filename` form is rejected for RTC sessions
+(`"RTC session has no files"`), and RTC streaming is only available when the
+command arrives over BLE (`"RTC streaming requires BLE"` otherwise).
+
 **Resume Logic:**
 1. Client queries session details: `AT+LIST=<session_id>`
 2. Response includes `synced` count (e.g., 15 files already transferred)
@@ -896,8 +959,19 @@ After the start response, the device sends binary frames on the File Data charac
 5. Client sends `AT+DOWNLOAD=session:last_received_file`
 6. Transfer resumes from next file
 
+**Re-issue While a Transfer Runs (idempotent):**
+
+`AT+DOWNLOAD` for the session **already streaming over the same transport**
+answers `{"ok":true}` with the current progress and changes nothing — hosts
+legitimately re-send after a response timeout or UI retry, and interrupting a
+running transfer for an identical request would be wrong. A re-issue for a
+**different session or different transport** (e.g. the stale-BLE-leg race
+during a WiFi handoff) is rejected **immediately** with
+`"Transfer already in progress"`; so is a re-issue while the transfer is
+paused (use `AT+RESUME`). No busy path waits silently.
+
 **Error Cases:**
-- `{"ok":false,"msg":"Transfer already in progress"}` / `"Session or file not found"`
+- `{"ok":false,"msg":"Transfer already in progress"}` (immediate — see above) / `"Session or file not found"`
 - `"Missing session_id"`, `"Invalid session ID"`, or `"DOWNLOAD argument too long"`
 - `"Invalid download filename"` unless the resume file is exactly
   `NNNN.opus`, from `0001.opus` through the configured maximum chunk index
@@ -936,6 +1010,10 @@ AT+PAUSE
 - Keeps session open
 - Recording can be resumed with `AT+RESUME`
 
+> **RTC sessions:** pause stops the BLE stream and discards all buffered
+> frames, but the microphone pipeline keeps running. Response carries
+> `{"paused":true,"stream":true}` and the device state stays RECORDING.
+
 **Error Cases:**
 - `{"ok":false,"msg":"Not recording"}` / `"Failed to pause recording"`
 
@@ -964,6 +1042,9 @@ AT+RESUME
 - Creates new file with incremented index
 - Resumes DMIC capture
 - Continues in same session
+
+> **RTC sessions:** resume restarts the BLE stream from the current frame.
+> Response carries `{"resumed":true,"stream":true}`.
 
 **Error Cases:**
 - `{"ok":false,"msg":"Not paused"}` / `"Failed to resume recording"`
@@ -1001,39 +1082,8 @@ AT+CANCEL
 
 #### 3.3.6 Storage Management
 
-##### AT+AUTODEL - Auto-Delete Policy
-
-Configure automatic deletion policy for transferred sessions.
-
-**Request (Set):**
-```
-AT+AUTODEL=7
-```
-
-**Request (Get):**
-```
-AT+AUTODEL?
-```
-
-**Response (Set/Get):**
-```json
-{
-  "ok": true,
-  "data": { "autodel": 7 }
-}
-```
-
-> `autodel` is an integer (days) or the string `"off"`. Set echoes the applied value.
-
-**Policy Values:**
-| Value | Description |
-|-------|-------------|
-| `off` | Manual delete only (default) |
-| `0` | Delete immediately after transfer |
-| `1-30` | Delete N days after transfer |
-
-**Error Cases:**
-- `{"ok":false,"msg":"Auto-delete must be 0-30 days or off"}` / `"Missing autodel value"`
+> Removed: `AT+AUTODEL` never had a device-side implementation (the
+> policy was stored, never enforced) and has been deleted entirely.
 
 ---
 
@@ -1064,10 +1114,10 @@ AT+MODE?
 **Valid Values:** "normal", "enhanced"
 
 **Mode Presets:**
-- **Normal**: Stereo (L+R channels), 16kbps/channel (32kbps total), complexity 0, no DSP processing, 10-minute file segments
-- **Enhanced**: Mono (L+R merged), 32kbps, complexity 1, DSP enabled (noise suppression + dereverberation), 2-minute file segments
+- **Normal**: Mono (L+R merged); **SpeexDSP bypassed** (no noise suppression/dereverb); merge + high-pass + integer AGC; 32kbps, complexity 1; segments 60s (syncing) / 300s (idle)
+- **Enhanced**: Mono (L+R merged); **SpeexDSP noise suppression + dereverb enabled** (when `noise_suppress > 0`); merge + high-pass + integer AGC; 32kbps, complexity 1; segments 60s (syncing) / 300s (idle)
 
-Bitrate and complexity are fixed per mode and configured at build time via Kconfig (`CONFIG_CLIP_NORMAL_BITRATE`, `CONFIG_CLIP_ENHANCED_BITRATE`, etc.). They cannot be changed at runtime.
+Both presets are mono and currently use `CONFIG_CLIP_ENHANCED_BITRATE`/`COMPLEXITY`; `CONFIG_CLIP_NORMAL_BITRATE`/`COMPLEXITY` are unused. A mode change takes effect at the next recording start (the Speex enable is latched in `audio_start_recording_internal`), not mid-recording. Bitrate/complexity cannot be changed at runtime.
 
 ---
 
@@ -1213,7 +1263,7 @@ AT+WIFI?
   "ok": true,
   "data": {
     "ssid": "ClipAP_A1B2",
-    "password": "12345678",
+    "password": "aB3xK9mQ",
     "ip": "192.168.4.1",
     "port": 8089
   }
@@ -1235,7 +1285,7 @@ AT+WIFI?
   "data": {
     "running": true,
     "ssid": "ClipAP_A1B2",
-    "password": "12345678",
+    "password": "aB3xK9mQ",
     "ip": "192.168.4.1",
     "port": 8089,
     "connected": true
@@ -1245,7 +1295,9 @@ AT+WIFI?
 
 **Fields:**
 - `ssid`: WiFi SSID (ClipAP_XXXX, last 4 hex of chip ID)
-- `password`: WPA2 password (12345678)
+- `password`: WPA2 password — **per-device, randomly generated at first boot**
+  (8 printable characters, persisted in settings; read via `AT+WIFI?` over BLE).
+  There is no universal default; a device that lost its settings generates a new one
 - `ip`: AP IP address (192.168.4.1)
 - `port`: UDP transfer port (8089)
 - `running`: Whether AP is active
@@ -1257,11 +1309,25 @@ AT+WIFI?
 - Cannot start WiFi while recording
 - Cannot start recording while WiFi is active
 
-**Auto-off:** WiFi AP automatically stops after 3 minutes if no client connects.
+**Auto-off:** WiFi AP automatically stops after 3 minutes
+(`CONFIG_CLIP_WIFI_TIMEOUT_MS`; 0 disables) — the timer runs from AP start or
+the last client disconnect; **an associated client keeps the AP up**, even when idle.
 
 **Error Cases:**
 - `{"ok":false,"msg":"Missing argument (on/off)"}` / `"Invalid argument (use on/off)"`
 - `"Cannot start WiFi in current state"` / `"Failed to start WiFi AP"` / `"Failed to stop WiFi AP"`
+- `{"ok":false,"msg":"Battery too low, charge first"}` — `AT+WIFI=on` is
+  refused while discharging below `CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT`
+  (default 15%) or `CONFIG_CLIP_WIFI_MIN_BATTERY_MV` (default 3500 mV).
+  Charging / USB VBUS bypasses both floors; an AP that is already running is
+  reported with its credentials (no teardown).
+- `"WiFi busy"` — an `AT+WIFI=off` arrived while a bring-up was still queued
+  or in flight. The OFF was dropped (a newer ON supersedes it), not failed;
+  wait for the AP to come up, then turn it off.
+- `"WiFi start timed out"` — bring-up did not finish within 30 s (radio in a
+  bad state); the AP is not up. Failure/success is judged from the AP's
+  actual state at response time, so `ok:true` always means the SSID is
+  connectable.
 
 ---
 
@@ -1313,6 +1379,13 @@ or
 - USB automatically disables on cable unplug
 - USB automatically disables after 10 minutes without a USB cable connected
 
+**SD-card exclusivity:** while USB MSC is enabled the card is handed to the
+host and unmounted from the application. AT commands that need the card
+(`LIST`, `DOWNLOAD`, `DELETE`, `MARKS`, `FORMAT`, `FACTORY`, `PAIR=reset`,
+`LOG=info|debug`) are refused with
+`{"ok":false,"msg":"USB MSC active, disable USB first"}`. `AT+USB=off`
+remounts the card for the firmware.
+
 ---
 
 ##### AT+LOG - SD Log Backend Control
@@ -1353,17 +1426,22 @@ AT+LOG?
 |------|----------|
 | `off` | Deactivates the FS log backend; the SD card is then free to idle power-gate (lowest idle current) |
 | `info` | Ensures the SD is mounted, then logs at INF level and above to `/SD:/LOG` |
-| `debug` | Same as `info` but at DBG level (most verbose; for troubleshooting) |
+| `debug` | Same as `info` but at DBG level. **Debug image only**; production rejects it because DBG records are not compiled (`CONFIG_LOG_MAX_LEVEL=3`) |
 
 **Notes:**
 - Boot default follows the build: the **debug** image enables `info` at boot; the
   **production** image defaults to `off`. `AT+LOG` overrides this at runtime.
-- Enabling the backend (`info`/`debug`) keeps the SD mounted, which raises idle
+- The production image has UART disabled; use `AT+LOG=info` when you want logs
+  written to `/SD:/LOG` (128KB × 20, circular overwrite).
+- Enabling the backend (`info`) keeps the SD mounted, which raises idle
   current — use for diagnostics, then set `off` to restore low-power idle.
-- The query reports `info` whenever the backend is active (regardless of debug level).
+- The query reports the backend's active level: `off`, `info`, or `debug`
+  (`debug` can only be active on a debug image).
 
 **Error Cases:**
 - Missing or invalid mode (must be `off`, `info`, or `debug`)
+- `{"ok":false,"msg":"Debug log not available in this build"}` when
+  `AT+LOG=debug` is used on a production image (DBG compiled out)
 - SD card not available when enabling (`info`/`debug`)
 
 ---
@@ -1385,8 +1463,11 @@ AT+FORMAT
 ```
 
 **Error Cases:**
-- SD card not mounted
-- Cannot format while recording
+- `{"ok":false,"msg":"SD card not mounted"}`
+- `{"ok":false,"msg":"Recording or transfer active, stop first"}` — formatting
+  unmounts the card and runs `f_mkfs`; it is refused while a recording or a
+  file transfer still owns it. The FS log backend is stopped automatically
+  before the format.
 
 ---
 
@@ -1407,10 +1488,17 @@ AT+POWEROFF
 }
 ```
 
+**Error Cases:**
+- `{"ok":false,"msg":"USB power present — unplug USB first"}` — the PMIC refuses ship mode whenever VBUS is present, even with a full battery (the gate is VBUS, not the `charging` flag)
+
 **Side Effects:**
 - Displays power off animation
+- Stops any active recording (files flush first) and cancels transfers
 - Enters PMIC ship mode (requires physical button press to wake)
 - All unsaved data is preserved
+- If ship mode is rejected, the device recovers — status screen restored,
+  buttons re-enabled, `{"event":"poweroff","status":"failed"}` pushed; an
+  8-second failsafe reboot guards the whole sequence
 
 ---
 
@@ -1427,6 +1515,8 @@ AT+PAIR?
 ```
 AT+PAIR=reset
 ```
+
+**Error Case (guard):** `{"ok":false,"msg":"Recording or transfer active, stop first"}`
 
 **Response (Query, paired):**
 ```json
@@ -1478,6 +1568,95 @@ AT+PAIR=reset
 
 ---
 
+##### AT+GC - Cleanup Empty Sessions (on demand)
+
+Reclaims two classes of sessions and prunes empty REC/date/hour/minute
+directories:
+
+- **empty leftovers**: no audio bytes on disk (power-cut starts, husks with
+  a 0-byte chunk, stale-json phantoms — the on-disk walk is the authority).
+  Bookmarks never block reclamation: a mark is a position inside audio, and
+  without the audio it points at nothing
+- **fully synced sessions**: every file already transferred to a host
+  (`synced >= files` in session.json); the app deletes on merge, leftovers
+  are reclaimed here
+
+Never deletes a session with unsynced audio bytes, the current session, or
+a session being created. Refused while recording, transferring, USB MSC is
+enabled, or an OTA is in progress.
+
+**Request:**
+```
+AT+GC
+```
+
+**Response:**
+```json
+{ "ok": true, "data": { "removed": 5, "empty": 2, "synced": 3 } }
+```
+
+**Error Cases:**
+- `{"ok":false,"msg":"Recording active, stop first"}` / `"Transfer active, wait for it to finish"` / `"USB MSC active, eject first"` / `"OTA in progress"`
+- `"SD not mounted"` / `"Audio file open, retry in a moment"` / `"Cleanup failed"`
+
+---
+
+##### AT+SN - Product Serial Number
+
+Factory-written device serial number. Stored in the `sn` subtree of the
+LittleFS settings file — survives `AT+FACTORY` (which only resets config
+keys) and app reflash; **lost** if the settings file itself is wiped (MCUboot
+erase-settings, or the corrupt-settings watchdog wipe) — re-write it after
+such a recovery.
+
+The query also returns the device's BLE MAC (`bt_id_get` identity address) so
+a factory station can read the MAC, look up the SN bound to it in its own
+system, and write it back — one query drives the whole station flow.
+
+**Write (first time, SN empty):**
+```
+AT+SN=SC24A03100012
+```
+
+**Rewrite (SN already set):** append the device's own MAC as proof —
+ordinary users cannot produce it (phones do not show BLE MACs), while the
+station already holds it from its `AT+SN?` query. Colon separators optional,
+case-insensitive:
+```
+AT+SN=SC24A03100042,aabbccddeeff
+```
+
+**Query:**
+```
+AT+SN?
+```
+
+**Response (Set):**
+```json
+{ "ok": true, "data": { "sn": "SC24A03100012" } }
+```
+
+**Response (Get):**
+```json
+{ "ok": true, "data": { "mac": "AA:BB:CC:DD:EE:FF", "sn": "SC24A03100012" } }
+```
+`"sn":null` when not yet written; `mac` is empty before the BLE stack
+provides an identity.
+
+**Format:** SN is 1-32 chars, `[A-Za-z0-9._-]` only. A MAC supplied on a
+first write is verified too (catches a station addressing the wrong device).
+
+**Error Cases:**
+- `{"ok":false,"msg":"Missing argument (SN)"}` / `"Invalid SN"` / `"SN write failed"`
+- `"SN locked (rewrite needs ,<mac>)"` / `"MAC mismatch"` / `"MAC unavailable"`
+
+> The MAC proof guards against accidental overwrites, not adversaries —
+> anyone able to run `AT+SN?` can read the MAC. USB note: the USB
+> serial-number string descriptor is hwinfo chip-id derived (unique per
+> device) and is **not** the product SN.
+
+---
+
 ##### AT+FACTORY - Factory Reset
 
 Restore all settings to factory defaults.
@@ -1486,6 +1665,10 @@ Restore all settings to factory defaults.
 ```
 AT+FACTORY=confirm
 ```
+
+**Error Cases (guards):**
+- `{"ok":false,"msg":"Recording or transfer active, stop first"}` — refused while the card is held
+- `{"ok":false,"msg":"Factory reset failed (SD format) — recordings NOT erased"}` — settings were reset but the SD format failed; bonds are NOT cleared and the device does NOT reboot (previously this replied ok:true and continued)
 
 **Response:**
 ```json
@@ -1617,11 +1800,15 @@ File transfer uses a binary frame protocol over the File Data characteristic (`0
 | FILE_START | `0x10` | Device→App | Begin file transfer |
 | FILE_END | `0x11` | Device→App | End file (with full-file CRC32) |
 | TRANSFER_DONE | `0x12` | Device→App | All files complete |
+| STREAM_START | `0x13` | Device→App | Begin RTC live stream (BLE only) |
+| STREAM_DATA | `0x14` | Device→App | RTC live Opus frame (BLE only) |
+| STREAM_END | `0x15` | Device→App | End RTC live stream (BLE only) |
 
 **BLE-specific behavior:**
 - No per-frame CRC (BLE link layer guarantees reliable delivery)
 - No FILE_ACK (no retransmission needed)
 - No HEARTBEAT (BLE connection management handles keepalive)
+- `STREAM_*` frames exist on BLE only (RTC over WiFi/UDP is not supported)
 
 ### 4.3 Frame Formats
 
@@ -1687,6 +1874,56 @@ Signals that all files in the session have been transferred.
 | 1 | 1 | sid_len | Session ID length |
 | 2 | N | session_id | Session ID string (e.g., `"20260326120000"`) |
 | 2+N | 4 | file_count | Total files transferred (uint32 LE) |
+
+#### STREAM_START Frame
+
+Signals the beginning of an RTC live stream (sent once after `AT+DOWNLOAD`
+on an RTC session).
+
+```
+[type:1][sid_len:1][session_id:sid_len]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x13` |
+| 1 | 1 | sid_len | Session ID length |
+| 2 | N | session_id | Session ID string (e.g., `"20260326120000"`) |
+
+#### STREAM_DATA Frame
+
+One live Opus frame (20 ms of audio). Same layout as the DATA frame but on
+an independent sequence space. Frames are emitted in capture order; when the
+device is under BLE backpressure it **drops frames instead of blocking**.
+Note that `seq` advances only after a frame is successfully handed to the
+BLE link, so dropped frames do **not** consume sequence numbers: loss shows
+up as missing frames, not as `seq` jumps. Receivers should still treat a
+`seq` discontinuity as a protocol-drift indicator (defensive), not as a
+device-side loss count.
+
+```
+[type:1][seq_lo:1][seq_hi:1][len_lo:1][len_hi:1][payload:N]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x14` |
+| 1 | 2 | seq | Stream sequence number (uint16 LE, starts at 0) |
+| 3 | 2 | len | Payload length (uint16 LE) |
+| 5 | N | payload | One Opus packet |
+
+#### STREAM_END Frame
+
+Signals the end of the RTC stream.
+
+```
+[type:1][reason:1]
+```
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 1 | type | `0x15` |
+| 1 | 1 | reason | `0`=stopped by AT+STOP, `1`=start timeout, `2`=BLE disconnect |
 
 ### 4.4 Transfer Flow
 
@@ -1787,6 +2024,45 @@ When the device is actively recording, the client can start a transfer that cont
 - `clip-web.py` — background sync task when recording starts
 - Both use `SessionSync(continuous=True)`
 
+### 4.8 RTC Live Streaming
+
+RTC mode streams microphone audio live over BLE without writing anything to
+the SD card. It favors low latency over completeness: the device keeps only a
+small bounded queue of encoded frames and drops the oldest ones when the
+consumer is absent or too slow.
+
+**Preconditions:** BLE connected **and** the File Data characteristic CCCD
+subscribed (notify enabled) before `AT+START=RTC`.
+
+**Flow:**
+1. Client connects and subscribes to File Data notifications
+2. `AT+START=RTC` → response carries the session id, mic pipeline starts
+   (device state broadcast: `"STREAMING"`). Frames are encoded immediately
+   but only buffered (bounded, drop-oldest).
+3. `AT+DOWNLOAD=<session_id>` → device **discards** whatever was queued
+   before this point (RTC delivers "now" — pre-DOWNLOAD audio is never
+   sent), sends `STREAM_START`, then `STREAM_DATA` frames in real time
+4. `AT+STOP` → `STREAM_END` (reason 0), session torn down
+
+**Pause/resume:** `AT+PAUSE` discards all buffered data and stops emission
+(the mic pipeline keeps running); `AT+RESUME` continues from the current
+frame. `AT+MARK` is rejected in RTC mode.
+
+**Automatic teardown:** the session aborts itself (event `rtc`/`timeout`) if
+`AT+DOWNLOAD` does not arrive within 5 s of `AT+START=RTC`, or immediately on
+BLE disconnect.
+
+**Notes:**
+- RTC sessions never appear in `AT+LIST` (nothing is stored)
+- Re-sending `AT+DOWNLOAD=<rtc_session>` while the stream runs is idempotent
+  (answered ok, stream continues) — same rule as file transfer
+- The stream shares the File Data characteristic with file transfer; the two
+  are mutually exclusive (a file download cannot run while streaming)
+- Backpressure policy: dropped frames are counted, never retried. Because
+  `seq` only advances on successful send, frame loss appears as missing
+  frames (sequence discontinuities should not occur under current firmware
+  and the reliable BLE link; treat any as protocol drift)
+
 ## 5. State Machines
 
 ### 5.1 Device State Machine
@@ -1801,7 +2077,7 @@ When the device is actively recording, the client can start a transfer that cont
 │  └───────┬──────┘                                          │
 │          │ boot complete                                    │
 │          ▼                                                  │
-│  ┌──────────────┐  AT+START/Long press  ┌──────────┐       │
+│  ┌──────────────┐  AT+START/button RTC   ┌──────────┐       │
 │  │     IDLE     │<────────────────────────│RECORDING │       │
 │  └──┬───┬──────┘                        └─────┬────┘       │
 │     │   │                                      │            │
@@ -1839,6 +2115,9 @@ When the device is actively recording, the client can start a transfer that cont
 - **WIFI_SYNC**: WiFi AP active, file transfer available
 - **PAUSED**: Recording paused
 - **ERROR**: Error state, requires intervention
+- **OTA**: Defined for firmware-upload flows but never entered during an upload
+  (DFU activity is tracked by a separate flag); button input is ignored while
+  an upload runs
 
 **Constraints:**
 - Cannot start WiFi while recording (RECORDING → WIFI_SYNC is invalid)
@@ -1852,7 +2131,7 @@ When the device is actively recording, the client can start a transfer that cont
 │                    Recording State                       │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│   ┌──────────┐   Long press (1s) / AT+START   ┌────────┐│
+│   ┌──────────┐   Button hold-release / AT+START        ┌────────┐│
 │   │   IDLE   │ ─────────────────────────────> │RECORDING│
 │   └──────────┘                                  └────┬───┘
 │        ▲                                             │   │
@@ -1865,7 +2144,7 @@ When the device is actively recording, the client can start a transfer that cont
 ```
 
 **Transitions:**
-- IDLE → RECORDING: Long button press OR `AT+START`
+- IDLE → RECORDING: `AT+START` (SD or RTC) or a button hold-release (SD only — RTC is AT-only)
 - RECORDING → IDLE: Long button press OR `AT+STOP`
 
 **Recording-Specific Actions:**
@@ -1971,9 +2250,9 @@ Stored in each session directory, contains session information, sync progress, a
   "duration": 600,
   "files": 30,
   "synced": 15,
-  "channels": 2,
+  "channels": 1,
   "sample_rate": 16000,
-  "mode": "normal"
+  "mode": "mono"
 }
 ```
 
@@ -1982,9 +2261,12 @@ Stored in each session directory, contains session information, sync progress, a
 - `duration`: Recording length in seconds (0 while recording)
 - `files`: Total number of audio files in session (0 while recording)
 - `synced`: Number of files that have been successfully transferred
-- `channels`: Audio channels (1=mono, 2=stereo)
+- `channels`: Audio channels (currently 1 for both presets; 2 is reserved)
 - `sample_rate`: Sample rate in Hz (e.g., 16000)
-- `mode`: Recording mode ("normal" or "enhanced")
+- `mode`: Audio-layout string written by the recorder (`"mono"` currently;
+  `"stereo"` reserved). It does **not** identify the AT+MODE preset — use
+  `channels` for decoder setup. (Historical docs said "normal"/"enhanced"; the
+  current firmware writes the audio mode string instead.)
 
 **Purpose:**
 - Track transfer progress for resume functionality
@@ -1995,7 +2277,7 @@ Stored in each session directory, contains session information, sync progress, a
 **Example Usage:**
 ```
 # Session has 30 files, 15 have been transferred
-# Audio is normal mode (stereo, 2 channels) at 16kHz
+# Audio is mono (1 channel) at 16kHz for both presets; the mode field is "mono"
 # Next transfer should start from file 0016.opus
 AT+DOWNLOAD=20240203100000:0016.opus
 ```
@@ -2093,7 +2375,8 @@ Sent when recording state changes (start, stop, pause, resume). Uses `"event":"s
 {"event":"state","state":"RECORDING","session":"20240203100000"}
 ```
 
-**Trigger:** Recording starts (AT+START or button long press)
+**Trigger:** Persistent recording starts with `AT+START` or a button
+hold-release; RTC streaming starts with `AT+START=rtc` (AT only).
 
 ```json
 {"event":"state","state":"IDLE","session":"20240203100000","duration":600}
@@ -2151,6 +2434,9 @@ Other state-change events use the generic two-field form
 | `wifi` | `on` / `off` | WiFi AP started / stopped (manual or auto-off) |
 | `usb` | `on` / `off` | USB CDC enabled / disabled (cable, 10-min auto-off, or `AT+USB`) |
 | `storage` | `full` | SD card crosses the storage-full threshold; recording is refused |
+| `rtc` | `timeout` | RTC session aborted — no `AT+DOWNLOAD` within the start timeout (Section 4.8) |
+| `battery` | `low` | Raw SoC crossed 3% (or 3.45V): active recording stopped gracefully, new recordings refused until charge/recovery |
+| `poweroff` | `failed` | Power-off rejected (ship mode refused); device recovered |
 
 This is the complete list of `ble_notify_event` sources.
 
@@ -2204,12 +2490,12 @@ These message strings appear across commands (exact text from the handlers):
 | `Already recording or invalid state` | `AT+START` while recording |
 | `No active session` / `Not recording` | `AT+STOP`/`AT+MARK`/`AT+PAUSE` with nothing running |
 | `Not paused` | `AT+RESUME` while not paused |
-| `Transfer already in progress` | `AT+DOWNLOAD` while one is active |
+| `Transfer already in progress` | `AT+DOWNLOAD` for a different session/transport while one is active — answered immediately; re-issuing the SAME session+transport answers ok and continues |
 | `No active transfer` | `AT+CANCEL` with nothing transferring |
 | `Mode must be normal or enhanced` | Bad `AT+MODE` value |
 | `Brightness must be 0-255` | `AT+BRIGHTNESS` out of range |
-| `Auto-delete must be 0-30 days or off` | Bad `AT+AUTODEL` value |
 | `Log mode must be off, info or debug` | Bad `AT+LOG` value |
+| `Debug log not available in this build` | `AT+LOG=debug` on production (DBG not compiled; use `info` or the debug image) |
 | `Cannot format while recording` | `AT+FORMAT` while recording |
 | `Recording in progress, stop first` | `AT+USB`/`AT+WIFI` blocked by active recording |
 | `Cannot start WiFi in current state` | `AT+WIFI=on` while recording/transferring |
@@ -2363,7 +2649,6 @@ To prevent BLE congestion:
 | AT+PAUSE | EXEC | Pause recording | 3.3.5 |
 | AT+RESUME | EXEC | Resume recording | 3.3.5 |
 | AT+CANCEL | EXEC | Cancel transfer | 3.3.5 |
-| AT+AUTODEL | GET/SET | Auto-delete policy | 3.3.6 |
 | AT+FORMAT | EXEC | Format SD card | 3.3.7 |
 | AT+POWEROFF | EXEC | Power off device | 3.3.7 |
 | AT+WIFI | EXEC/GET/SET | WiFi AP control | 3.3.7 |
@@ -2467,7 +2752,7 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | Parameter | Value |
 |-----------|-------|
 | SSID | `ClipAP_XXXX` (last 4 hex digits of chip ID) |
-| Password | `12345678` |
+| Password | Per-device random (8 chars, generated at first boot) |
 | IP Address | `192.168.4.1` |
 | UDP Port | `8089` |
 | Protocol | UDP |
@@ -2483,6 +2768,9 @@ The WiFi UDP transport provides high-speed local file transfer when the device i
 | TRANSFER_DONE | `0x12` | Device→Client | All files complete |
 | AT_RESP | `0x20` | Device→Client | AT command response (JSON) |
 | HEARTBEAT | `0x30` | Client→Device | Keepalive (client-originated) |
+
+> RTC live-stream frames (`0x13`–`0x15`, Section 4.3) are BLE-only and are
+> not defined for the UDP transport.
 
 ### D.3 BLE vs WiFi UDP Comparison
 

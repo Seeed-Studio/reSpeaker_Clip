@@ -25,7 +25,7 @@
 #include "storage.h"
 #include "haptic.h"
 
-LOG_MODULE_REGISTER(display, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(display, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* =============================================================================
  * Display Configuration
@@ -1664,6 +1664,12 @@ void display_clear_untransferred(void)
 void display_check_untransferred(void)
 {
 	bool had = g_has_untransferred;
+
+	/* Idle power-gate: an unmounted card answers nothing — keep the
+	 * previous value instead of flipping the indicator off. */
+	if (!storage_is_mounted()) {
+		return;
+	}
 	g_has_untransferred = storage_has_unsynced_sessions();
 	if (had != g_has_untransferred && g_ui_state == UI_STATE_STATUS_BAR) {
 		display_post_event(UI_EVENT_STATUS_REFRESH);
@@ -1675,8 +1681,10 @@ void display_set_transferring(bool transferring)
 	g_status.transferring = transferring;
 
 	if (!transferring) {
-		/* Transfer finished - skip unsynced check for now (debug) */
-		g_has_untransferred = false;
+		/* Transfer finished: re-read the truth from the card (it was
+		 * just mounted for the transfer — safe here). Other sessions
+		 * may still be unsynced; a blind clear lied about that. */
+		g_has_untransferred = storage_has_unsynced_sessions();
 	}
 
 	if (g_ui_state == UI_STATE_STATUS_BAR) {

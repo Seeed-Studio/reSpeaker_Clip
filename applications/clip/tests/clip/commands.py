@@ -282,37 +282,7 @@ class ClipCommands:
         await self._send_and_check(f"AT+MODE={mode}")
         return True
 
-    async def get_auto_delete(self) -> bool:
-        """
-        Get auto-delete enabled state.
-
-        Returns:
-            True if auto-delete is enabled (non-negative days)
-        """
-        response = await self._send_and_check("AT+AUTODEL?")
-        # Firmware returns {"ok":true,"data":{"value":"off"} or {"value":N}}
-        data = response.get('data', {})
-        value = data.get('value', response.get('value', "off"))
-        # "off" means disabled, any number means enabled
-        return value != "off" and int(value) >= 0
-
-    async def set_auto_delete(self, days: int) -> bool:
-        """
-        Set auto-delete policy.
-
-        Args:
-            days: Number of days (0-30), or -1 to disable
-
-        Returns:
-            True if successful
-        """
-        if days < 0:
-            await self._send_and_check("AT+AUTODEL=off")
-        else:
-            await self._send_and_check(f"AT+AUTODEL={days}")
-        return True
-
-    # ==================== Recording Commands ====================
+    # ==================== Recording Commands    # ==================== Recording Commands ====================
 
     async def start_recording(self, mode: str = MODE_NORMAL) -> str:
         """
@@ -787,7 +757,6 @@ class ClipCommands:
         """
         return {
             'mode': await self.get_mode(),
-            'auto_delete': await self.get_auto_delete(),
             'brightness': await self.get_brightness(),
         }
 
@@ -800,10 +769,9 @@ class ClipCommands:
             ignore_errors: If True, continue on individual errors (useful for restore)
 
         Note:
-            - auto_delete: Use boolean (True/False) to enable/disable, or integer for days
-            - Unknown keys (from older SDK saves) are ignored
+            - Unknown keys (from older SDK saves, e.g. auto_delete) are ignored
         """
-        order = ['mode', 'auto_delete', 'brightness', 'name']
+        order = ['mode', 'brightness', 'name']
 
         for key in order:
             if key not in config:
@@ -813,13 +781,6 @@ class ClipCommands:
             try:
                 if key == 'mode':
                     await self.set_mode(value)
-                elif key == 'auto_delete':
-                    # value can be boolean (True=7 days, False=off) or integer (days)
-                    if isinstance(value, bool):
-                        days = 7 if value else -1
-                        await self.set_auto_delete(days)
-                    else:
-                        await self.set_auto_delete(int(value))
                 elif key == 'brightness':
                     await self.set_brightness(value)
                 elif key == 'name':

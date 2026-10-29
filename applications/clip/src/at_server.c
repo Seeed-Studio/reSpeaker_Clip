@@ -14,7 +14,7 @@
 #include "transport_udp.h"
 #include "usb_cdc.h"
 
-LOG_MODULE_REGISTER(at_server, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(at_server, LOG_LEVEL_WRN); /* chatty plumbing logs */
 
 /* Command queue item */
 struct at_queue_item {
@@ -215,6 +215,7 @@ static void process_command(struct at_queue_item *item)
         } else { \
             transport_send_to(item->transport_type, (uint8_t *)at_ctx.response_buffer, resp_len); \
         } \
+        LOG_WRN("AT[%d] %s -> %s", item->transport_type, cmd_name, at_ctx.response_buffer); \
     } while(0)
 
     /* Clear response buffer */
