@@ -93,16 +93,16 @@ bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_
     /* Convert to seconds */
     uint32_t elapsed_sec = (uint32_t)(elapsed_ms / 1000);
 
-    /* Decompose in WIDE types. The old per-unit carry loops incremented
-     * uint8_t min/hour — min wrapped mod 256, silently discarding every
-     * 256 minutes (4h16m) of elapsed time. More than 4h16m after the
-     * last rebase (recording stop / AT+TIME) the computed clock REPLAYED
-     * A PAST TIME — deterministically re-minting a previous session's id
-     * (storage tolerates the -EEXIST collision) and writing the new
-     * recording into the old session's directory. This was the
-     * "overnight, the recording timestamp is yesterday's" bug. */
-    uint32_t day_sec = (uint32_t)g_ctx.time.sec + elapsed_sec;
-    uint32_t add_days = day_sec / 86400U;
+    /* Start from the FULL base time-of-day, not just the seconds field.
+     * Adding elapsed only to g_ctx.time.sec (and then deriving hour/min from
+     * the total) silently dropped the stored hour/min. After every
+     * config_sync_time() rebase the next session id restarted near 00:0x,
+     * and two recordings seconds apart could differ by many hours. */
+    uint64_t day_sec = (uint64_t)g_ctx.time.hour * 3600U
+                     + (uint64_t)g_ctx.time.min * 60U
+                     + (uint64_t)g_ctx.time.sec
+                     + elapsed_sec;
+    uint32_t add_days = (uint32_t)(day_sec / 86400U);
     day_sec %= 86400U;
 
     uint16_t year = g_ctx.time.year;
@@ -111,7 +111,7 @@ bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_
 
     uint8_t hour = (uint8_t)(day_sec / 3600U);
     uint8_t min = (uint8_t)((day_sec % 3600U) / 60U);
-    sec = day_sec % 60U;
+    sec = (uint32_t)(day_sec % 60U);
 
     /* Day overflow — recompute February for each year rollover */
     uint8_t days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
