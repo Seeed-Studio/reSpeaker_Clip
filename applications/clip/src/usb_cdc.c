@@ -209,7 +209,18 @@ int usb_cdc_init(void)
 	/* Setup auto-disable work */
 	k_work_init_delayable(&usb_timeout_work, usb_timeout_handler);
 
-	/* USB starts disabled; use AT+USB=on to enable */
+	/* Custom (usbauto): enable USB at boot so the SD card mounts over
+	 * MSC as soon as the cable is plugged in, without needing the BLE
+	 * AT+USB=on command first. usb_cdc_enable() still refuses while
+	 * recording/transferring, and USB still auto-disables on cable
+	 * removal / VBUS timeout. A failure here (e.g. recording already
+	 * in progress) must not fail init, so only log it.
+	 */
+	err = usb_cdc_enable();
+	if (err) {
+		LOG_WRN("USB auto-enable at boot failed: %d", err);
+	}
+
 	return 0;
 }
 
