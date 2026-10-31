@@ -801,6 +801,11 @@ static enum clip_event_result execute_transition(enum clip_event event,
             display_post_error("WiFi Fail");
             return CLIP_EVENT_ERROR;
         }
+        /* Redraw so the corner WiFi indicator appears immediately,
+         * also in event-driven UI states (e.g. REC_DOT) that have no
+         * periodic render. In UI_STATE_OFF this just re-renders the
+         * blank screen, so the null2 blanking behaviour is kept. */
+        display_post_event(UI_EVENT_STATUS_REFRESH);
         return CLIP_EVENT_OK;
     }
 
@@ -811,6 +816,10 @@ static enum clip_event_result execute_transition(enum clip_event event,
             LOG_ERR("wifi_off failed: %d", err);
             return CLIP_EVENT_ERROR;
         }
+        /* Same redraw request as WIFI_ON (the auto-off timeout also
+         * funnels through this event, so the indicator disappears
+         * when the AP stops on its own). */
+        display_post_event(UI_EVENT_STATUS_REFRESH);
         return CLIP_EVENT_OK;
     }
 
