@@ -252,6 +252,15 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
         struct fs_dirent entry;
         uint32_t file_num = (uint32_t)atoi(filename);
 
+        /* Never read the chunk the recorder is currently writing: its
+         * size/contents are still changing. Closed chunks of the live
+         * session are fine. The host can retry once the chunk rolls over. */
+        if (storage_file_is_writing(session_id, filename)) {
+            LOG_WRN("xfer: %s is being written, refusing", filename);
+            err = -EBUSY;
+            goto fail;
+        }
+
         err = build_transfer_path(filepath, sizeof(filepath), session_id,
                                   file_num > 0 ? file_num : 1);
         if (err != 0) {
@@ -946,6 +955,14 @@ static int transfer_next_file(void)
     /* If specific filename is set, use it directly */
     if (current_transfer.current_file[0] != '\0') {
         uint32_t file_num = (uint32_t)atoi(current_transfer.current_file);
+        /* Defense in depth (transfer_start already rejects this): never
+         * open the chunk currently being written by the recorder. */
+        if (storage_file_is_writing(current_transfer.session_id,
+                                    current_transfer.current_file)) {
+            LOG_WRN("xfer: %s is being written, refusing",
+                    current_transfer.current_file);
+            return -EBUSY;
+        }
         ret = build_transfer_path(filepath, sizeof(filepath),
                                   current_transfer.session_id,
                                   file_num > 0 ? file_num : 1);

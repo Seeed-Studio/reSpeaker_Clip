@@ -46,15 +46,27 @@ LOG_MODULE_REGISTER(clip_event, LOG_LEVEL_WRN); /* chatty event-flow logs */
  * transition_table[current_state][event] = next_state
  *
  *                  START  STOP   PAUSE  RESUME MARK   WIFI_ON WIFI_OFF POFF_S POFF_E STATUS USB   OTA_S OTA_D
+ *
+ * WiFi during recording (0.1.4-null3): WIFI_ON / WIFI_OFF are TRANS_SAME in
+ * RECORDING (and WIFI_OFF also in PAUSED / IDLE), so the AP can be started
+ * and stopped without disturbing an ongoing recording. WiFi is NOT a main
+ * state in that case — wifi_ap_is_running() is the source of truth and the
+ * transfer thread already runs independently of the state machine. The
+ * transfer layer only ever reads closed chunk files (continuous mode waits
+ * on storage_file_is_writing(); single-file requests for the chunk being
+ * written are rejected with -EBUSY), and FatFs is built reentrant
+ * (CONFIG_FS_FATFS_REENTRANT=y), so SD reads serialize safely against the
+ * recording write path. Entering WiFi from IDLE/PAUSED still moves to
+ * WIFI_SYNC (legacy behavior, recording stays blocked there).
  */
 static const uint8_t transition_table[CLIP_STATE_OTA + 1][CLIP_EVENT_COUNT] = {
     /* UNINITIALIZED */ { 0, 0, 0, 0, 0, 0, 0, TRANS_SAME, TRANS_SAME, 0,    0,    0,    0 },
     /* IDLE          */ { CLIP_STATE_RECORDING, 0, 0, 0, 0,
-                         CLIP_STATE_WIFI_SYNC, 0,
+                         CLIP_STATE_WIFI_SYNC, TRANS_SAME,
                          TRANS_SAME, TRANS_SAME, TRANS_SAME,
                          TRANS_SAME, TRANS_SAME, TRANS_SAME },
     /* RECORDING     */ { 0, CLIP_STATE_IDLE, CLIP_STATE_PAUSED, 0,
-                         TRANS_SAME, 0, 0,
+                         TRANS_SAME, TRANS_SAME, TRANS_SAME,
                          TRANS_SAME, TRANS_SAME, 0,
                          TRANS_SAME, TRANS_SAME, TRANS_SAME },
     /* TRANSMITTING  */ { 0, 0, 0, 0, 0,
@@ -67,7 +79,7 @@ static const uint8_t transition_table[CLIP_STATE_OTA + 1][CLIP_EVENT_COUNT] = {
                          TRANS_SAME, TRANS_SAME, TRANS_SAME },
     /* PAUSED        */ { 0, CLIP_STATE_IDLE, 0, CLIP_STATE_RECORDING,
                          TRANS_SAME,
-                         CLIP_STATE_WIFI_SYNC, 0,
+                         CLIP_STATE_WIFI_SYNC, TRANS_SAME,
                          TRANS_SAME, TRANS_SAME, 0,
                          TRANS_SAME, TRANS_SAME, TRANS_SAME },
     /* ERROR         */ { CLIP_STATE_IDLE, 0, 0, 0, 0,
