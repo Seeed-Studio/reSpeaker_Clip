@@ -1893,7 +1893,7 @@ static void boot_anim_thread_fn(void *p1, void *p2, void *p3)
 		return;
 	}
 
-	const char *text = "seeed studio";
+	const char *text = "NULL";
 	int num_chars = strlen(text);
 	int char_adv = 7;
 	int char_h = 16;
@@ -1951,6 +1951,29 @@ static void boot_anim_thread_fn(void *p1, void *p2, void *p3)
 
 	/* Brief pause after full text */
 	k_msleep(200);
+
+	/* Show firmware version briefly */
+	{
+		char ver[OLED_WIDTH / 7 + 1];
+		int vlen = strlen(CLIP_VERSION);
+
+		if (vlen > OLED_WIDTH / 7) {
+			vlen = OLED_WIDTH / 7;
+		}
+		memcpy(ver, CLIP_VERSION, vlen);
+		ver[vlen] = '\0';
+
+		int vx = (OLED_WIDTH - vlen * char_adv) / 2;
+		int vy = (OLED_HEIGHT - char_h) / 2;
+
+		clear_screen(display_buffer);
+		for (int i = 0; i < vlen; i++) {
+			draw_char_8x16_boot(display_buffer, ver[i],
+					    vx + i * char_adv, vy);
+		}
+		flush_display();
+		k_msleep(1500);
+	}
 
 	/* Start normal UI */
 	display_start_ui();
