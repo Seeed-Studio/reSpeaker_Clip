@@ -43,6 +43,7 @@ LOG_MODULE_REGISTER(display, CONFIG_CLIP_LOG_LEVEL);
 #define DISPLAY_ANIMATION_PERIOD  K_MSEC(50)
 #define DISPLAY_STATUS_TIMEOUT_MS       CONFIG_CLIP_DISPLAY_STATUS_TIMEOUT_MS
 #define DISPLAY_REC_WAVE_TIMEOUT_MS 5000
+#define DISPLAY_REC_TIMEOUT_MS          CONFIG_CLIP_DISPLAY_REC_TIMEOUT_MS
 #define DISPLAY_PAIRING_GUIDE_TIMEOUT_MS CONFIG_CLIP_DISPLAY_PAIRING_TIMEOUT_MS
 
 /* =============================================================================
@@ -148,6 +149,7 @@ static bool g_has_untransferred = false;
 /* REC_DOT animation tracking */
 static bool g_dot_animation_played = false;
 static int64_t g_rec_wave_start_ms = 0;
+static int64_t g_rec_dot_start_ms = 0;
 static int64_t g_status_bar_start_ms = 0;
 
 /* OTA progress (0-100) */
@@ -1061,6 +1063,13 @@ static void set_ui_state(enum ui_state new_state)
 			g_rec_wave_start_ms = k_uptime_get();
 		}
 
+		/* Start the recording-dot blanking timeout on entry */
+		if (new_state == UI_STATE_REC_DOT) {
+			g_rec_dot_start_ms = k_uptime_get();
+			k_work_schedule(&display_timeout_work,
+					K_MSEC(DISPLAY_REC_TIMEOUT_MS));
+		}
+
 		/* Initialize status bar timeout on entry */
 		if (new_state == UI_STATE_STATUS_BAR) {
 			g_status_bar_start_ms = k_uptime_get();
@@ -1214,6 +1223,19 @@ static void handle_event(enum ui_event event)
 						>= DISPLAY_REC_WAVE_TIMEOUT_MS) {
 					set_ui_state(UI_STATE_REC_DOT);
 				}
+		} else if (g_ui_state == UI_STATE_REC_DOT) {
+				/* Blank the display to save power once the
+				 * stable recording dot has been shown for
+				 * the configured timeout. Recording
+				 * continues; any later state-changing UI
+				 * event resumes the display in
+				 * set_ui_state(). Same stale-event guard
+				 * as the REC_WAVE branch above.
+				 */
+				if (k_uptime_get() - g_rec_dot_start_ms
+						>= DISPLAY_REC_TIMEOUT_MS) {
+					set_ui_state(UI_STATE_OFF);
+				}
 		} else if (g_ui_state == UI_STATE_PAIRING_GUIDE) {
 			set_ui_state(UI_STATE_OFF);
 		} else if (g_ui_state == UI_STATE_ERROR) {
@@ -1356,7 +1378,8 @@ static void render_current_state(void)
 			if (g_recording) {
 				set_ui_state(UI_STATE_REC_DOT);
 				g_dot_animation_played = true;
-				k_work_cancel_delayable(&display_timeout_work);
+				/* Keep the timeout work armed: set_ui_state()
+				 * scheduled the REC_DOT blanking timeout. */
 				/* Render stable dot frame since we won't re-enter render_current_state */
 				render_dot_circle(display_buffer, DOT_CIRCLE_ANIM_FRAMES - 1);
 				flush_display();

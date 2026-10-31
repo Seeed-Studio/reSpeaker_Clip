@@ -80,6 +80,8 @@ static int16_t processed_buffer[AUDIO_OPUS_FRAME_SIZE];
 static bool recording_active = false;
 static enum audio_mode current_mode = AUDIO_MODE_MERGE;
 static int opus_channels = 1;
+/* True while this recording holds the (reference-counted) CPU boost */
+static bool rec_boost_held = false;
 
 /* Semaphore for blocking audio thread when not recording */
 static K_SEM_DEFINE(audio_start_sem, 0, 1);
@@ -474,6 +476,17 @@ static void audio_wait_haptic_quiet(void)
 	}
 }
 
+/* Release the recording CPU boost if this recording acquired it.
+ * The boost is reference-counted (shared with the transfer path), so
+ * a Normal-mode recording that never acquired it must not release. */
+static void rec_boost_release(void)
+{
+    if (rec_boost_held) {
+        rec_boost_held = false;
+        clip_cpu_boost_release();
+    }
+}
+
 /* Internal recording initialization */
 static int audio_start_recording_internal(enum audio_mode mode)
 {
@@ -505,15 +518,21 @@ static int audio_start_recording_internal(enum audio_mode mode)
     /* Boost CPU to 128MHz for encoding, before mic power-on.
      * The 10ms mic stabilization delay also serves as CPU frequency
      * settling time.
-     */
-    LOG_INF("Boosting CPU for recording");
-    clip_cpu_boost_acquire();
+     *
+     * Enhanced mode only: its DSP + encode chain (AUDIO_MODE_MERGE
+     * processing) needs the headroom. Normal mode encodes comfortably
+     * at the 64MHz base clock, so skip the boost to save power. */
+    rec_boost_held = (c->config.mode == MODE_ENHANCED);
+    if (rec_boost_held) {
+        LOG_INF("Boosting CPU for recording");
+        clip_cpu_boost_acquire();
+    }
 
     /* Power on microphone with delay for stabilization */
     ret = mic_power_on();
     if (ret < 0) {
         LOG_ERR("Failed to power on microphone: %d", ret);
-        clip_cpu_boost_release();
+        rec_boost_release();
         return ret;
     }
 
@@ -522,7 +541,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
     if (ret < 0) {
         LOG_ERR("Failed to init Opus encoder: %d", ret);
         mic_power_off();
-        clip_cpu_boost_release();
+        rec_boost_release();
         return ret;
     }
 
@@ -549,7 +568,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
     if (ret < 0) {
         LOG_ERR("Failed to start DMIC: %d", ret);
         mic_power_off();
-        clip_cpu_boost_release();
+        rec_boost_release();
         return ret;
     }
 
@@ -634,7 +653,7 @@ static int audio_stop_recording_internal(void)
     mic_power_off();
 
     LOG_INF("Recording stopped, releasing CPU boost");
-    clip_cpu_boost_release();
+    rec_boost_release();
 
     /* Note: Keep encoder and DSP initialized for next recording
      * They will be reinitialized only if parameters change */

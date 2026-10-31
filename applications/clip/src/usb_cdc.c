@@ -50,7 +50,7 @@ static bool usb_active;
 static bool usb_vbus_present;
 
 /* Auto-disable timeout when USB enabled but no cable connected */
-#define USB_NO_VBUS_TIMEOUT_MS (10 * 60 * 1000) /* 10 minutes */
+#define USB_NO_VBUS_TIMEOUT_MS (2 * 60 * 1000) /* 2 minutes */
 static struct k_work_delayable usb_timeout_work;
 
 static void usb_timeout_handler(struct k_work *work)

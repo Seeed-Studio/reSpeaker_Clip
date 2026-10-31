@@ -78,13 +78,14 @@ static const struct bt_le_adv_param adv_param_fast =
     BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN, BT_GAP_ADV_FAST_INT_MIN_1,
                          BT_GAP_ADV_FAST_INT_MAX_1, NULL);
 
-/* "Slow" advertising: ~100-150ms — a middle ground. Connection-friendly
- * (a scanning phone connects within ~1 adv interval) but ~2x slower than
- * the 30-60ms fast bug. 1-2s was too slow to connect reliably. */
+/* "Slow" advertising: 1000-1200ms (BT_GAP_ADV_SLOW) once the fast
+ * window expires. Much lower average radio/CPU draw than the previous
+ * 100-150ms middle ground; a bonded phone reconnects within ~1 adv
+ * interval. */
 static const struct bt_le_adv_param adv_param_slow =
     BT_LE_ADV_PARAM_INIT(BT_LE_ADV_OPT_CONN,
-                         BT_GAP_ADV_FAST_INT_MIN_2,
-                         BT_GAP_ADV_FAST_INT_MAX_2, NULL);
+                         BT_GAP_ADV_SLOW_INT_MIN,
+                         BT_GAP_ADV_SLOW_INT_MAX, NULL);
 
 #define ADV_FAST_TIMEOUT_MS  CONFIG_CLIP_ADV_FAST_TIMEOUT_MS   /* Switch to slow advertising after N ms */
 #define BLE_INACTIVITY_TIMEOUT_MS (5 * 60 * 1000)  /* 5 minutes */
@@ -200,20 +201,40 @@ static void le_param_updated(struct bt_conn *conn, uint16_t interval,
 /* Reject connection parameters that are too aggressive */
 static bool le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
 {
+    bool clamped = false;
+
     /* Require a coexistence-friendly minimum so WiFi AP bring-up (~5-8s,
      * monopolizes the radio) can't supervise the link out. */
     if (param->timeout < 800) {
-        LOG_WRN("Clamping conn params: timeout %u", param->timeout);
         param->timeout = 800;
-        param->interval_min = 30;
-        param->interval_max = 50;
-        param->latency = 0;
-        return true; /* accept the clamped counter-proposal (false = reject) */
+        clamped = true;
     }
 
-    LOG_DBG("accept: int=%u-%u lat=%u to=%u",
-            param->interval_min, param->interval_max, param->latency, param->timeout);
-    return true;
+    /* Power-friendly bounds: accept latency up to 4 and intervals up
+     * to 100 (125ms), cap anything beyond. With the 8s timeout floor
+     * above, the worst-case silent period (1 + 4) * 125ms stays far
+     * below the supervision timeout, so WiFi bring-up is still safe. */
+    if (param->latency > 4) {
+        param->latency = 4;
+        clamped = true;
+    }
+    if (param->interval_max > 100) {
+        param->interval_max = 100;
+        clamped = true;
+    }
+    if (param->interval_min > param->interval_max) {
+        param->interval_min = param->interval_max;
+    }
+
+    if (clamped) {
+        LOG_WRN("Clamping conn params: int=%u-%u lat=%u to=%u",
+                param->interval_min, param->interval_max,
+                param->latency, param->timeout);
+    } else {
+        LOG_DBG("accept: int=%u-%u lat=%u to=%u",
+                param->interval_min, param->interval_max, param->latency, param->timeout);
+    }
+    return true; /* accept (possibly clamped) counter-proposal (false = reject) */
 }
 
 /* Security timeout handler */
