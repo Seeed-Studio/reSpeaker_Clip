@@ -43,6 +43,7 @@ LOG_MODULE_REGISTER(display, CONFIG_CLIP_LOG_LEVEL);
 #define DISPLAY_ANIMATION_PERIOD  K_MSEC(50)
 #define DISPLAY_STATUS_TIMEOUT_MS       CONFIG_CLIP_DISPLAY_STATUS_TIMEOUT_MS
 #define DISPLAY_REC_WAVE_TIMEOUT_MS 5000
+#define DISPLAY_REC_TIMEOUT_MS          CONFIG_CLIP_DISPLAY_REC_TIMEOUT_MS
 #define DISPLAY_PAIRING_GUIDE_TIMEOUT_MS CONFIG_CLIP_DISPLAY_PAIRING_TIMEOUT_MS
 
 /* =============================================================================
@@ -148,6 +149,7 @@ static bool g_has_untransferred = false;
 /* REC_DOT animation tracking */
 static bool g_dot_animation_played = false;
 static int64_t g_rec_wave_start_ms = 0;
+static int64_t g_rec_dot_start_ms = 0;
 static int64_t g_status_bar_start_ms = 0;
 
 /* OTA progress (0-100) */
@@ -326,10 +328,59 @@ static void draw_fast_animation(uint8_t *buf)
 	}
 }
 
+/* =============================================================================
+ * WiFi Activity Indicator (custom, 0.1.4-null4)
+ * =============================================================================
+ * Small WiFi fan glyph in the top-right corner, drawn as an overlay on the
+ * main UI states while the WiFi AP is running. The corner slot (x 73..86,
+ * y 2..9) is clear of every overlay host: the recording wave bars stay at
+ * y >= 12 and end at x <= 74, the recording dot (radius <= 8) and the mark /
+ * pause art are all centered, and the status bar art starts at y = 12.
+ * The AP state is read live at render time, so the indicator follows WiFi
+ * on/off on each state's existing redraw cadence (100 ms in REC_WAVE, 1 s
+ * in STATUS_BAR, and UI_EVENT_STATUS_REFRESH — posted by the WiFi on/off
+ * event handlers — in the event-driven states such as REC_DOT). When the
+ * display is blanked (UI_STATE_OFF) nothing draws it: it simply reappears
+ * on the next render after wake.
+ */
+
+#define WIFI_IND_WIDTH  14
+#define WIFI_IND_HEIGHT 8
+#define WIFI_IND_X      (OLED_WIDTH - WIFI_IND_WIDTH - 1)
+#define WIFI_IND_Y      2
+
+/* 14x8 WiFi fan: three arcs + dot, row-major, MSB first (2 bytes/row) */
+static const uint8_t wifi_ind_bitmap[WIFI_IND_HEIGHT][2] = {
+	{0x1F, 0xE0},  /* ...########... */
+	{0x30, 0x30},  /* ..##......##.. */
+	{0x60, 0x18},  /* .##........##. */
+	{0x0F, 0xC0},  /* ....######.... */
+	{0x18, 0x60},  /* ...##....##... */
+	{0x07, 0x80},  /* .....####..... */
+	{0x03, 0x00},  /* ......##...... */
+	{0x03, 0x00},  /* ......##...... */
+};
+
+static void draw_wifi_indicator(uint8_t *buf)
+{
+	if (!wifi_ap_is_running()) {
+		return;
+	}
+
+	for (int row = 0; row < WIFI_IND_HEIGHT; row++) {
+		for (int col = 0; col < WIFI_IND_WIDTH; col++) {
+			if (wifi_ind_bitmap[row][col / 8] & (1 << (7 - (col % 8)))) {
+				set_pixel_direct(buf, WIFI_IND_X + col, WIFI_IND_Y + row);
+			}
+		}
+	}
+}
+
 static void render_recording_wave(uint8_t *buf)
 {
 	clear_screen(buf);
 	draw_fast_animation(buf);
+	draw_wifi_indicator(buf);
 }
 
 /* =============================================================================
@@ -376,6 +427,7 @@ static void render_dot_circle(uint8_t *buf, int frame)
 		(int)((DOT_CIRCLE_MAX_RADIUS - DOT_CIRCLE_STABLE_RADIUS) * sine_val);
 
 	draw_circle_mark(buf, current_radius, 1.0f);
+	draw_wifi_indicator(buf);
 }
 
 /* =============================================================================
@@ -470,6 +522,8 @@ static void render_mark_animation(uint8_t *buf, int frame)
 		(int)((MARK_LINE_MAX_LENGTH - MARK_LINE_STABLE_LENGTH) * anim_value);
 	draw_vertical_lines(buf, white_radius, line_length, MARK_LINE_THICKNESS,
 			    MARK_LINE_OFFSET_FROM_WHITE);
+
+	draw_wifi_indicator(buf);
 }
 
 /* Mark animation frame counter */
@@ -733,6 +787,10 @@ static void render_status_bar(uint8_t *buf)
 				icon_draw_bitmap(buf, 64, 12, wired_bitmap, ICON_WIDTH, ICON_HEIGHT);
 			}
 		}
+
+	/* Corner WiFi indicator: always visible while the AP is running,
+	 * independent of which icon wins the (64, 12) priority chain above. */
+	draw_wifi_indicator(buf);
 	}
 
 /* =============================================================================
@@ -1061,6 +1119,13 @@ static void set_ui_state(enum ui_state new_state)
 			g_rec_wave_start_ms = k_uptime_get();
 		}
 
+		/* Start the recording-dot blanking timeout on entry */
+		if (new_state == UI_STATE_REC_DOT) {
+			g_rec_dot_start_ms = k_uptime_get();
+			k_work_schedule(&display_timeout_work,
+					K_MSEC(DISPLAY_REC_TIMEOUT_MS));
+		}
+
 		/* Initialize status bar timeout on entry */
 		if (new_state == UI_STATE_STATUS_BAR) {
 			g_status_bar_start_ms = k_uptime_get();
@@ -1214,6 +1279,19 @@ static void handle_event(enum ui_event event)
 						>= DISPLAY_REC_WAVE_TIMEOUT_MS) {
 					set_ui_state(UI_STATE_REC_DOT);
 				}
+		} else if (g_ui_state == UI_STATE_REC_DOT) {
+				/* Blank the display to save power once the
+				 * stable recording dot has been shown for
+				 * the configured timeout. Recording
+				 * continues; any later state-changing UI
+				 * event resumes the display in
+				 * set_ui_state(). Same stale-event guard
+				 * as the REC_WAVE branch above.
+				 */
+				if (k_uptime_get() - g_rec_dot_start_ms
+						>= DISPLAY_REC_TIMEOUT_MS) {
+					set_ui_state(UI_STATE_OFF);
+				}
 		} else if (g_ui_state == UI_STATE_PAIRING_GUIDE) {
 			set_ui_state(UI_STATE_OFF);
 		} else if (g_ui_state == UI_STATE_ERROR) {
@@ -1356,7 +1434,8 @@ static void render_current_state(void)
 			if (g_recording) {
 				set_ui_state(UI_STATE_REC_DOT);
 				g_dot_animation_played = true;
-				k_work_cancel_delayable(&display_timeout_work);
+				/* Keep the timeout work armed: set_ui_state()
+				 * scheduled the REC_DOT blanking timeout. */
 				/* Render stable dot frame since we won't re-enter render_current_state */
 				render_dot_circle(display_buffer, DOT_CIRCLE_ANIM_FRAMES - 1);
 				flush_display();
@@ -1371,6 +1450,7 @@ static void render_current_state(void)
 	case UI_STATE_PAUSED: /* Paused */
 		clear_screen(display_buffer);
 		render_pause_icon(display_buffer);
+		draw_wifi_indicator(display_buffer);
 		flush_display();
 		break;
 
@@ -1893,7 +1973,7 @@ static void boot_anim_thread_fn(void *p1, void *p2, void *p3)
 		return;
 	}
 
-	const char *text = "seeed studio";
+	const char *text = "NULL";
 	int num_chars = strlen(text);
 	int char_adv = 7;
 	int char_h = 16;
@@ -1951,6 +2031,29 @@ static void boot_anim_thread_fn(void *p1, void *p2, void *p3)
 
 	/* Brief pause after full text */
 	k_msleep(200);
+
+	/* Show firmware version briefly */
+	{
+		char ver[OLED_WIDTH / 7 + 1];
+		int vlen = strlen(CLIP_VERSION);
+
+		if (vlen > OLED_WIDTH / 7) {
+			vlen = OLED_WIDTH / 7;
+		}
+		memcpy(ver, CLIP_VERSION, vlen);
+		ver[vlen] = '\0';
+
+		int vx = (OLED_WIDTH - vlen * char_adv) / 2;
+		int vy = (OLED_HEIGHT - char_h) / 2;
+
+		clear_screen(display_buffer);
+		for (int i = 0; i < vlen; i++) {
+			draw_char_8x16_boot(display_buffer, ver[i],
+					    vx + i * char_adv, vy);
+		}
+		flush_display();
+		k_msleep(1500);
+	}
 
 	/* Start normal UI */
 	display_start_ui();

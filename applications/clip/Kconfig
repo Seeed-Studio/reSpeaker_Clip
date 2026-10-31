@@ -99,13 +99,22 @@ config CLIP_DISPLAY_PAIRING_TIMEOUT_MS
 	int "Pairing guide display timeout (ms)"
 	default 60000
 
+config CLIP_DISPLAY_REC_TIMEOUT_MS
+	int "Recording dot display timeout (ms)"
+	default 30000
+	help
+	  Time the stable recording-dot screen stays on after entering
+	  the REC_DOT state before the display blanks to save power.
+	  Recording continues; any state-changing UI event (button
+	  mark, stop, pause, ...) resumes the display.
+
 config CLIP_SETTINGS_LOAD_TIMEOUT_MS
 	int "settings_load watchdog timeout (ms)"
 	default 3000
 
 config CLIP_SD_IDLE_DELAY_MS
 	int "SD card idle power-off delay (ms)"
-	default 45000
+	default 20000
 
 config CLIP_ADV_FAST_TIMEOUT_MS
 	int "BLE fast advertising timeout before dropping to slow (ms)"
@@ -349,7 +358,7 @@ config CLIP_UDP_NACK_BACKOFF_MS
 
 config CLIP_WIFI_TIMEOUT_MS
 	int "WiFi AP auto-off timeout (ms), 0 to disable"
-	default 180000
+	default 60000
 	help
 	  Time in milliseconds before WiFi AP is automatically disabled.
 	  Timer starts after AP is enabled, restarts on client disconnect.

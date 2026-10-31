@@ -13,7 +13,8 @@
  * @brief Initialize USB CDC ACM (virtual serial port for AT commands)
  *
  * Initializes the USB device with CDC ACM + MSC classes.
- * USB starts disabled; use usb_cdc_enable() to activate.
+ * Custom (usbauto): USB is enabled at the end of init; it can still
+ * be toggled at runtime with usb_cdc_enable()/usb_cdc_disable().
  *
  * @return 0 on success, negative error code on failure
  */
@@ -22,7 +23,8 @@ int usb_cdc_init(void);
 /**
  * @brief Enable USB (CDC + MSC)
  *
- * Call after BLE AT+USB=on. Makes device visible to USB host.
+ * Called at boot from usb_cdc_init() (usbauto) and on BLE AT+USB=on.
+ * Makes device visible to USB host.
  *
  * @return 0 on success, negative error code on failure
  */
