@@ -311,6 +311,13 @@ int config_init(void)
     /* Load config settings */
     err = settings_load_subtree("config");
 
+    /* Factory SN lives in the same settings file — load it under the same
+     * watchdog guard. config_init used to end with a full settings_load()
+     * which restored every subtree; the boot hardening replaced that with
+     * per-subtree loads, and the SN subtree was never added to the list —
+     * AT+SN wrote the value but every reboot loaded nothing back. */
+    settings_load_subtree("sn");
+
     settings_load_watchdog_disarm();
 
     if (err) {
