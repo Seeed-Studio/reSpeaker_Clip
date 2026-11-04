@@ -148,6 +148,21 @@ int config_set_sn_force(const char *sn);
 int config_clear_sn(void);
 
 /**
+ * @brief Rebuild the settings file system from in-RAM values
+ *
+ * Erases the LittleFS superblock pair (fresh format on remount) and
+ * re-saves config, time and the SN. BLE bonds are lost — call from the
+ * AT+PAIR=reset path, where bonds die anyway and the SD card is wiped
+ * (which also makes resetting the unsynced flag correct). The fuel-gauge
+ * state should be re-persisted by the caller (battery_save_fg_state)
+ * after this returns.
+ *
+ * @return 0 on success; on failure the mount is restored and the old
+ *         (possibly degraded) file keeps working.
+ */
+int config_reformat_settings(void);
+
+/**
  * @brief Set recording mode
  *
  * @param mode Recording mode

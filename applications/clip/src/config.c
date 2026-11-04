@@ -11,6 +11,7 @@
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/littlefs.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/drivers/flash.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/reboot.h>
 #include <time.h>
@@ -615,6 +616,78 @@ int config_set_time_ymd(uint16_t year, uint8_t month, uint8_t day,
     ctx->time.restored = false;   /* live sync */
 
     return settings_save_one(SETTING_TIME_UNIX, &unix_time, sizeof(unix_time));
+}
+
+/* Rebuild the settings file system from the values already in RAM.
+ *
+ * The settings file accumulates unparseable lines over its life (pair/
+ * unpair churn rewriting bond records, power cuts mid-write); past some
+ * point every save becomes a full-file rewrite on the external flash —
+ * seconds per save, which stretches shutdown past any sane budget (the
+ * slow-poweroff / self-reboot field issue). Erasing the LittleFS
+ * superblock pair forces a fresh format on the next mount; everything
+ * the app owns is then re-saved from RAM.
+ *
+ * Callers: the AT+PAIR=reset path — unpair already clears bonds and
+ * formats the SD card, so the user-visible cost of the rebuild is zero;
+ * bonds would have been lost anyway, and the unsynced-audio flag
+ * correctly resets to false (the card was just wiped). This is why the
+ * heal lives at unpair and not at boot: it is invisible here.
+ *
+ * BLE bonds are NOT preserved (cleared by the caller before or by this
+ * wipe). SN, config, time and the fuel-gauge state survive via RAM +
+ * the re-saves below. */
+int config_reformat_settings(void)
+{
+    const struct flash_area *fa;
+    const struct device *flash_dev;
+    int rc;
+
+    /* Snapshot nothing: all owned values live in RAM for the whole boot
+     * session. Drop the mount, kill the superblock pair (the same
+     * 2 x 64 KB erase the MCUboot recovery command does), remount —
+     * LittleFS formats pristine. */
+    rc = fs_unmount(&lfs_mnt);
+    if (rc != 0 && rc != -EINVAL) {
+        LOG_WRN("settings heal: unmount %d", rc);
+        return rc;
+    }
+
+    rc = flash_area_open(FIXED_PARTITION_ID(lfs_storage), &fa);
+    if (rc != 0) {
+        LOG_WRN("settings heal: flash area %d", rc);
+        (void)mount_littlefs();
+        return rc;
+    }
+    flash_dev = flash_area_get_device(fa);
+    if (!device_is_ready(flash_dev)) {
+        LOG_WRN("settings heal: flash not ready");
+        flash_area_close(fa);
+        (void)mount_littlefs();
+        return -ENODEV;
+    }
+    rc = flash_erase(flash_dev, fa->fa_off, 0x20000); /* superblock pair */
+    flash_area_close(fa);
+    if (rc != 0) {
+        LOG_WRN("settings heal: erase %d", rc);
+        (void)mount_littlefs();
+        return rc;
+    }
+
+    rc = mount_littlefs();
+    if (rc != 0) {
+        return rc;
+    }
+    LOG_WRN("settings heal: file system rebuilt");
+
+    /* Re-save everything we own, from RAM. */
+    (void)config_save();                       /* config/* keys  */
+    (void)config_sync_time();                  /* time/unix_timestamp */
+    if (g_serial_number[0] != '\0') {          /* sn/value (factory SN) */
+        (void)settings_save_one(SETTING_SN, g_serial_number,
+                                strlen(g_serial_number));
+    }
+    return 0;
 }
 
 void config_sync_time(void)

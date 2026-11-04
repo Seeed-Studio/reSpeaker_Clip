@@ -192,16 +192,58 @@ static enum clip_event_result execute_transition(enum clip_event event,
                                                  enum clip_state from,
                                                  enum clip_state to);
 
-/* Still alive 8 s after POWER_OFF_EXEC started: the shutdown hung —
- * force a clean reboot instead of a frozen power-off screen. A k_timer,
- * NOT a work item: the system workqueue may itself be part of the hang
- * (e.g. the fg-save work blocked on a mutex), and a timer expiry does
- * not depend on any thread being scheduled. */
+/* Still alive LONG after POWER_OFF_EXEC started: the shutdown hung.
+ * A reboot is the WRONG recovery for a power-off intent — on devices
+ * with a degraded settings file the two shutdown-time settings saves
+ * legitimately take tens of seconds, and the old 8 s failsafe killed
+ * those mid-flight and rebooted: the "device powers itself back on"
+ * field report. Instead: blank the screen, lock input, and keep
+ * retrying ship mode forever. A k_timer, NOT a work item: the system
+ * workqueue may itself be part of the hang (e.g. the fg-save work
+ * blocked on a mutex); the timer callback only gives a semaphore and
+ * the retry loop runs on a thread of its own.
+ *
+ * 60 s must exceed the legitimate worst-case chain: audio stop 5 s +
+ * slow-SD close 20-30 s + fg/time settings saves on a degraded file +
+ * the 9 s post-ship-mode power-cut wait. */
+#define SHUTDOWN_FAILSAFE_TIMEOUT_S 60
+static K_SEM_DEFINE(shutdown_failsafe_sem, 0, 1);
+
+static void shutdown_failsafe_thread_fn(void)
+{
+	const struct device *regulators =
+		DEVICE_DT_GET(DT_NODELABEL(npm1300_regulators));
+
+	while (true) {
+		k_sem_take(&shutdown_failsafe_sem, K_FOREVER);
+		printk("shutdown hung >%d s: dark ship-mode retry\n",
+		       SHUTDOWN_FAILSAFE_TIMEOUT_S);
+
+		/* Look off and ignore all input: from here the device must
+		 * appear powered down no matter how long the retries take. */
+		button_shutdown_lockout();
+		display_post_event(UI_EVENT_TIMEOUT);
+
+		while (true) {
+			if (device_is_ready(regulators) &&
+			    regulator_parent_ship_mode(regulators) == 0) {
+				/* Accepted: power cuts within ms. The 9 s
+				 * wait only covers a PMIC that acked but
+				 * never cut — retry anyway afterwards. */
+				k_sleep(K_SECONDS(9));
+			} else {
+				k_sleep(K_SECONDS(2));
+			}
+		}
+	}
+}
+static K_THREAD_STACK_DEFINE(shutdown_failsafe_stack, 2048);
+static struct k_thread shutdown_failsafe_thread;
+
 static void shutdown_failsafe_fn(struct k_timer *tmr)
 {
 	ARG_UNUSED(tmr);
-	printk("shutdown hung >8 s, forcing reboot\n");
-	sys_reboot(SYS_REBOOT_COLD);
+	k_sem_give(&shutdown_failsafe_sem);
 }
 static K_TIMER_DEFINE(shutdown_failsafe, shutdown_failsafe_fn, NULL);
 
@@ -395,6 +437,13 @@ int clip_event_init(void)
                     NULL, NULL, NULL,
                     K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
     k_thread_name_set(&shutdown_thread_data, "shutdown");
+
+    k_thread_create(&shutdown_failsafe_thread, shutdown_failsafe_stack,
+                    K_THREAD_STACK_SIZEOF(shutdown_failsafe_stack),
+                    shutdown_failsafe_thread_fn,
+                    NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(1), 0, K_NO_WAIT);
+    k_thread_name_set(&shutdown_failsafe_thread, "shut_failsafe");
 
     k_work_init(&fg_save_work, fg_save_work_handler);
     storage_set_activity_cb(clip_storage_activity_notify);
@@ -636,7 +685,8 @@ static void shutdown_thread_fn(void)
 
         /* Failsafe armed FIRST: everything below is best-effort. If ship
          * mode has not killed us within 8 s, force a clean reboot. */
-        k_timer_start(&shutdown_failsafe, K_SECONDS(8), K_NO_WAIT);
+        k_timer_start(&shutdown_failsafe,
+                        K_SECONDS(SHUTDOWN_FAILSAFE_TIMEOUT_S), K_NO_WAIT);
 
         /* Ignore all button input from here on. */
         button_shutdown_lockout();
@@ -679,6 +729,12 @@ static void shutdown_thread_fn(void)
         if (left > 0) {
             k_sleep(K_MSEC(left));
         }
+
+        /* Feedback window is over: blank the screen. Everything below can
+         * legitimately take tens of seconds (slow SD close, degraded
+         * settings saves) — the device must look off while it finishes,
+         * not sit frozen on the power-off page. */
+        display_post_event(UI_EVENT_TIMEOUT);
 
         if (device_is_ready(regulators)) {
             for (int i = 0; i < 3; i++) {

@@ -75,6 +75,17 @@ static void pair_reset_work_handler(struct k_work *work)
 
     ARG_UNUSED(work);
 
+    /* Rebuild the settings file system while the user already accepts a
+     * full reset: unpair clears bonds and wipes the SD card here, so the
+     * rebuild (which loses bonds) costs nothing visible, and the unsynced
+     * flag resetting to false is CORRECT — the recordings are gone too.
+     * This heals the bloated/garbage settings file that makes every save
+     * a multi-second full-file rewrite (slow poweroff / self-reboot). */
+    if (config_reformat_settings() == 0) {
+        /* Fuel-gauge state lives in the wiped file: re-persist it. */
+        battery_save_fg_state();
+    }
+
     err = storage_format_card();
     if (err != 0 && err != -ENODEV) {
         LOG_WRN("SD erase (pair reset) %d", err);
