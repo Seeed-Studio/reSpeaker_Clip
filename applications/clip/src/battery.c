@@ -774,8 +774,14 @@ static void read_and_update_locked(void)
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
 	} else {
-		/* Discharging/idle: track depletion, downward only, time-limited.
-		 * An upward gauge correction is held until the next charge. */
+		/* Discharging/idle: MONOTONIC downward only. The gauge's
+		 * coulomb counter drifts up transiently (settling after a
+		 * load burst, relaxation); the display must never follow it
+		 * up while on battery — a percentage that climbs on its own
+		 * reads as a bug, however correct the estimate is. Slow
+		 * decline is fine; ascent is not. Gross under-seeds are
+		 * corrected at BOOT by the stale-seed heal (voltage
+		 * estimate vs persisted seed), never at runtime. */
 		int diff = (int)percent - (int)displayed_percent;
 		if (now_ms < post_full_until_ms && diff < 0) {
 			/* Briefly hold 100% after unplugging from a completed
@@ -784,28 +790,11 @@ static void read_and_update_locked(void)
 			 * the gauge is 1-2% and tracking resumes stepwise. */
 			diff = 0;
 		}
+		if (diff > 0) {
+			diff = 0;   /* never upward while discharging */
+		}
 		if (diff < -allowed_step) {
 			diff = -allowed_step;
-		} else if (diff > 0) {
-			/* Re-anchor escape: a LARGE upward gap is the gauge
-			 * recovering from a phantom-drained counter, not
-			 * display churn. Let it catch up at the time-limited
-			 * rate; small corrections stay held (anti-churn).
-			 *
-			 * Below the re-anchor threshold, holding a small
-			 * correction is what can latch the display at 0%
-			 * while the gauge still says 10-19%. At low SoC,
-			 * track upward instead: a 0% display is far more
-			 * misleading than 3%/poll of upward movement. */
-			bool low_display =
-				displayed_percent <= BATTERY_DISPLAY_REANCHOR_THRESHOLD;
-			if (diff >= BATTERY_DISPLAY_REANCHOR_THRESHOLD || low_display) {
-				if (allowed_step < diff) {
-					diff = allowed_step;
-				}
-			} else {
-				diff = 0;
-			}
 		}
 		displayed_percent = (uint8_t)((int)displayed_percent + diff);
 		display_percent = displayed_percent;
