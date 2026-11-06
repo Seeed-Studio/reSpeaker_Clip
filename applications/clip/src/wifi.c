@@ -277,18 +277,45 @@ static int wifi_enable_ap(struct net_if *iface)
 			continue;
 		}
 
-		ret = k_sem_take(&ap_enabled_sem, K_SECONDS(5));
+		/* Sent. A slow first enable (RPU settling after net_if_up,
+		 * 5 GHz channel bring-up) legitimately takes >5 s to answer
+		 * — the old 5 s budget treated those as failures while the
+		 * success event was still in flight, then stacked another
+		 * AP_ENABLE on top (rejected: one request at a time), gave
+		 * up, and the LATE success landed afterwards: the AP ended
+		 * up running after the command had answered failure. */
+		ret = k_sem_take(&ap_enabled_sem, K_SECONDS(12));
 		if (ret) {
+			/* Timeout: a result may still land late. Do NOT send
+			 * another AP_ENABLE while one is in flight — poll the
+			 * outcome (the handler sets ap_running) before
+			 * declaring this attempt dead. */
+			for (int i = 0; i < 24 && !ap_running; i++) {
+				k_sleep(K_MSEC(250));
+			}
+			if (ap_running) {
+				LOG_WRN("AP enable late success (attempt %d)",
+					attempt);
+				return 0;
+			}
 			LOG_WRN("AP enable timeout (attempt %d)", attempt);
 			continue;
 		}
 
 		if (!ap_running) {
+			/* Result arrived = definitive failure; the driver is
+			 * idle again; safe to retry. */
 			LOG_ERR("AP enable rejected (attempt %d)", attempt);
 			continue;
 		}
 
 	return 0;
+	}
+
+	/* Last chance: a success straggling in past the final grace window
+	 * must not be answered with a failure the AP contradicts. */
+	if (ap_running) {
+		return 0;
 	}
 
 	return -ETIMEDOUT;

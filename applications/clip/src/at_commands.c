@@ -2170,7 +2170,11 @@ static int cmd_wifi_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
              * verdict comes from the AP's actual state — the worker's
              * global rc can be overwritten by a follow-up op (e.g. the
              * failure revert) before it is read. */
-            ret = wifi_wait_ops_done(K_SECONDS(30));
+            /* 40 s: wifi_enable_ap now waits up to 12 s per AP-enable
+             * attempt plus a late-success grace window — a slow first
+             * bring-up must not outrun this budget (the old 30 s cut
+             * off legit slow successes and answered failure). */
+            ret = wifi_wait_ops_done(K_SECONDS(40));
             if (!wifi_ap_is_running()) {
                 if (ret == -EAGAIN) {
                     return create_json_response(false, "WiFi start timed out",
