@@ -152,6 +152,32 @@ void clip_request_shutdown(void)
 	k_sem_give(&shutdown_sem);
 }
 
+/* BLE fast-adv restart, deferred off the main thread.
+ *
+ * ble_adv_restart_fast() calls bt_le_adv_stop/start — SYNCHRONOUS HCI
+ * commands that round-trip to the network core. During nRF70 bring-up
+ * (RPU download + coex arbitration) that round trip can stall for the
+ * whole bring-up, and it used to run directly in the STATUS_SHOW
+ * transition — a button press during AT+WIFI=on then parked the MAIN
+ * event thread: the "buttons dead while WiFi starts" report. Deferred
+ * to the system workqueue; if the stall shows up there instead, the
+ * duration log below names it. */
+static struct k_work adv_restart_work;
+
+static void adv_restart_work_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	int64_t t0 = k_uptime_get();
+
+	ble_adv_restart_fast();
+
+	int64_t dt = k_uptime_get() - t0;
+	if (dt > 100) {
+		LOG_WRN("adv restart took %lld ms (net core busy?)",
+			(long long)dt);
+	}
+}
+
 static void ota_progress_work_handler(struct k_work *work)
 {
     if (atomic_get(&ota_in_progress) && g_img_mgmt_state.size > 0) {
@@ -430,6 +456,7 @@ int clip_event_init(void)
     k_sem_init(&event_notify_sem, 0, 1);
 
     k_work_init_delayable(&ota_progress_work, ota_progress_work_handler);
+    k_work_init(&adv_restart_work, adv_restart_work_fn);
     k_work_init_delayable(&sd_idle_poweroff_work, sd_idle_poweroff_work_handler);
     k_thread_create(&shutdown_thread_data, shutdown_thread_stack,
                     K_THREAD_STACK_SIZEOF(shutdown_thread_stack),
@@ -1087,7 +1114,10 @@ static enum clip_event_result execute_transition(enum clip_event event,
 
     case CLIP_EVENT_STATUS_SHOW:
     {
-        ble_adv_restart_fast();
+        /* Deferred — see adv_restart_work_fn: the synchronous HCI round
+         * trip must never run on this (main) thread; during WiFi bring-up
+         * it stalled the whole dispatcher for seconds. */
+        k_work_submit(&adv_restart_work);
         display_post_event(UI_EVENT_STATUS_SHOW);
         return CLIP_EVENT_OK;
     }
