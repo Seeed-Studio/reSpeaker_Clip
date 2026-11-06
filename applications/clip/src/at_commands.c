@@ -2175,13 +2175,30 @@ static int cmd_wifi_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
              * bring-up must not outrun this budget (the old 30 s cut
              * off legit slow successes and answered failure). */
             ret = wifi_wait_ops_done(K_SECONDS(40));
-            if (!wifi_ap_is_running()) {
+
+            /* The verdict trusts the COMPLETED OPERATION, not a single
+             * instant of the ap_running flag. Field log: the worker
+             * finished wifi_on() successfully — it had verified the AP
+             * internally and sent the {"event":"wifi","status":"on"}
+             * notify — and this check still read ap_running==false in
+             * the same burst, answering "Failed to start WiFi AP" while
+             * the AP was demonstrably up. Whatever straggler event
+             * cleared the flag, the response must never contradict the
+             * notify the device itself just emitted. Fail only when the
+             * op failed AND the AP is really not running. */
+            if (ret != 0 && !wifi_ap_is_running()) {
                 if (ret == -EAGAIN) {
                     return create_json_response(false, "WiFi start timed out",
                                                NULL, response, len);
                 }
                 return create_json_response(false, "Failed to start WiFi AP",
                                            NULL, response, len);
+            }
+            if (ret == 0 && !wifi_ap_is_running()) {
+                /* Successful op but the flag wobbled — surface it; the
+                 * underlying clearer (a straggler mgmt event?) is what
+                 * the next reproduction should name. */
+                LOG_WRN("wifi on ok but flag down (event race?)");
             }
 
             char data[256];
