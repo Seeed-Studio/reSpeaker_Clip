@@ -42,4 +42,22 @@ void battery_poll(void);
  */
 void battery_save_fg_state(void);
 
+/* VBUS present (USB plugged), regardless of active charging — a full pack on
+ * USB still has VBUS up and the PMIC refuses ship mode. Power-off paths gate
+ * on this, NOT on status.battery_charging (false once the charge completes). */
+bool battery_vbus_present(void);
+
+/* Recording allowed? Latched off at critical battery (raw SoC <=3% or
+ * <=3.45V; a graceful STOP runs there), unlocked by charging/VBUS or
+ * recovery to >=8%. VBUS alone unlocks (external power). START paths
+ * (AT + button) gate on this. */
+bool battery_recording_allowed(void);
+
+/* WiFi AP allowed? Blocked while discharging below
+ * CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT (default 15%) or
+ * CONFIG_CLIP_WIFI_MIN_BATTERY_MV (default 3500 mV). Charging or VBUS
+ * bypasses both floors (external power), and the critical recording
+ * lockout also blocks. Used by AT+WIFI=on and the WIFI_ON transition. */
+bool battery_wifi_allowed(void);
+
 #endif /* CLIP_BATTERY_H */

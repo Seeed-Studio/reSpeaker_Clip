@@ -72,6 +72,38 @@ static int transfer_next_file(void);
 static int transfer_send_chunk(void);
 static void transfer_cleanup(void);
 static void send_file_ready_event(const char *session_id, const char *filename, uint64_t size);
+
+/* Called by transfer_start()/transfer_resume_from() BEFORE acquiring the
+ * idle sem. Returns 0 when the caller should just answer OK (re-issue of
+ * the transfer that is already streaming exactly what was asked), -EBUSY
+ * for any other active transfer, -EALREADY when no transfer is active
+ * (caller proceeds with the start handshake).
+ *
+ * Hosts legitimately re-send AT+DOWNLOAD (response timeout, resume logic,
+ * UI retry). Answering an identical re-issue with an error either aborts
+ * the host's sync (-ETIMEDOUT carries no busy keyword, the app gives up
+ * after one retry) or triggers its cancel-and-restart self-heal (-EBUSY)
+ * — both interrupt a transfer already delivering what was asked. A
+ * cross-leg re-issue (different session or different transport, e.g. the
+ * stale-BLE-leg race the app's self-heal targets) still gets -EBUSY. */
+static int transfer_busy_check(const char *session_id, struct transport *tp)
+{
+    if (!transfer_is_active()) {
+        return -EALREADY;
+    }
+    bool same_leg =
+        current_transfer.state == TRANSFER_STATE_TRANSMITTING &&
+        current_transport && tp &&
+        current_transport->type == tp->type &&
+        strcmp(current_transfer.session_id, session_id) == 0;
+
+    if (same_leg) {
+        LOG_WRN("xfer reissue %s ignored", session_id);
+        return 0;
+    }
+    LOG_WRN("Transfer already active");
+    return -EBUSY;
+}
 static int send_file_complete_event(const char *filename);
 static void send_transfer_complete_once(const char *session_id, int file_count);
 static void generate_filename(uint32_t file_num, char *filename);
@@ -187,14 +219,17 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
 
     clip_cpu_boost_acquire();
 
-    /* Check if transfer is already active with file open */
-    if (transfer_is_active() && transfer_file_open) {
+    /* Busy/idempotent gate: 0 = re-issue of the running transfer
+     * (answer OK), -EBUSY = other active transfer, -EALREADY = free. */
+    int busy = transfer_busy_check(session_id, tp);
+    if (busy != -EALREADY) {
         clip_cpu_boost_release();
-        LOG_WRN("Transfer already active");
-        return -EBUSY;
+        return busy;
     }
 
-    /* Wait for transfer thread to be idle (replaces 3 polling loops) */
+    /* Wait for transfer thread to be idle — this now only covers the
+     * short window where a finished transfer is parking (state already
+     * left TRANSMITTING). */
     if (k_sem_take(&transfer_idle_sem, K_SECONDS(3)) != 0) {
         clip_cpu_boost_release();
         LOG_ERR("Transfer thread not idle after 3s");
@@ -213,6 +248,27 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
         LOG_ERR("Session not found: %s", session_id);
         err = -ENOENT;
         goto fail;
+    }
+
+    /* Husk session (no non-empty .opus): refuse the transfer, delete the
+     * husk right here, and let the AT layer answer ok:false — entering
+     * TRANSMITTING for a session with nothing to send left the host
+     * waiting on a transfer that only ever completed with zero files.
+     * NEVER the ACTIVE recording session: the open file's directory
+     * size reads 0 until its first fs_sync/close, so has_audio() is
+     * blind for it — and live-syncing the active session is exactly
+     * continuous mode, a legitimate transfer. */
+    {
+        const char *recording_session = audio_get_session_id();
+
+        if (!storage_session_has_audio(session_id) &&
+            (recording_session == NULL ||
+             strcmp(recording_session, session_id) != 0)) {
+            LOG_WRN("session %s has no audio - removing husk", session_id);
+            storage_delete_session(session_id);
+            err = -ENOENT;
+            goto fail;
+        }
     }
 
     /* Skip empty sessions (0 files) */
@@ -333,14 +389,15 @@ int transfer_resume_from(const char *session_id, const char *start_file, struct 
 
     clip_cpu_boost_acquire();
 
-    /* Check if transfer is already active with file open */
-    if (transfer_is_active() && transfer_file_open) {
+    /* Busy/idempotent gate: 0 = re-issue of the running transfer
+     * (answer OK), -EBUSY = other active transfer, -EALREADY = free. */
+    int busy = transfer_busy_check(session_id, tp);
+    if (busy != -EALREADY) {
         clip_cpu_boost_release();
-        LOG_WRN("Transfer already active");
-        return -EBUSY;
+        return busy;
     }
 
-    /* Wait for transfer thread to be idle */
+    /* Wait for transfer thread to be idle — short park window only. */
     if (k_sem_take(&transfer_idle_sem, K_SECONDS(3)) != 0) {
         clip_cpu_boost_release();
         LOG_ERR("Transfer thread not idle after 3s");
@@ -702,10 +759,10 @@ process_next_file:
 
         /* Open first file if not already open */
         if (!transfer_file_open) {
-            LOG_INF("xfer: next file (idx=%u/%u)",
+            LOG_DBG("xfer: next file (idx=%u/%u)",
                 current_transfer.file_index, current_transfer.total_files);
             ret = transfer_next_file();
-            LOG_INF("xfer: next_file ret=%d", ret);
+            LOG_DBG("xfer: next_file ret=%d", ret);
             if (ret == 0) {
                 consecutive_file_errors = 0;
             }
@@ -1127,13 +1184,21 @@ open_file:
         return ret;
     }
 
-    /* Skip empty files */
+    /* Skip empty files — do NOT unlink them: host-visible state must
+     * not be mutated from the transfer thread, and deleting a 0-byte
+     * .opus while session.json still claims files:N turns the session
+     * into a json-only phantom the scan trusts forever. */
+    /* 0-byte file: DELETE it on encounter and advance. The old
+     * -ENOENT told the caller "session complete" -> the app received
+     * TRANSFER_DONE with zero files and re-issued DOWNLOAD forever.
+     * -EAGAIN is the existing "skipped, try next immediately" path. */
     if (entry.size == 0) {
-        LOG_WRN("Empty file: %s", current_transfer.current_file);
+        LOG_WRN("Empty file deleted: %s", current_transfer.current_file);
         fs_close(&transfer_file);
         fs_unlink(filepath);
         current_transfer.current_file[0] = '\0';
-        return -ENOENT;
+        current_transfer.file_index++;
+        return -EAGAIN;
     }
 
     current_transfer.file_index++;

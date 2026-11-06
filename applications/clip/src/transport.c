@@ -9,7 +9,7 @@
 #include <string.h>
 #include "transport.h"
 
-LOG_MODULE_REGISTER(transport, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(transport, LOG_LEVEL_WRN); /* chatty plumbing logs */
 
 /* Transport registry */
 static struct transport *transports[TRANSPORT_TYPE_MAX];

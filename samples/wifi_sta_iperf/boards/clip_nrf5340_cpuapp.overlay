@@ -1,0 +1,25 @@
+/* Disable unused peripherals for WiFi-only testing */
+/ {
+	chosen {
+		/delete-property/ zephyr,display;
+	};
+	mic_reg { status = "disabled"; };
+	oled_reg { status = "disabled"; };
+};
+
+&npm1300 { status = "disabled"; };
+&i2c2 { status = "disabled"; };
+&pdm0 { status = "disabled"; };
+&spi3 { status = "disabled"; };
+&spi4 { status = "disabled"; };
+&adc { status = "disabled"; };
+&usbd { status = "disabled"; };
+
+/* RF switch: must be HIGH for WiFi RF path */
+&gpio0 {
+	rfsw_hog {
+		gpio-hog;
+		gpios = <29 GPIO_ACTIVE_HIGH>;
+		output-high;
+	};
+};

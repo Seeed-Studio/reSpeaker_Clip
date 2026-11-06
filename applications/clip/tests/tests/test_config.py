@@ -57,24 +57,6 @@ class TestMode:
         """Should reject unknown modes."""
 
 
-class TestAutoDelete:
-    """Test AUTODEL command."""
-
-    async def test_get_auto_delete(self, commands: ClipCommands):
-        """Should get auto-delete state."""
-        state = await commands.get_auto_delete()
-        assert isinstance(state, bool)
-
-    async def test_set_auto_delete(self, commands: ClipCommands, saved_state):
-        """Should set auto-delete days."""
-        async with saved_state:
-            await commands.set_auto_delete(7)  # 7 days
-            assert await commands.get_auto_delete() is True
-
-            await commands.set_auto_delete(-1)  # Disable
-            assert await commands.get_auto_delete() is False
-
-
 @pytest.mark.asyncio
 class TestConfigBulk:
     """Test bulk configuration operations."""
@@ -84,8 +66,8 @@ class TestConfigBulk:
         config = await commands.get_config_dict()
 
         assert 'mode' in config
-        assert 'auto_delete' in config
         assert 'brightness' in config
+        assert 'auto_delete' not in config  # AT+AUTODEL removed from firmware
 
     async def test_set_config_dict(self, commands: ClipCommands, saved_state):
         """Should set multiple config values."""

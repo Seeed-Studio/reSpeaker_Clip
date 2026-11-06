@@ -34,7 +34,7 @@ The reSpeaker Clip is an embedded audio recording device built on Zephyr RTOS, r
 
 ### 1.3 Design Principles
 
-1. **Event-Driven Main Loop**: All state transitions and side effects processed in the main thread via `k_msgq` event queue and `k_sem` notification
+1. **Event-Driven Main Loop**: All state transitions and side effects processed in the main thread via `k_msgq` event queue and `k_sem` notification (WiFi on/off side effects are queued to a dedicated worker thread — see §5)
 2. **Table-Driven State Machine**: State transitions defined in a static lookup table (`transition_table[][]`) with transition actions in a single `switch` statement
 3. **Transport Abstraction**: BLE and UDP backends implement a common `transport_ops` interface
 4. **CPU Boost (Reference Counted)**: 128MHz during recording, 64MHz idle; `clip_cpu_boost_acquire()` / `clip_cpu_boost_release()` via `atomic_t` counter
@@ -149,7 +149,7 @@ The reSpeaker Clip is an embedded audio recording device built on Zephyr RTOS, r
 
 **Purpose**: Application initialization and event loop.
 
-The main thread runs a blocking event loop using `k_msgq` for events and `k_sem` for wake-up notification. All state transitions and side effects (audio start/stop, haptic, display, WiFi on/off) are handled in this thread, which has a large enough stack for WiFi operations.
+The main thread runs a blocking event loop using `k_msgq` for events and `k_sem` for wake-up notification. All state transitions and side effects (audio start/stop, haptic, display) are handled in this thread. WiFi on/off is the exception: the blocking bring-up/teardown runs on the dedicated WiFi worker thread — the dispatcher only queues the request (`wifi_request_async`) and commits the state transition immediately, so buttons/UI stay responsive during the multi-second nRF70 bring-up.
 
 **Initialization Order** (`clip_init()`):
 1. Config (Zephyr Settings on LittleFS)
@@ -276,12 +276,12 @@ struct at_command {
 | DEVICE | QUERY, EXEC | Get device name |
 | VERSION | EXEC | Get firmware version |
 | TIME | SET, QUERY, EXEC | Set/get time (Unix timestamp or YYYYMMDDHHMMSS) |
-| MODE | SET, QUERY, EXEC | Set/get recording mode (normal/enhanced) |
-| AUTODEL | SET, QUERY, EXEC | Set/get auto-delete days |
+| MODE | SET, QUERY, EXEC | Set/get recording preset (normal/enhanced) |
 | BRIGHTNESS | SET, QUERY, EXEC | Set/get OLED brightness (0-255) |
 | POWEROFF | EXEC | Enter PMIC ship mode |
 | FACTORY | SET, EXEC | Factory reset (requires confirmation; formats SD + reboot) |
 | PAIR | SET, QUERY | Query pairing status or `AT+PAIR=reset` to clear bonds + reboot |
+| SN | SET, QUERY | Product serial number (write-once; rewrite requires the device MAC) |
 | REBOOT | EXEC | Reboot device (optionally clear bonds) |
 | DFU | EXEC | Reboot into MCUboot recovery mode |
 | START | EXEC, SET | Start recording (optional mode parameter) |
@@ -353,35 +353,41 @@ PDM DMIC (16kHz, 2ch, 20ms frames)
     |
     v
 process_pcm_frame():
-    STEREO mode: pass through (no DSP)
-    MERGE mode: (L + R) / 2 -> SpeexDSP (noise suppress + dereverb)
-                + custom lightweight integer AGC + high-pass
-                (SpeexDSP AGC unavailable in FIXED_POINT)
+    both presets: delay-aligned L+R merge -> high-pass -> integer AGC
+    normal:   SpeexDSP bypassed
+    enhanced: SpeexDSP noise suppression + dereverb
+              (only when config/noise_suppress > 0; SpeexDSP AGC
+               is unavailable in the FIXED_POINT build)
     |
     v
-Opus Encoder (20ms frames, 320 samples)
+Opus Encoder (mono, 20ms frames, 320 samples, 32kbps)
     |
     v
 Storage write (2-byte length header + Opus packet)
 ```
 
-**Recording Modes:**
+**Recording Presets:**
 
-| Mode | Audio Mode | Channels | Bitrate | Complexity | DSP |
-|------|-----------|----------|---------|------------|-----|
-| Normal | STEREO | 2 (stereo Opus) | 64kbps (32k/ch, Kconfig value x2) | 1 | None |
-| Enhanced | MERGE | 1 (mono Opus) | 32kbps | 1 | Noise suppress + dereverb + integer AGC |
+| Preset | Audio Mode | Channels | Bitrate | Complexity | DSP |
+|--------|-----------|----------|---------|------------|-----|
+| Normal | MERGE | 1 (mono Opus) | 32kbps | 1 | Merge + HPF + integer AGC; **SpeexDSP off** |
+| Enhanced | MERGE | 1 (mono Opus) | 32kbps | 1 | Merge + HPF + integer AGC + **SpeexDSP NS/DR** |
 
-Bitrate and complexity are Kconfig per-mode constants, not runtime configurable
-(stereo doubles the configured per-channel bitrate):
-- Normal: `CONFIG_CLIP_NORMAL_BITRATE=32000` (x2 = 64kbps total), `CONFIG_CLIP_NORMAL_COMPLEXITY=1`
-- Enhanced: `CONFIG_CLIP_ENHANCED_BITRATE=32000`, `CONFIG_CLIP_ENHANCED_COMPLEXITY=1`
+Both presets are **mono**. The only audio-path difference is SpeexDSP:
+Enhanced runs noise suppression + dereverb when `config/noise_suppress > 0`
+(default 12 dB); Normal bypasses it. Both use
+`CONFIG_CLIP_ENHANCED_BITRATE`/`CONFIG_CLIP_ENHANCED_COMPLEXITY` because
+`current_mode` is always `AUDIO_MODE_MERGE`; `CONFIG_CLIP_NORMAL_BITRATE` and
+`CONFIG_CLIP_NORMAL_COMPLEXITY` are currently **unused** (reserved for a future
+non-merged path). `AT+MODE` selects the preset; `speex_enabled` is latched at
+the next recording start (`audio_start_recording_internal` reads
+`config.mode`), so a mode change does not affect an in-progress recording.
 
 **Audio Constants:**
 ```c
 #define AUDIO_SAMPLE_RATE     16000
 #define AUDIO_SAMPLE_BITS      16
-#define AUDIO_CHANNELS         2
+#define AUDIO_CHANNELS         2  // PDM input channels; Opus output is mono
 #define AUDIO_FRAME_MS         20
 #define AUDIO_OPUS_FRAME_SIZE  320  // 16000 * 0.020
 #define AUDIO_BLOCK_SIZE       1280 // ((16/8) * (16000 * 20/1000)) * 2
@@ -399,7 +405,7 @@ Bitrate and complexity are Kconfig per-mode constants, not runtime configurable
 
 **DMIC Recovery**: After 5 consecutive timeouts, the DMIC is retriggered automatically.
 
-**Memory**: Audio buffers allocated from `K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 16, 4)` (16 blocks of 1280 bytes).
+**Memory**: Audio buffers allocated from `K_MEM_SLAB_DEFINE_STATIC(audio_mem_slab, AUDIO_BLOCK_SIZE, 32, 4)` (32 blocks of 1280 bytes = 40 KB).
 
 ### 3.6 Storage (storage.c)
 
@@ -454,7 +460,9 @@ a "Storage Full" error is shown on the OLED, and a BLE event is posted.
 - Log directory: `/SD:/LOG/`
 - Log files: `log.000001` ... (prefix `log.`, 128KB per file, up to 20 files,
   circular overwrite)
-- Backend level is runtime-controlled by `AT+LOG=off|info|debug` (see §3.3)
+- Backend level is runtime-controlled by `AT+LOG=off|info` (see §3.3).
+  `AT+LOG=debug` is **debug-image only**: production is compiled with
+  `LOG_MAX_LEVEL=INF`, so DBG records do not exist and the command is rejected.
 - Boot default follows the build: `CLIP_LOG_FS_DEFAULT_ON` tracks
   `LOG_BACKEND_UART` (debug image → INF on; production image → off). While the
   backend is active the SD stays mounted (higher idle current); `off` lets it
@@ -506,7 +514,9 @@ enum transfer_state {
 
 **Static IP**: `192.168.4.1/24`
 
-**Manual Start**: WiFi radio is NOT started at boot (`CONFIG_NRF_WIFI_IF_AUTO_START=n`). `wifi_on()` brings up the interface and starts the AP. `wifi_off()` stops AP and powers off radio. This saves ~30mA when WiFi is not in use.
+**Manual Start**: WiFi radio is NOT started at boot (`CONFIG_NRF_WIFI_IF_AUTO_START=n`). `wifi_on()` brings up the interface and starts the AP; `wifi_off()` stops AP and powers off radio. Both run on the dedicated WiFi worker thread (queued via `wifi_request_async()` from the event dispatcher; AT+WIFI blocks on `wifi_wait_ops_done()` from the AT thread to keep its "ok:true ⇒ AP is up" response timing). This saves ~30mA when WiFi is not in use.
+
+**Low-battery start guard**: starting the AP is refused while discharging below `CONFIG_CLIP_WIFI_MIN_BATTERY_PERCENT` (default 15%) or `CONFIG_CLIP_WIFI_MIN_BATTERY_MV` (default 3500 mV); charging or VBUS bypasses both (external power feeds the system). `AT+WIFI=on` returns `{"ok":false,"msg":"Battery too low, charge first"}`; the `CLIP_EVENT_WIFI_ON` transition enforces the same guard for non-AT callers. An AP that is already running is left alone.
 
 **WiFi Auto-Off**: WiFi AP automatically disables after a configurable timeout (`CONFIG_CLIP_WIFI_TIMEOUT_MS`, default 180000ms = 3 minutes). The timeout timer starts when WiFi is enabled and restarts on client disconnect. Set to 0 to disable auto-off. This prevents unnecessary power drain when WiFi is left on but unused.
 
@@ -534,10 +544,12 @@ enum transfer_state {
 **UDP Thread** (priority 5, stack 2048 in prj.conf): Listens on port 8089, dispatches incoming packets.
 
 **Protocol** (CLIP UDP Transfer Protocol, see `docs/udp_protocol.md`):
-- Server sends: DATA, FILE_START, FILE_END, TRANSFER_DONE, AT_RESP, HEARTBEAT
-- Server receives: ACK, HEARTBEAT, AT commands (plain text)
+- Device sends: DATA, FILE_START, FILE_END, TRANSFER_DONE, AT_RESP
+- Device receives: FILE_ACK, HEARTBEAT, AT commands (plain text)
 
-**Heartbeat**: Server sends heartbeat every 5s. Connection timeout after 30s without heartbeat.
+**Heartbeat**: The **client** sends HEARTBEAT (about every 200 ms during a
+transfer). The device only uses it to refresh activity / the 30 s connection
+timeout; the device never sends a heartbeat itself.
 
 ### 3.10 Configuration (config.c)
 
@@ -545,19 +557,28 @@ enum transfer_state {
 
 **Storage Backend**: LittleFS mounted at `/lfs`, settings stored at `/lfs/settings/run`.
 
-**Settings Keys (5):**
+**Settings Keys (8 config keys + time + SN):**
 
 | Key | Settings Path | Type | Default | Description |
 |-----|--------------|------|---------|-------------|
-| CONFIG_KEY_MODE (0x03) | config/mode | uint8_t | 0 (normal) | Recording mode |
+| CONFIG_KEY_MODE (0x03) | config/mode | uint8_t | 0 (normal) | Recording preset |
 | CONFIG_KEY_NOISE (0x04) | config/noise_suppress | uint8_t | 12 | Noise suppression (dB) |
-| CONFIG_KEY_AUTODEL (0x06) | config/auto_delete_days | int8_t | -1 (off) | Auto-delete days |
 | CONFIG_KEY_DEREVERB (0x09) | config/dereverb_enabled | bool | true | Dereverberation |
 | CONFIG_KEY_BRIGHTNESS (0x0A) | config/oled_brightness | uint8_t | 32 | OLED brightness |
+| CONFIG_KEY_WIFI_PASSWORD | config/wifi_password | char[9] | generated | WiFi AP password |
+| CONFIG_KEY_DEVICE_NAME | config/device_name | char[257] | "" | User-defined name |
+| CONFIG_KEY_WIFI_CHANNEL | config/wifi_channel | uint8_t | 36 | WiFi AP channel |
+| CONFIG_KEY_WIFI_REG_DOMAIN | config/wifi_reg_domain | char[3] | "US" | WiFi regulatory domain |
+| — | time/unix_timestamp | int64_t | — | Last synced time |
+| — | sn/value | string | "" | Factory serial number |
+
+`noise_suppress` and `dereverb_enabled` have **no AT setter** in the current
+firmware; they keep their Kconfig defaults (enhanced mode uses them when
+initialising SpeexDSP). `AT+MODE` only changes `config/mode`.
 
 **Time Persistence**: Unix timestamp saved to `time/unix_timestamp`. On boot, time is restored from storage and advanced by elapsed uptime. This allows session IDs to remain meaningful across reboots.
 
-**Factory Reset**: Resets all 5 config keys to Kconfig defaults and saves.
+**Factory Reset**: Resets the 8 `config/*` keys to Kconfig defaults. `time/unix_timestamp` and `sn/value` are **not** touched.
 
 ### 3.11 BLE Module (ble.c, transport_ble.c)
 
@@ -574,8 +595,10 @@ enum transfer_state {
 **Pairing**: BLE SMP with bonding, 1 max paired device, encrypted connection.
 
 **Advertising & Connection Parameters**: Fast advertising for a short window after
-boot/connect-drop, then drops to **slow advertising** (~1s interval, ~0.1mA averaged
-to idle) — including for un-bonded devices — to minimize idle current. Once
+boot/connect-drop, then drops to **slow advertising** — the code uses
+`BT_GAP_ADV_FAST_INT_MIN_2`/`MAX_2` (100–150 ms), including for un-bonded
+devices, to minimise idle current. (A 1–2 s interval was tried and rejected
+because phones connected unreliably; the older "~1 s" note was stale.) Once
 connected, the link requests a tight interval (15–30) with a supervision timeout of
 800; parameter-update requests from the central are accepted (clamped) rather than
 rejected, so iOS/Android centrals settle quickly and the link stays stable.
@@ -603,7 +626,7 @@ Event notifications are JSON objects sent over the BLE GATT Response characteris
 
 **Purpose**: Battery monitoring via NPM1300 PMIC with nRF Fuel Gauge.
 
-**Fuel Gauge**: Uses `CONFIG_NRF_FUEL_GAUGE=y` with `CONFIG_NRF_FUEL_GAUGE_VARIANT_SECONDARY_CELL=y` and the profiled `clip_25C` 240 mAh cell model for State of Charge (SoC) estimation. The opaque gauge state is saved in LittleFS and explicitly loaded at boot, so SoC remains continuous across restart rather than being re-estimated from the recovered cell voltage. The saved state is tagged with a CRC of the battery model; it is discarded automatically after a model or state-format update.
+**Fuel Gauge**: Uses `CONFIG_NRF_FUEL_GAUGE=y` with `CONFIG_NRF_FUEL_GAUGE_VARIANT_SECONDARY_CELL=y` and the profiled `clip_25C` 240 mAh cell model for State of Charge (SoC) estimation. The current profile is a **single-temperature 25°C** model (`temps={25}`); temperature interpolation outside 25°C is not represented, so wide-temperature accuracy would require re-profiling at 5/25/45°C. The opaque gauge state is saved in LittleFS and explicitly loaded at boot, so SoC remains continuous across restart rather than being re-estimated from the recovered cell voltage. The saved state is tagged with a CRC of the battery model; it is discarded automatically after a model or state-format update.
 
 **Displayed %**: a *directionally rate-limited* view of the fuel gauge's integer
 SoC — the displayed value moves at most `CONFIG_CLIP_BATTERY_DISPLAY_MAX_STEP`
@@ -612,7 +635,18 @@ with zero lag while a spurious jump (e.g., during charger plug-in) is clamped.
 The displayed value is persisted across reboot (seeded on boot), and setting the
 Kconfig step to 0 restores the raw gauge value.
 
-**Reporting**: Battery level (0-100%), charging status reported via AT+GSTAT and displayed on OLED status bar. A low-battery warning (15% or below, discharging) shows a UI event; there is **no** automatic low-battery shutdown (removed — unreliable SoC during PMIC I2C failures caused false shutdowns). Power-off is manual (`AT+POWEROFF` / button).
+**Low-SoC recovery / raw reporting**: `AT+BATT` returns `battery` (displayed,
+smoothed) and `soc_raw` (un-smoothed gauge). While discharging, the display
+normally only re-anchors upward when the gauge is ≥20 points higher; below 20%
+that rule would latch a 0% display while the gauge still reads 1–19%, so the
+low-display path now tracks upward at the normal 3%/poll step. The boot-time
+stale-state heal uses a 5-point voltage gap for persisted seeds ≤5% (instead of
+20), so an OTA/reboot cannot resume a phantom-drained 0%. The idle current fed
+to the gauge defaults to **350µA** (`CONFIG_CLIP_BATTERY_IDLE_CURRENT_UA`,
+measured at 3.7V); the previous 400µA over-counted by 50µA and drained
+the gauge to 0% while the cell still held charge.
+
+**Reporting**: Battery level (0-100%), charging status reported via AT+GSTAT and displayed on OLED status bar. A low-battery warning (15% or below, discharging) shows a UI event. Automatic power-off is **voltage-based**: at/below `CONFIG_CLIP_BATTERY_SHUTDOWN_MV` (default 3.1V) continuously for `CONFIG_CLIP_BATTERY_SHUTDOWN_CONFIRM_MS` (default 2 minutes), with valid sensor readings and no charging/VBUS; any reading above the floor resets the confirmation. It calls the normal graceful shutdown chain (stop recording, close files, cancel transfer, save fuel-gauge/time, ship mode). The displayed/raw SoC is never used to trigger shutdown; manual `AT+POWEROFF` / button still works.
 
 **Charge Termination**: 4.25V (raised from 4.20V) so the fuel gauge reaches ~100% instead of settling at ~99%. The cell (240/HSZ 362123) is 4.20V-rated; 4.25V is a mild overcharge (reduced cycle life, accepted for accurate 100%).
 
@@ -632,7 +666,7 @@ Kconfig step to 0 restores the raw gauge value.
 | Single click | RECORDING / PAUSED | `CLIP_EVENT_MARK` (bookmark) |
 | Single click | IDLE / ERROR / WIFI_SYNC | `CLIP_EVENT_STATUS_SHOW` |
 | Long press | RECORDING | `CLIP_EVENT_STOP` |
-| Long press | IDLE / ERROR | `CLIP_EVENT_START` |
+| Long press + release | IDLE | RTC-marked `CLIP_EVENT_START` (requires BLE File Data notify) |
 | Long press level 1/2/3 | Any | `CLIP_EVENT_POWER_OFF_SHOW` |
 | Release (after power-off show) | Any | `CLIP_EVENT_POWER_OFF_EXEC` |
 
@@ -671,7 +705,7 @@ enum ui_state {
 - Normal mode: dot animation (slower, simpler)
 - Enhanced mode: wave animation using real-time audio energy levels (13-bar histogram from BLE audio vis data)
 - Bookmark: flash animation
-- Status: auto-timeout after 3 seconds
+- Status: auto-timeout after 10 seconds (`CONFIG_CLIP_DISPLAY_STATUS_TIMEOUT_MS`, default 10000)
 - Low battery: fullscreen warning when battery falls to 15% or below (one-shot until recharged)
 
 **Status Bar Icons** (24x24 XBM):
@@ -707,15 +741,16 @@ enum ui_state {
 ### 4.1 Audio Recording Flow
 
 ```
-PDM DMIC (16kHz, 2ch, stereo)
+PDM DMIC (16kHz, 2ch PDM input; recorded as mono)
     |
     v  (DMA, memory slab buffers)
 Audio Thread: dmic_read() -> buffer (1280 bytes)
     |
     v
 process_pcm_frame():
-    STEREO: pass through unchanged
-    MERGE:  (L + R) / 2 -> SpeexDSP preprocess (noise suppress + dereverb)
+    both presets: delay-aligned L+R merge -> high-pass -> integer AGC
+    normal:   SpeexDSP bypassed
+    enhanced: + SpeexDSP noise suppression + dereverb
     |
     v
 Opus Encoder (20ms frame, 320 samples)
@@ -804,7 +839,8 @@ Main thread: clip_event_process()
 
 | Thread | Priority | Stack Size | Purpose |
 |--------|----------|------------|---------|
-| Main (event loop) | 0 | 6144 (CONFIG_MAIN_STACK_SIZE) | Event processing, state transitions, WiFi on/off |
+| Main (event loop) | 0 | 6144 (CONFIG_MAIN_STACK_SIZE) | Event processing, state transitions |
+| WiFi worker | 5 | 4096 (wifi.c `K_THREAD_DEFINE`) | Blocking AP bring-up/teardown (queued from dispatcher) |
 | Audio recording | 0 | 32768 (CONFIG_CLIP_AUDIO_STACK_SIZE) | DMIC read, DSP, Opus encode, storage write |
 | AT Server | 7 | 8192 (CONFIG_CLIP_AT_SERVER_STACK_SIZE, prj.conf; Kconfig default 4096) | AT command parsing and dispatch |
 | Transfer | 5 | 4096 (CONFIG_CLIP_TRANSFER_STACK_SIZE, prj.conf; Kconfig default 16384) | File transfer (read + send chunks) |
@@ -817,7 +853,7 @@ Main thread: clip_event_process()
 **Priority Rationale:**
 - **AT Server (7)**: Highest app priority for responsive command processing
 - **Transfer (5)** / **UDP (5)** / **Input (5)**: Mid-priority for I/O operations
-- **Audio (0)** / **Main (0)**: Audio needs large stack; main needs stack for WiFi ops
+- **Audio (0)** / **Main (0)**: Audio needs large stack; main runs the dispatcher transitions
 
 ### 5.2 Inter-Thread Communication
 
@@ -890,8 +926,8 @@ Main thread: clip_event_process()
 | RECORDING | PAUSED | PAUSE | audio_pause, haptic, display pause |
 | PAUSED | RECORDING | RESUME | audio_resume, haptic, display rec |
 | PAUSED | IDLE | STOP | audio_stop, haptic, display idle |
-| IDLE | WIFI_SYNC | WIFI_ON | wifi_on() |
-| WIFI_SYNC | IDLE | WIFI_OFF | wifi_off() |
+| IDLE | WIFI_SYNC | WIFI_ON | wifi_request_async(on) — worker runs wifi_on() |
+| WIFI_SYNC | IDLE | WIFI_OFF | wifi_request_async(off) / pure state commit (see wifi.c) |
 | ERROR | IDLE | START | (transition only) |
 | Any | (same) | MARK | audio_add_bookmark, display mark |
 | Any | (same) | STATUS_SHOW | display status |
@@ -945,14 +981,18 @@ Managed independently by the transfer subsystem. Does not affect device state di
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| CLIP_NORMAL_BITRATE | 32000 | Normal mode Opus bitrate (bps) |
-| CLIP_NORMAL_COMPLEXITY | 1 | Normal mode Opus complexity (0-10) |
-| CLIP_ENHANCED_BITRATE | 32000 | Enhanced mode Opus bitrate (bps) |
-| CLIP_ENHANCED_COMPLEXITY | 1 | Enhanced mode Opus complexity (0-10) |
+| CLIP_NORMAL_BITRATE | 32000 | **Reserved — currently unused** (the encoder always runs MERGE and uses ENHANCED_*) |
+| CLIP_NORMAL_COMPLEXITY | 1 | **Reserved — currently unused** (same reason) |
+| CLIP_ENHANCED_BITRATE | 32000 | Enhanced preset Opus bitrate (bps); also used by Normal |
+| CLIP_ENHANCED_COMPLEXITY | 1 | Enhanced preset Opus complexity (0-10); also used by Normal |
 | CLIP_DEFAULT_NOISE | 12 | Default noise suppression (dB) |
 | CLIP_DEFAULT_DEREVERB | y | Default dereverberation enabled |
-| CLIP_DEFAULT_AUTODEL | -1 | Default auto-delete days (-1=off) |
 | CLIP_DEFAULT_BRIGHTNESS | 32 | Default OLED brightness (0-255) |
+| CLIP_BATTERY_IDLE_CURRENT_UA | 350 | Idle current fed to the fuel gauge, measured at 3.7V (µA) |
+| CLIP_BATTERY_DISPLAY_MAX_STEP | 3 | Max displayed SoC change per 60s poll (%) |
+| CLIP_BATTERY_SHUTDOWN_ENABLE | y | Voltage-based critical auto power-off |
+| CLIP_BATTERY_SHUTDOWN_MV | 3100 | Auto power-off voltage floor (mV) |
+| CLIP_BATTERY_SHUTDOWN_CONFIRM_MS | 120000 | Continuous low-voltage time before shutdown (ms) |
 | CLIP_STORAGE_FULL_PERCENT | 95 | SD usage % at which recording is refused |
 | CLIP_LOG_FS_DEFAULT_ON | y (if LOG_BACKEND_UART) | FS log backend on at boot (debug y / production n) |
 | CLIP_HAPTIC_MOTOR_ENABLED | n | Enable haptic motor |
@@ -970,23 +1010,34 @@ Managed independently by the transfer subsystem. Does not affect device state di
 | CLIP_TRANSFER_CHUNK_SIZE | 4096 | Transfer chunk size (bytes) |
 | CLIP_UDP_THREAD_STACK_SIZE | 4096 | UDP server thread stack (bytes) |
 | CLIP_UDP_THREAD_PRIORITY | 5 | UDP server thread priority |
-| CLIP_UDP_RECV_BUF_SIZE | 1024 | UDP receive buffer size |
+| CLIP_UDP_RECV_BUF_SIZE | 2048 | UDP receive buffer size |
 | CLIP_UDP_MAX_DATA_SIZE | 1024 | UDP maximum data per packet |
-| CLIP_UDP_HEARTBEAT_INTERVAL_MS | 5000 | UDP heartbeat interval |
+| CLIP_UDP_HEARTBEAT_INTERVAL_MS | 5000 | UDP heartbeat interval (client side) |
 | CLIP_UDP_CONNECTION_TIMEOUT_MS | 30000 | UDP connection timeout |
 | CLIP_STORAGE_CHUNK_SIZE | 4096 | Storage write buffer size |
 | CLIP_WIFI_TIMEOUT_MS | 180000 | WiFi AP auto-off timeout (ms), 0 to disable |
+| CLIP_WIFI_MIN_BATTERY_PERCENT | 15 | Minimum displayed SoC (%) to start WiFi; 0 disables |
+| CLIP_WIFI_MIN_BATTERY_MV | 3500 | Minimum battery voltage (mV) to start WiFi; 0 disables |
+
+> `applications/clip/prj.conf` overrides several defaults: AT server stack
+> 8192 (not 4096), transfer stack 4096 (not 16384), UDP thread stack 2048
+> (not 4096), haptic motor enabled (Kconfig default `n`). Those effective
+> values are the ones in §5.1.
 
 ### 8.2 Runtime Configuration (Zephyr Settings on LittleFS)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| config/mode | uint8_t | 0 | Recording mode (0=normal, 1=enhanced) |
+| config/mode | uint8_t | 0 | Recording preset (0=normal, 1=enhanced) |
 | config/noise_suppress | uint8_t | 12 | Noise suppression level (dB) |
-| config/auto_delete_days | int8_t | -1 | Auto-delete days (-1=off, 0-30) |
 | config/dereverb_enabled | bool | true | Dereverberation enabled |
 | config/oled_brightness | uint8_t | 32 | OLED brightness (0-255) |
+| config/wifi_password | char[9] | generated | WiFi AP password |
+| config/device_name | char[257] | "" | User-defined device name |
+| config/wifi_channel | uint8_t | 36 | WiFi AP channel |
+| config/wifi_reg_domain | char[3] | "US" | WiFi regulatory domain |
 | time/unix_timestamp | int64_t | - | Synced time (for session IDs) |
+| sn/value | string | "" | Factory serial number (survives AT+FACTORY) |
 
 ## 9. Memory Architecture
 
@@ -996,11 +1047,11 @@ Managed independently by the transfer subsystem. Does not affect device state di
 |-----------|------|-----------|
 | Audio thread stack | 32 KB | Static (K_THREAD_STACK_DEFINE) |
 | Transfer thread stack | 4 KB | Static (prj.conf; Kconfig default 16 KB) |
-| Audio memory slab | 16 x 1280 B = 20 KB | Static (K_MEM_SLAB_DEFINE_STATIC) |
+| Audio memory slab | 32 x 1280 B = 40 KB | Static (K_MEM_SLAB_DEFINE_STATIC) |
 | AT server thread stack | 8 KB | Static (prj.conf; Kconfig default 4 KB) |
 | UDP server thread stack | 2 KB | Static (prj.conf; Kconfig default 4 KB) |
 | Main thread stack | 6 KB | Static (CONFIG_MAIN_STACK_SIZE) |
-| Heap | 80 KB | Static (CONFIG_HEAP_MEM_POOL_SIZE=81920 in prj.conf) |
+| Heap | 72.5 KB | Static (CONFIG_HEAP_MEM_POOL_SIZE=74240 in prj.conf) |
 | Transfer chunk buffer | 4 KB | Static |
 | Opus encoder state | ~20 KB | Heap (opus_encoder_create) |
 | SpeexDSP preprocessor | ~10 KB | Heap (speex_preprocess_state_init) |

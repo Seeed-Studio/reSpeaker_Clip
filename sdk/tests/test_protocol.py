@@ -11,6 +11,9 @@ from clip.protocol import (
     FileEndFrame,
     FileStartFrame,
     JsonNotificationDecoder,
+    StreamDataFrame,
+    StreamEndFrame,
+    StreamStartFrame,
     TransferDoneFrame,
     decode_file_frame,
 )
@@ -52,5 +55,34 @@ def test_udp_data_frame_crc_is_checked() -> None:
 
 @pytest.mark.parametrize("frame", [b"", b"\x01", b"\x10\x00\x00\x00\x00\x00"])
 def test_rejects_malformed_frames(frame: bytes) -> None:
+    with pytest.raises(ProtocolError):
+        decode_file_frame(frame)
+
+
+def test_decodes_stream_frames() -> None:
+    sid = b"20260716022113"
+    start = b"\x13" + bytes((len(sid),)) + sid
+    assert decode_file_frame(start) == StreamStartFrame(session_id=sid.decode())
+
+    payload = b"opus-bytes"
+    data = b"\x14" + struct.pack("<HH", 42, len(payload)) + payload
+    assert decode_file_frame(data) == StreamDataFrame(sequence=42, payload=payload)
+
+    assert decode_file_frame(b"\x15\x02") == StreamEndFrame(reason=2)
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        b"\x13",  # truncated STREAM_START header
+        b"\x13\x00",  # empty session id
+        b"\x13\x05abc",  # session id length mismatch
+        b"\x14\x00\x00",  # truncated STREAM_DATA header
+        b"\x14" + struct.pack("<HH", 0, 4) + b"ab",  # payload length mismatch
+        b"\x15",  # truncated STREAM_END
+        b"\x15\x00\x00",  # oversized STREAM_END
+    ],
+)
+def test_rejects_malformed_stream_frames(frame: bytes) -> None:
     with pytest.raises(ProtocolError):
         decode_file_frame(frame)

@@ -61,9 +61,15 @@ struct storage_session_info {
 int storage_init(void);
 
 /**
- * @brief Cleanup storage subsystem
+ * @brief Cleanup storage subsystem (unmount the SD)
+ *
+ * Callers handing the raw card to another owner (USB MSC) must check the
+ * result: a failed unmount means the filesystem is still in use and the
+ * other owner must not touch the card.
+ *
+ * @return 0 on success (or already unmounted), negative error code on failure
  */
-void storage_cleanup(void);
+int storage_cleanup(void);
 
 /**
  * @brief Remount SD card after MSC disable
@@ -353,6 +359,37 @@ int storage_list_chunks(const char *session_id, uint32_t *chunks, int max_chunks
  * @return 0 on success, negative error code on failure
  */
 int storage_delete_session(const char *session_id);
+
+/* Remove a session created at recording START whose first file create
+ * failed (no json-only phantom). Safe for the current session. */
+int storage_abort_session(const char *session_id);
+
+/* Boot-time GC: delete sessions with zero audio files. Returns the
+ * number removed. (Currently unreferenced — encounter-time cleanup in
+ * the transfer path replaced the boot sweep.) */
+int storage_sweep_empty_sessions(void);
+
+/**
+ * @brief On-demand empty-session cleanup (AT+GC)
+ *
+ * Sweeps metadata-only session leftovers and prunes empty time buckets.
+ * Refuses (-EBUSY) while an audio file is open; app-level busyness
+ * (recording/transfer/MSC/OTA) is checked by the AT layer first.
+ *
+ * @return 0 on success, -ENODEV if the SD is not mounted, -EBUSY mid-write
+ */
+int storage_cleanup_empty(int *removed_out);
+
+/**
+ * @brief Breakdown of the last storage_cleanup_empty() run
+ *
+ * @param empty_out sessions removed for holding no audio (may be NULL)
+ * @param synced_out sessions removed for being fully synced (may be NULL)
+ */
+void storage_gc_breakdown(int *empty_out, int *synced_out);
+
+/* True if the session holds at least one non-empty .opus file. */
+int storage_session_has_audio(const char *session_id);
 
 /**
  * @brief Format SD card

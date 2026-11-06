@@ -17,9 +17,10 @@
 #include "transport.h"
 #include "ble.h"
 #include "transfer.h"
+#include "clip_event.h"
 #include "clip_usb_dfu.h"
 
-LOG_MODULE_REGISTER(usb, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(usb, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* USB device definition (Seeed VID 0x2886) */
 USBD_DEVICE_DEFINE(clip_usbd,
@@ -30,6 +31,9 @@ USBD_DEVICE_DEFINE(clip_usbd,
 USBD_DESC_LANG_DEFINE(clip_lang);
 USBD_DESC_MANUFACTURER_DEFINE(clip_mfr, "Seeed Studio");
 USBD_DESC_PRODUCT_DEFINE(clip_product, "reSpeaker Clip");
+/* Unique per-device serial (hwinfo chip-id derived — lets the OS tell two
+ * Clips apart; this is NOT the product SN, which lives behind AT+SN). */
+USBD_DESC_SERIAL_NUMBER_DEFINE(clip_serial);
 
 /* Configuration descriptor (bus-powered, 100mA) */
 USBD_DESC_CONFIG_DEFINE(clip_fs_cfg, "Default");
@@ -172,6 +176,7 @@ int usb_cdc_init(void)
 	usbd_add_descriptor(&clip_usbd, &clip_lang);
 	usbd_add_descriptor(&clip_usbd, &clip_mfr);
 	usbd_add_descriptor(&clip_usbd, &clip_product);
+	usbd_add_descriptor(&clip_usbd, &clip_serial);
 
 	/* Add FS configuration */
 	err = usbd_add_configuration(&clip_usbd, USBD_SPEED_FS, &clip_fs_config);
@@ -229,8 +234,25 @@ int usb_cdc_enable(void)
 		return -EBUSY;
 	}
 
-	/* Unmount SD card so host has exclusive access */
-	storage_cleanup();
+	/*
+	 * MSC hands the raw SD card to the host. Three things must be true
+	 * before that:
+	 *  - the card must be powered and initialised (the idle power-gate
+	 *    may have cut LDO2 and deinitialised the disk);
+	 *  - the FS log backend must release /SD:/LOG (it otherwise holds an
+	 *    open file, fs_unmount fails with its error unchecked, and host +
+	 *    app end up writing the same FAT volume);
+	 *  - the unmount must actually succeed, so the application cannot
+	 *    touch the card while the host owns it.
+	 */
+	(void)storage_ensure_mounted();
+	clip_log_fs_disable();
+
+	int rc = storage_cleanup();
+	if (rc != 0) {
+		LOG_ERR("USB blocked: SD unmount failed (%d)", rc);
+		return -EBUSY;
+	}
 
 	int err = usbd_enable(&clip_usbd);
 	if (err) {

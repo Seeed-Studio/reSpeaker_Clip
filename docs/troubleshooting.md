@@ -34,7 +34,10 @@ Symptoms → cause → fix, grouped by area. Each entry is deliberately short.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Session list in wrong order after new recordings | FAT directory order is not chronological | Listing uses a cached sorted buffer invalidated on mutations — ensure every mutation invalidates it |
-| Need post-mortem logs after a crash/field issue | Logs persist to SD (`CONFIG_LOG_BACKEND_FS=y`, rotating 64KiB files) | Read `/SD:/LOG/` off the card. Note `CONFIG_LOG_DEFAULT_LEVEL=0` compiles logs out — enable `LOG_RUNTIME_FILTERING` / per-module level when debugging |
+| Need post-mortem logs after a crash/field issue | Logs persist to SD (`CONFIG_LOG_BACKEND_FS=y`, rotating 128KiB files) | Read `/SD:/LOG/` off the card. On release hardware use `AT+LOG=info`; production is compiled at INF, so `AT+LOG=debug` is rejected. Use the debug image for DBG |
+| `AT+LOG=debug` returns `Debug log not available in this build` | Production caps `CONFIG_LOG_MAX_LEVEL` at INF; no DBG strings exist | Expected. Use `AT+LOG=info` on production, or flash the debug image when DBG is needed |
+| Battery shows 0% but device still runs for days | Low-SoC display re-anchor held small upward corrections; idle-current feed was 400µA vs measured ~350µA at 3.7V, so the gauge drained early | Fixed: idle feed 350µA, low-SoC display re-anchor, fg-state format v4 reset; `AT+BATT` now reports `soc_raw`. If `soc_raw` is still ~0 at >3.5V, re-calibrate the cell model/idle current |
+| Device powers off by itself around 3.1V | Expected voltage-based auto power-off (3.1V for 2 min, no USB/charging) | Charge before use; this is not a fault. `AT+POWEROFF` is still manual, and plugging USB before the 2-min window cancels it |
 | SD card dead after 45s idle | Not a fault — idle power-gating (unmount → LDO2 off) | Any access lazily remounts via `storage_ensure_mounted()` |
 
 ## Recovery / boot

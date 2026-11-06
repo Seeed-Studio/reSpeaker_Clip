@@ -9,26 +9,28 @@ This document defines the testing standards and methods for evaluating the audio
 ```
 PDM Microphones (x2, 16kHz, 16-bit, +20dB gain)
     |
-SpeexDSP Preprocessing (Enhanced mode only)
-    +-- Noise Suppression (30dB)
-    +-- Dereverberation (40%)
-    +-- AGC (target 30000, max +20dB)
+SpeexDSP Preprocessing (Enhanced only)
+    +-- Noise Suppression (default 12 dB)
+    +-- Dereverberation (level 40, decay 30)
+    +-- (SpeexDSP AGC unavailable in FIXED_POINT; custom integer AGC
+        + high-pass run in BOTH presets)
     |
-Opus Encoding (16kHz, 20ms frames, VBR)
-    +-- Normal mode: stereo, 24 kbps, complexity 1, VOIP
-    +-- Enhanced mode: mono,   24 kbps, complexity 1, VOIP
+Opus Encoding (16kHz, 20ms frames, VBR, AUDIO application)
+    +-- Normal:   mono, 32 kbps, complexity 1 (SpeexDSP bypassed)
+    +-- Enhanced: mono, 32 kbps, complexity 1 (SpeexDSP NS/DR enabled)
     |
 SD Card Storage (raw Opus frames)
 ```
 
-### 1.2 Recording Mode Comparison
+### 1.2 Recording Preset Comparison
 
 | Feature | Normal | Enhanced |
 |---------|--------|----------|
-| Channels | 2 (stereo) | 1 (L+R merged) |
-| DSP Processing | None | Noise suppression + Dereverb + AGC |
-| Opus Bitrate | 24 kbps | 24 kbps |
-| Use Case | High-fidelity recording, post-processing | Far-field speech, real-time transcription |
+| Channels | 1 (L+R merged) | 1 (L+R merged) |
+| SpeexDSP | Bypassed | Noise suppression + Dereverb |
+| AGC / HPF | Integer AGC + HPF | Integer AGC + HPF |
+| Opus Bitrate | 32 kbps | 32 kbps |
+| Use Case | Lower-CPU capture; no noise processing | Far-field speech, real-time transcription |
 
 ---
 
@@ -234,7 +236,7 @@ Step 3: Recording
 Step 4: File Processing
     +-- Export recorded Opus file -> decode to 16kHz WAV
     |   (use tests/tools/decode_opus.py or ffmpeg)
-    +-- Extract single channel from stereo recordings for analysis
+    +-- Analyze the mono recordings directly
 
 Step 5: Alignment and Calculation
     +-- Cross-correlate to align reference audio with recording
@@ -298,20 +300,20 @@ Scoring criterion: **"Can this recording be used directly for speech-to-text?"**
 
 | Parameter | Normal Mode | Enhanced Mode | Notes |
 |-----------|------------|--------------|-------|
-| Opus bitrate | 24 kbps | 24 kbps | VoIP-grade, potentially too low |
+| Opus bitrate | 32 kbps | 32 kbps | Both presets use ENHANCED_BITRATE |
 | Opus complexity | 1 (0-10 scale) | 1 (0-10 scale) | Lowest setting |
-| Opus application | VOIP | VOIP | Optimized for voice calls |
-| Channels | 2 (stereo) | 1 (mono) | -- |
-| Noise suppression | Off | 30 dB | -- |
-| Dereverberation | Off | On (40%/20%) | -- |
-| AGC | Off | On (target 30000) | -- |
+| Opus application | AUDIO | AUDIO | Preserves fricatives for STT |
+| Channels | 1 (mono) | 1 (mono) | -- |
+| Noise suppression | Off | On (default 12 dB) | SpeexDSP |
+| Dereverberation | Off | On (level 40 / decay 30) | SpeexDSP |
+| AGC | On (integer) | On (integer) | SpeexDSP AGC unavailable; custom AGC runs in both |
 
 ### 6.2 Parameter Impact on Transcription Quality
 
 **Opus Bitrate**:
-- 24 kbps stereo = 12 kbps/channel, below Opus recommendation (>=16 kbps/channel for music)
-- 24 kbps mono = full bandwidth for single channel, usually sufficient for speech
-- **Recommendation**: Try 32-48 kbps for Normal mode; 24 kbps may suffice for Enhanced mode
+- Both presets are mono at 32 kbps, so the per-channel rate is 32 kbps.
+- 32 kbps mono is usually sufficient for speech; if higher ASR quality is needed, raise `CONFIG_CLIP_ENHANCED_BITRATE` (used by both presets).
+- The normal Kconfig bitrate/complexity constants are currently unused.
 
 **Opus Complexity**:
 - complexity=1 is fastest but lowest quality
@@ -319,10 +321,11 @@ Scoring criterion: **"Can this recording be used directly for speech-to-text?"**
 - **Recommendation**: Benchmark quality at complexity 5 and 10; select the highest value the CPU can sustain
 
 **Opus Application Type**:
+- The firmware currently uses `OPUS_APPLICATION_AUDIO` (not VOIP), chosen to preserve fricatives for STT.
 - `VOIP`: Optimized for voice calls, may over-compress high frequencies
-- `AUDIO`: Preserves more spectral detail, potentially better for transcription
+- `AUDIO`: Preserves more spectral detail, better for transcription
 - `RESTRICTED_LOWDELAY`: Ultra-low latency, not applicable
-- **Recommendation**: Test whether `AUDIO` mode improves WER
+- **Recommendation**: Keep `AUDIO`; benchmark WER against `VOIP` only if bitrate is reduced.
 
 **SpeexDSP Noise Suppression Level**:
 - 30 dB suppression may be overly aggressive, introducing "musical noise" artifacts

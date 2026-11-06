@@ -68,4 +68,32 @@ void *transport_ble_get_conn(void);
  */
 struct transport *transport_ble_get(void);
 
+/**
+ * @brief Send an RTC STREAM_START frame (0x13) and reset the stream seq
+ *
+ * @param session_id Session ID being streamed
+ * @return 0 on success, negative error code on failure
+ */
+int transport_ble_send_stream_start(const char *session_id);
+
+/**
+ * @brief Send one encoded Opus frame as an RTC STREAM_DATA frame (0x14)
+ *
+ * The frame must fit in a single BLE notification; oversized frames are
+ * rejected with -EMSGSIZE. Sequence advances only on success.
+ *
+ * @param data Encoded frame payload
+ * @param len Payload length
+ * @return 0 on success, negative error code on failure
+ */
+int transport_ble_send_stream_data(const uint8_t *data, uint16_t len);
+
+/**
+ * @brief Send an RTC STREAM_END frame (0x15)
+ *
+ * @param reason RTC_END_REASON_* code
+ * @return 0 on success, negative error code on failure
+ */
+int transport_ble_send_stream_end(uint8_t reason);
+
 #endif /* CLIP_TRANSPORT_BLE_H */

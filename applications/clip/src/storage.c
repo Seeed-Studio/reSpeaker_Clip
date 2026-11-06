@@ -11,6 +11,7 @@
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/settings/settings.h>
 #include <ff.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
@@ -19,6 +20,8 @@
 #include <stdarg.h>
 
 #include "storage.h"
+#include "transfer.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(storage, CONFIG_CLIP_LOG_LEVEL);
 
@@ -31,6 +34,31 @@ static struct fs_mount_t mp = {
 };
 static bool sd_mounted = false;
 static bool sd_powered = false;
+
+/* Runtime SD recovery: a mid-op storm (transfer dying during a stop,
+ * bus glitch) can wedge the card/stack into permanent EIO with ~20-30 s
+ * timeouts per operation until reboot. Count consecutive EIO on the hot
+ * paths; past the threshold drop the mounted flag so the next access
+ * lazily power-cycles the card (storage_ensure_mounted -> full LDO2
+ * off/on + re-init). Passive by design: no rail yanking while an
+ * operation might still be in flight. */
+#define SD_EIO_RECOVER_THRESHOLD 8
+static atomic_t sd_consecutive_eio;
+
+static void storage_note_sd_result(int rc)
+{
+    if (rc == 0) {
+        atomic_set(&sd_consecutive_eio, 0);
+        return;
+    }
+    if (rc == -EIO && sd_mounted &&
+        atomic_inc(&sd_consecutive_eio) + 1 >= SD_EIO_RECOVER_THRESHOLD) {
+        LOG_ERR("SD persistent EIO - marking unmounted for power-cycle "
+                "remount on next access");
+        atomic_set(&sd_consecutive_eio, 0);
+        sd_mounted = false;
+    }
+}
 static bool sd_full = false;     /* latched on write failure; cleared when free space recovers */
 
 /* SD power-gating handles: LDO2 rail, SPI4 bus, and CS pin parking */
@@ -56,6 +84,18 @@ static uint8_t write_buffer[CONFIG_CLIP_STORAGE_CHUNK_SIZE];
 static uint32_t buffer_pos = 0;
 static struct fs_file_t *current_file_ptr = NULL;
 
+/* Sentinel for update_session_json(): mid-recording rollover update —
+ * keep the on-disk duration (the session is still growing) and keep
+ * recording:true (the STOP path passes a real duration and closes it). */
+#define STORAGE_KEEP_DURATION ((uint32_t)-1)
+
+/* Durability note: data reaches the media on every 4 KiB flush; the FAT
+ * directory entry (file size) is synced at every segment close (the
+ * pre-0.1.5 behavior). A mid-segment fs_sync from THIS thread was tried
+ * and reverted: it stalled the audio pipeline >40 ms (encoder window
+ * 28 ms, DMIC starvation timeouts every cycle) — power-cut exposure of
+ * one segment's metadata is the accepted trade. */
+
 /* Statistics */
 static uint32_t total_chunks = 0;
 static uint64_t total_bytes = 0;
@@ -65,6 +105,18 @@ static uint64_t session_bytes_base = 0;  /* total_bytes at session start */
 
 /* Current recording session */
 static char current_session_id[STORAGE_SESSION_ID_LEN] = {0};
+
+/* Set before the first mkdir of a new session, cleared only after
+ * current_session_id is published or the start is rolled back. Automatic
+ * GC/delete must refuse while set: files:0 + no audio looks empty. */
+static atomic_t session_creating = ATOMIC_INIT(0);
+
+/* Last cleanup's breakdown (set by storage_cleanup_empty, read by AT+GC). */
+static int gc_removed_empty;
+static int gc_removed_synced;
+
+/* Serialize directory create/unlink against the empty-bucket GC. */
+static K_MUTEX_DEFINE(recdir_mutex);
 
 /* Track current writing file for transfer coordination */
 static char writing_session[STORAGE_SESSION_ID_LEN] = {0};
@@ -76,6 +128,79 @@ static K_SEM_DEFINE(file_closed_sem, 0, 1);
 /* Mutex to serialize session.json read-modify-write across threads */
 static K_MUTEX_DEFINE(session_json_mutex);
 
+/* Persisted "untransferred audio exists" flag - the indicator's fast
+ * path. Recording start sets it; a bounded newest-first verification walk
+ * (only while it is true, e.g. after a transfer completes) clears it.
+ * Boot reads the flag instead of scanning the card. Worst-case drift is
+ * conservative (flag stays true until the next verification). */
+/* v2: the v1 key was poisoned by the 3-byte-read scan bug (interim test
+ * builds only) — a fresh key forces the one-time boot seed scan, which
+ * now reads correctly and converges the flag to card truth. */
+#define UNSYNCED_KEY "storage/unsynced2"
+static bool unsynced_cached;
+static bool unsynced_loaded;
+
+static int unsynced_settings_set(const char *key, size_t len,
+                                 settings_read_cb read_cb, void *cb_arg)
+{
+    uint8_t val;
+
+    ARG_UNUSED(key);
+    if (len != sizeof(val)) {
+        return -EINVAL;
+    }
+    if (read_cb(cb_arg, &val, sizeof(val)) != sizeof(val)) {
+        return -EIO;
+    }
+    unsynced_cached = val != 0;
+    unsynced_loaded = true;
+    return 0;
+}
+SETTINGS_STATIC_HANDLER_DEFINE(unsynced, UNSYNCED_KEY, NULL,
+                               unsynced_settings_set, NULL, NULL);
+
+/* Persistence is DEFERRED to the system workqueue: storage_create_session
+ * calls this on the AUDIO thread inside the recording-start SD burst, and a
+ * synchronous LittleFS write (~100-300 ms) there stalled the pipeline past
+ * the DMIC starvation threshold at every start. RAM flag is immediate
+ * (indicator semantics unchanged); coalesced write follows. Drift window:
+ * a power cut before the deferred write persists loses one flag update —
+ * the next verification walk self-heals it (conservative direction). */
+static struct k_work_delayable unsynced_save_work_d;
+
+static void unsynced_save_work_handler(struct k_work *w)
+{
+    uint8_t val = unsynced_cached ? 1U : 0U;
+    int rc = settings_save_one(UNSYNCED_KEY, &val, sizeof(val));
+
+    ARG_UNUSED(w);
+    if (rc != 0) {
+        LOG_WRN("unsynced flag save %d", rc);
+    }
+}
+
+static void storage_set_unsynced(bool v)
+{
+    if (unsynced_loaded && unsynced_cached == v) {
+        return; /* unchanged - no write at all */
+    }
+    unsynced_cached = v;
+    unsynced_loaded = true;
+    /* Delayed, not just deferred: the write shares the global fs mutex
+     * with the SD burst, so an immediate workqueue write still puts the
+     * audio thread behind it inside the recording-start window. 3 s
+     * clears the start burst (and the first 4 KiB flush). */
+    k_work_reschedule(&unsynced_save_work_d, K_SECONDS(3));
+}
+
+/* Shared session-id window for has_unsynced/sweep — 1 KiB in .bss, NOT on
+ * the caller's stack: storage_has_unsynced_sessions() runs on the TRANSFER
+ * thread (transfer cleanup) whose 4 KiB stack overflowed with a local
+ * ids[64][16] + get_session_info frame — silent memory corruption, device
+ * froze on "phone connects and syncs". */
+static K_MUTEX_DEFINE(session_scan_mutex);
+static char session_scan_ids[64][16];
+
 /* Internal functions */
 static int update_free_space(void);
 static int create_marks_file(const char *path);
@@ -85,9 +210,13 @@ static int create_session_json(const char *path, const char *session_id,
 static int update_session_json(const char *session_id, uint32_t duration_sec,
                                uint32_t chunk_count, uint64_t session_bytes);
 static int flush_write_buffer(void);
-static void delete_dir_contents(const char *dir_path);
+static bool delete_dir_contents(const char *dir_path);
+static void prune_empty_parents(const char *session_id);
+static bool session_is_metadata_only(const char *session_id);
+static void prune_empty_time_buckets(void);
 static int validate_session_id(const char *session_id);
 static int scan_session_ids(char ids[][16], int max_ids, int *total);
+static bool scan_unsynced_newest(void);
 
 static int storage_path_format(char *path, size_t path_size, const char *fmt, ...)
 {
@@ -232,11 +361,10 @@ static int ensure_bucket_directories(const char *session_id)
     if (rc != 0) {
         return rc;
     }
-    rc = storage_path_format(path, sizeof(path), "%s/0", session_dir);
-    if (rc != 0) {
-        return rc;
-    }
-    return ensure_directory(path);
+    /* The "0" group is created lazily by
+     * ensure_time_bucket_chunk_directory() on the first chunk. Creating it
+     * here left SS/0 behind for every zero-file/aborted recording. */
+    return 0;
 }
 
 static int ensure_time_bucket_chunk_directory(const char *session_id,
@@ -271,7 +399,7 @@ int storage_init(void)
         k_msleep(20);
     }
 
-    LOG_INF("SD init");
+    LOG_DBG("SD init");
 
     /* Card power-up race: the LDO2 ramp plus the card's internal init
      * can exceed the settle delay on some cards / temperatures. A boot
@@ -314,7 +442,16 @@ int storage_init(void)
 
     sd_mounted = true;
     sd_powered = true;
-    LOG_INF("SD card mounted at /SD:");
+    LOG_DBG("SD card mounted at /SD:");
+
+    /* Restore the persisted untransferred flag (the indicator's fast
+     * path - replaces the boot-time card scan). First boot after this
+     * feature / flag lost: seed it once with a verification walk. */
+    k_work_init_delayable(&unsynced_save_work_d, unsynced_save_work_handler);
+    settings_load_subtree("storage");
+    if (!unsynced_loaded) {
+        (void)storage_has_unsynced_sessions(); /* scans + persists */
+    }
 
     /* Create base REC directory if not exists */
     rc = fs_stat(STORAGE_BASE_PATH, &entry);
@@ -333,13 +470,71 @@ int storage_init(void)
     return 0;
 }
 
-void storage_cleanup(void)
+/* On-demand cleanup (AT+GC): sweep metadata-only leftovers and prune
+ * empty time buckets. Runs in the caller's (AT server) thread; refuses
+ * while an audio file is open. App-level busyness (recording, transfer,
+ * MSC, OTA) is checked by the AT layer before calling. */
+int storage_cleanup_empty(int *removed_out)
 {
+    int removed;
+
+    if (!sd_mounted) {
+        return -ENODEV;
+    }
+    {
+        char ws[STORAGE_SESSION_ID_LEN], wf[STORAGE_FILENAME_MAX_LEN];
+
+        if (storage_get_writing_file(ws, wf, sizeof(ws), sizeof(wf))) {
+            return -EBUSY;
+        }
+    }
+
+    removed = storage_sweep_empty_sessions();
+    prune_empty_time_buckets();
+
+    /* Synced sessions may have been reclaimed — converge the untransferred
+     * indicator with the bounded newest-first verification walk. */
+    if (unsynced_cached && !audio_is_recording()) {
+        (void)storage_has_unsynced_sessions();
+    }
+
+    if (removed_out) {
+        *removed_out = removed;
+    }
+    return 0;
+}
+
+void storage_gc_breakdown(int *empty_out, int *synced_out)
+{
+    if (empty_out) {
+        *empty_out = gc_removed_empty;
+    }
+    if (synced_out) {
+        *synced_out = gc_removed_synced;
+    }
+}
+
+int storage_cleanup(void)
+{
+    int rc = 0;
+
+    k_mutex_lock(&sd_lifecycle_mutex, K_FOREVER);
     if (sd_mounted)
     {
-        fs_unmount(&mp);
-        sd_mounted = false;
+        rc = fs_unmount(&mp);
+        if (rc == 0)
+        {
+            sd_mounted = false;
+        }
+        else
+        {
+            /* Keep sd_mounted set: the volume is still in use, so the
+             * caller must not hand it to another owner. */
+            LOG_ERR("SD unmount failed: %d", rc);
+        }
     }
+    k_mutex_unlock(&sd_lifecycle_mutex);
+    return rc;
 }
 
 int storage_idle_poweroff(void)
@@ -352,7 +547,6 @@ int storage_idle_poweroff(void)
         k_mutex_unlock(&sd_lifecycle_mutex);
         return 0;                       /* idempotent */
     }
-
     /* Re-check everything UNDER the lock: a recording/transfer/AT that starts
      * between the work handler's unlocked tick and here must not have its FAT
      * FS unmounted and rail cut underneath it (closes the TOCTOU). */
@@ -422,7 +616,7 @@ int storage_remount(void)
     }
 
     sd_mounted = true;
-    LOG_INF("SD remounted");
+    LOG_DBG("SD remounted");
 
     update_free_space();
     return 0;
@@ -470,7 +664,7 @@ int storage_resume(void)
     sd_powered = true;
     update_free_space();
     k_mutex_unlock(&sd_lifecycle_mutex);
-    LOG_INF("SD resumed (mounted)");
+    LOG_DBG("SD resumed (mounted)");
     return 0;
 }
 
@@ -571,6 +765,8 @@ int storage_create_session(const char *session_id, uint8_t channels,
 {
     char metadata_path[STORAGE_PATH_MAX];
     char marks_path[STORAGE_PATH_MAX];
+    char session_dir[STORAGE_PATH_MAX];
+    struct fs_dirent entry;
     int rc;
 
     if (!sd_mounted) {
@@ -579,11 +775,34 @@ int storage_create_session(const char *session_id, uint8_t channels,
     if (validate_session_id(session_id) != 0) {
         return -EINVAL;
     }
+    if (atomic_get(&session_creating)) {
+        return -EBUSY;
+    }
 
+    rc = build_bucket_session_dir(session_id, session_dir, sizeof(session_dir));
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fs_stat(session_dir, &entry);
+    if (rc == 0) {
+        /* Never open/truncate an existing session tree. A collision or a
+         * leftover must not let a failed start erase real recordings. */
+        LOG_WRN("session %s already exists", session_id);
+        return -EEXIST;
+    }
+    if (rc != -ENOENT) {
+        return rc;
+    }
+
+    /* Publish "creating" before mkdir: GC/delete see a session that has
+     * session.json/files:0 but no audio yet. */
+    atomic_set(&session_creating, 1);
+    k_mutex_lock(&recdir_mutex, K_FOREVER);
     rc = ensure_bucket_directories(session_id);
+    k_mutex_unlock(&recdir_mutex);
     if (rc != 0) {
         LOG_ERR("Failed to create session bucket: %d", rc);
-        return rc;
+        goto fail;
     }
 
     rc = build_session_metadata_path(session_id, metadata_path,
@@ -592,25 +811,41 @@ int storage_create_session(const char *session_id, uint8_t channels,
         rc = build_marks_path(session_id, marks_path, sizeof(marks_path));
     }
     if (rc != 0) {
-        return rc;
+        goto fail;
     }
 
-    LOG_INF("Creating session: %s", session_id);
+    LOG_DBG("Creating session: %s", session_id);
     rc = create_marks_file(marks_path);
     if (rc != 0) {
-        return rc;
+        goto fail;
     }
     rc = create_session_json(metadata_path, session_id, channels, sample_rate, mode);
     if (rc != 0) {
-        return rc;
+        goto fail;
     }
 
-    /* Store current session */
+    /* Store current session, then release the creating guard. */
     strncpy(current_session_id, session_id, sizeof(current_session_id) - 1);
     current_session_id[sizeof(current_session_id) - 1] = '\0';
+    atomic_set(&session_creating, 0);
     session_bytes_base = total_bytes;
 
+    /* New audio exists -> the untransferred flag goes up immediately
+     * (persisted; cleared by the next verification walk). */
+    storage_set_unsynced(true);
+
     return 0;
+
+fail:
+    /* The directory was confirmed absent before this call; only this
+     * attempt's tree may be removed. */
+    atomic_set(&session_creating, 0);
+    if (strcmp(current_session_id, session_id) == 0) {
+        current_session_id[0] = '\0';
+    }
+    (void)storage_delete_session(session_id);
+    prune_empty_parents(session_id);
+    return rc;
 }
 
 int storage_close_session(const char *session_id, uint32_t duration_sec,
@@ -625,6 +860,29 @@ int storage_close_session(const char *session_id, uint32_t duration_sec,
 
     LOG_INF("session close: %s chunks=%u dur=%us",
             session_id, chunk_count, duration_sec);
+
+    /* Zero audio files (first file create failed and was aborted, or an
+     * immediate stop before the first encoded frame): keeping the dir
+     * would leave a phantom "untransferred" session forever — session.json
+     * is the only thing the scan qualifies sessions by. Remove the tree. */
+    if (chunk_count == 0) {
+        LOG_DBG("session %s closed with 0 files, removing", session_id);
+        if (strcmp(current_session_id, session_id) == 0)
+        {
+            current_session_id[0] = '\0';
+        }
+        /* Automatic destructive path: metadata-only sessions only. */
+        if (!session_is_metadata_only(session_id)) {
+            LOG_WRN("session %s has data, not removing", session_id);
+            return 0;
+        }
+        if (storage_delete_session(session_id) != 0) {
+            /* -EBUSY can't happen (current cleared); anything else leaves
+             * the dir — the boot sweep finishes the job. */
+            LOG_WRN("empty-session remove failed, sweep will retry");
+        }
+        return 0;
+    }
 
     /* Update session.json with final values */
     update_session_json(session_id, duration_sec, chunk_count, session_bytes);
@@ -709,9 +967,11 @@ static int flush_write_buffer(void)
     if (written != buffer_pos)
     {
         LOG_ERR("Buffer flush incomplete: %zd != %u", written, buffer_pos);
+        storage_note_sd_result(-EIO);
         sd_full = true;
         return -EIO;
     }
+    storage_note_sd_result(0);
 
     buffer_pos = 0;
     return 0;
@@ -739,6 +999,15 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
         }
         fs_close(current_file_ptr);
         current_file_ptr = NULL;
+
+        /* Segment rollover: make the on-disk file count durable. A power
+         * cut previously left session.json at files:0 for the whole
+         * recording (only STOP updated it) — the LIST fallback rescans
+         * the directory, but anything trusting the json saw zero files.
+         * Keeps recording:true (STORAGE_KEEP_DURATION). */
+        (void)update_session_json(session_id, STORAGE_KEEP_DURATION,
+                                  chunk_index - 1,
+                                  total_bytes - session_bytes_base);
     }
 
     /* Initialize file structure */
@@ -777,7 +1046,7 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
     /* Mark this file as being written for transfer coordination */
     storage_set_writing_file(session_id, filename);
 
-    LOG_INF("file: %s (chunk %u)", filepath, chunk_index);
+    LOG_DBG("file: %s (chunk %u)", filepath, chunk_index);
     return 0;
 }
 
@@ -842,7 +1111,7 @@ int storage_write_frame(struct storage_file *file, const uint8_t *data, uint32_t
     file->bytes_written += len + 2; /* +2 for length header */
     file->frames_written++;
     total_bytes += len + 2;
-
+    storage_note_sd_result(0);
     return 0;
 }
 
@@ -1223,13 +1492,19 @@ int storage_list_sessions_paginated(struct storage_session_info *sessions,
                                     int offset, int limit)
 {
     char ids[200][16];
-    int wanted = MIN(offset + limit, (int)ARRAY_SIZE(ids));
     int id_count;
     int result = 0;
 
     if (!sd_mounted || !sessions || offset < 0 || limit <= 0) {
         return -EINVAL;
     }
+
+    /* 64-bit: offset + limit can overflow int for a huge page argument and
+     * make `wanted` negative (storage_list_session_ids then returns
+     * -EINVAL). Clamp before narrowing. */
+    int64_t end64 = (int64_t)offset + limit;
+    int wanted = (end64 > (int64_t)ARRAY_SIZE(ids)) ? (int)ARRAY_SIZE(ids)
+                                                    : (int)end64;
     id_count = storage_list_session_ids(ids, wanted);
     if (id_count < 0) {
         return id_count;
@@ -1425,15 +1700,343 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
     return 0;
 }
 
+static bool session_is_metadata_only(const char *session_id)
+{
+    char dir_path[STORAGE_PATH_MAX];
+    struct fs_dir_t dirp;
+    struct fs_dirent entry;
+    bool safe = true;
+
+    if (build_bucket_session_dir(session_id, dir_path, sizeof(dir_path)) != 0) {
+        return false;
+    }
+    fs_dir_t_init(&dirp);
+    if (fs_opendir(&dirp, dir_path) != 0) {
+        return false;
+    }
+
+    while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != '\0') {
+        if (entry.name[0] == '.') {
+            continue;
+        }
+        if (entry.type == FS_DIR_ENTRY_DIR) {
+            char group_path[STORAGE_PATH_MAX];
+            struct fs_dir_t group_dir;
+            struct fs_dirent group_entry;
+
+            if (storage_path_format(group_path, sizeof(group_path), "%s/%s",
+                                    dir_path, entry.name) != 0) {
+                safe = false;
+                break;
+            }
+            fs_dir_t_init(&group_dir);
+            if (fs_opendir(&group_dir, group_path) != 0) {
+                safe = false;
+                break;
+            }
+            while (fs_readdir(&group_dir, &group_entry) == 0 &&
+                   group_entry.name[0] != '\0') {
+                if (group_entry.name[0] == '.') {
+                    continue;
+                }
+                if (group_entry.type == FS_DIR_ENTRY_FILE &&
+                    group_entry.size == 0) {
+                    /* 0-byte chunk from an aborted/power-cut start — no
+                     * audio in it. The transfer path already deletes
+                     * these on encounter; treat as empty here too. */
+                    continue;
+                }
+                safe = false;
+                break;
+            }
+            fs_closedir(&group_dir);
+            if (!safe) {
+                break;
+            }
+            continue;
+        }
+        if (strcmp(entry.name, "session.json") == 0) {
+            continue;
+        }
+        if (strcmp(entry.name, "marks.bin") == 0) {
+            /* A bookmark is a position inside audio; with no audio bytes
+             * it points at nothing and never blocks reclamation. */
+            continue;
+        }
+        safe = false;
+        break;
+    }
+
+    fs_closedir(&dirp);
+    return safe;
+}
+
 bool storage_has_unsynced_sessions(void)
 {
-	char id[16];
+	bool res;
 
-	/* "Untransferred" indicator: any session present counts, instead of
-	 * reading each session.json to compare synced_files vs file_count.
-	 * scan_session_ids stops at the first session found (max_ids=1), so this
-	 * is O(1) even with thousands of sessions — no per-session reads. */
-	return storage_list_session_ids(&id, 1) > 0;
+	/* Recording active: unsynced audio exists by definition — answer
+	 * without touching the card. This also keeps the transfer-cleanup
+	 * verification scan OFF the SD while a recording is stopping (the
+	 * exact contention window that stretched stops to 5-8 s when a
+	 * transfer died concurrently). */
+	if (audio_is_recording()) {
+		return true;
+	}
+
+	/* Fast path: persisted flag false -> no unsynced audio, no card
+	 * access at all. Flag true (or first boot, never stored) ->
+	 * bounded newest-first verification walk; the result is persisted
+	 * so the flag self-heals after the next sync/delete. The common
+	 * case (newest session unsynced) resolves in 1-2 session reads. */
+	if (unsynced_loaded && !unsynced_cached) {
+		return false;
+	}
+	k_mutex_lock(&session_scan_mutex, K_FOREVER);
+	res = scan_unsynced_newest();
+	k_mutex_unlock(&session_scan_mutex);
+	storage_set_unsynced(res);
+	return res;
+}
+
+#define UNSYNCED_MAX_LEVEL  16
+#define UNSYNCED_MAX_DEPTH  4    /* day / hour / minute / session */
+#define UNSYNCED_MAX_CHECKS 512
+
+static char scan_names[UNSYNCED_MAX_DEPTH][UNSYNCED_MAX_LEVEL][12];
+static char scan_child[UNSYNCED_MAX_DEPTH][STORAGE_PATH_MAX];
+static char scan_json_buf[384];
+
+/* Read one session.json and answer whether the session holds unsynced
+ * audio (synced < files, or still recording). */
+static bool session_json_unsynced(const char *session_dir)
+{
+    char path[STORAGE_PATH_MAX];
+    struct fs_file_t file;
+    char *buf = scan_json_buf;
+    uint32_t files = 0, synced = 0;
+    ssize_t n;
+
+    if (storage_path_format(path, sizeof(path), "%s/session.json",
+                            session_dir) != 0) {
+        return false;
+    }
+    fs_file_t_init(&file);
+    if (fs_open(&file, path, FS_O_READ) != 0) {
+        return false;
+    }
+    /* sizeof(scan_json_buf), NOT sizeof(buf): buf is a pointer here —
+     * sizeof(buf) read 3 bytes, every json parse came up empty and the
+     * scan answered 'all synced' for every session (indicator off after
+     * reboot with unsynced audio). */
+    n = fs_read(&file, buf, sizeof(scan_json_buf) - 1);
+    fs_close(&file);
+    if (n <= 0) {
+        return false;
+    }
+    buf[n] = 0;
+
+    char *p = strstr(buf, "\"files\":");
+    if (p) {
+        files = (uint32_t)atoi(p + 8);
+    }
+    p = strstr(buf, "\"synced\":");
+    if (p) {
+        synced = (uint32_t)atoi(p + 9);
+    }
+    p = strstr(buf, "\"recording\":");
+    if (p && strncmp(p + 12, "true", 4) == 0) {
+        return true; /* active recording always counts */
+    }
+    return synced < files;
+}
+
+/* Walk the YYYYMMDD/HH/MM/SS tree NEWEST-first, stop at the first
+ * unsynced session - the newest sessions are the likely-unsynced ones,
+ * so the common case resolves in 1-2 session reads. Bounded: newest 16
+ * entries per level, 512 session checks.
+ *
+ * ALL buffers are static (.bss, guarded by session_scan_mutex): the
+ * recursion + json frame as stack locals overflowed first the transfer
+ * thread (4 KiB) and then the main thread at boot (6 KiB, silent death
+ * right after audio init). Per-level stack cost is now ~100 B. */
+static bool scan_level_unsynced(const char *dir_path, int level, int *checks)
+{
+    char (*names)[12] = scan_names[level];
+    size_t wl = (level == 0) ? 8 : 2;
+    struct fs_dir_t dp;
+    struct fs_dirent ent;
+    int cnt = 0;
+
+    fs_dir_t_init(&dp);
+    if (fs_opendir(&dp, dir_path) != 0) {
+        return false;
+    }
+    while (fs_readdir(&dp, &ent) == 0 && ent.name[0] != 0) {
+        if (ent.type == FS_DIR_ENTRY_DIR && ent.name[0] != '.' &&
+            strlen(ent.name) == wl && is_decimal_name(ent.name, wl) &&
+            cnt < UNSYNCED_MAX_LEVEL) {
+            strncpy(names[cnt], ent.name, 11);
+            names[cnt][11] = 0;
+            cnt++;
+        }
+    }
+    fs_closedir(&dp);
+
+    /* insertion sort, descending (newest timestamp first) */
+    for (int i = 1; i < cnt; i++) {
+        char tmp[12];
+        int j;
+
+        strcpy(tmp, names[i]);
+        for (j = i - 1; j >= 0 && strcmp(names[j], tmp) < 0; j--) {
+            strcpy(names[j + 1], names[j]);
+        }
+        strcpy(names[j + 1], tmp);
+    }
+
+    for (int i = 0; i < cnt; i++) {
+        char *child = scan_child[level];
+
+        if (storage_path_format(child, STORAGE_PATH_MAX, "%s/%s",
+                                dir_path, names[i]) != 0) {
+            continue;
+        }
+        if (level == 3) {
+            if (++(*checks) > UNSYNCED_MAX_CHECKS) {
+                return false; /* bound reached: assume synced */
+            }
+            if (session_json_unsynced(child)) {
+                return true;
+            }
+        } else if (scan_level_unsynced(child, level + 1, checks)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool scan_unsynced_newest(void)
+{
+    int checks = 0;
+
+    return scan_level_unsynced(STORAGE_BASE_PATH, 0, &checks);
+}
+
+/* True if the session directory holds at least one non-empty .opus
+ * (group-subdir walk). Used by the transfer completion to remove husk
+ * sessions whose every file was a deleted 0-byte artifact. */
+int storage_session_has_audio(const char *session_id)
+{
+    char dir_path[STORAGE_PATH_MAX];
+    struct fs_dir_t dp;
+    struct fs_dirent ent;
+    bool has = false;
+    int rc;
+
+    if (!sd_mounted || validate_session_id(session_id) != 0) {
+        return 0;
+    }
+    rc = build_bucket_session_dir(session_id, dir_path, sizeof(dir_path));
+    if (rc != 0) {
+        return 0;
+    }
+    fs_dir_t_init(&dp);
+    if (fs_opendir(&dp, dir_path) != 0) {
+        return 0;
+    }
+    while (!has && fs_readdir(&dp, &ent) == 0 && ent.name[0] != 0) {
+        if (ent.type != FS_DIR_ENTRY_DIR || ent.name[0] == '.') {
+            continue;
+        }
+        char subdir[STORAGE_PATH_MAX];
+        struct fs_dir_t sub;
+        struct fs_dirent se;
+
+        if (storage_path_format(subdir, sizeof(subdir), "%s/%s",
+                                dir_path, ent.name) != 0) {
+            continue;
+        }
+        fs_dir_t_init(&sub);
+        if (fs_opendir(&sub, subdir) != 0) {
+            continue;
+        }
+        while (fs_readdir(&sub, &se) == 0 && se.name[0] != 0) {
+            size_t slen = strlen(se.name);
+
+            if (slen == 9 && strcmp(se.name + 4, ".opus") == 0 &&
+                se.size > 0) {
+                has = true;
+                break;
+            }
+        }
+        fs_closedir(&sub);
+    }
+    fs_closedir(&dp);
+    return has;
+}
+
+int storage_sweep_empty_sessions(void)
+{
+	int n;
+	int removed = 0;
+	int synced_reclaimed = 0;
+
+	/* Boot-time GC: delete sessions whose metadata says (or whose
+	 * directory scan reveals) zero audio — produced by power cuts in
+	 * the first write window, aborted starts, or host-side deletions.
+	 * reuses storage_get_session_info (json first, dir-scan fallback)
+	 * and storage_delete_session (honest errors + parent prune). */
+	k_mutex_lock(&session_scan_mutex, K_FOREVER);
+	n = storage_list_session_ids(session_scan_ids,
+				      ARRAY_SIZE(session_scan_ids));
+	for (int i = 0; i < n; i++) {
+		bool reclaim = false;
+		struct storage_session_info info;
+
+		if (atomic_get(&session_creating)) {
+			break;
+		}
+		if (session_is_metadata_only(session_scan_ids[i])) {
+			/* Disk is the authority — do NOT also require session.json
+			 * to claim files:0. A power-cut start can leave a stale
+			 * json saying files:1 next to an empty/0-byte tree
+			 * (phantom), and a husk leaves files:0 next to a 0-byte
+			 * chunk; both are garbage only the disk walk can vouch
+			 * for. Live sessions are excluded by the current-id and
+			 * creating guards inside storage_delete_session(). */
+			reclaim = true;
+			removed++;
+		} else if (storage_get_session_info(session_scan_ids[i], &info) == 0 &&
+			   info.file_count > 0 &&
+			   info.synced_files >= info.file_count) {
+			/* Fully synced — every file already lives on the host.
+			 * The app deletes on merge; leftovers (failed delete,
+			 * synced from another host) are reclaimable on demand. */
+			reclaim = true;
+			synced_reclaimed++;
+		}
+		if (reclaim &&
+		    storage_delete_session(session_scan_ids[i]) != 0) {
+			/* Delete refused/failed — undo the optimistic count. */
+			if (removed > 0 && !session_is_metadata_only(session_scan_ids[i])) {
+				synced_reclaimed--;
+			}
+		}
+		/* Pace the walk: this runs on the system workqueue — without a
+		 * yield, a large card's sweep would starve every other work
+		 * item (wifi timeout, fg save, SD idle power-off) for seconds.
+		 * AT+LIST concurrently blocked on session_scan_mutex is the
+		 * accepted, rare trade (boot + 20 s window). */
+		k_sleep(K_MSEC(20));
+	}
+	k_mutex_unlock(&session_scan_mutex);
+	if (removed + synced_reclaimed > 0) {
+		LOG_WRN("gc: %d empty, %d synced reclaimed", removed, synced_reclaimed);
+	}
+	gc_removed_empty = removed;
+	gc_removed_synced = synced_reclaimed;
+	return removed + synced_reclaimed;
 }
 
 int storage_list_chunks(const char *session_id, uint32_t *chunks, int max_chunks, int skip)
@@ -1526,6 +2129,12 @@ int storage_delete_session(const char *session_id)
         return -EINVAL;
     }
 
+    /* Never delete while a session is between mkdir and current-ID
+     * publication: it has no audio yet but is not an empty leftover. */
+    if (atomic_get(&session_creating)) {
+        return -EBUSY;
+    }
+
     /* Don't delete current recording session */
     if (strcmp(current_session_id, session_id) == 0)
     {
@@ -1538,17 +2147,57 @@ int storage_delete_session(const char *session_id)
         return rc;
     }
 
-    /* Recursively delete all contents (files and group subdirectories) */
-    delete_dir_contents(dir_path);
-
-    /* Remove session directory */
-    rc = fs_unlink(dir_path);
-    if (rc != 0)
     {
-        LOG_WRN("Failed to remove session directory: %d", rc);
+        /* Missing sessions used to "delete" successfully (contents
+         * no-op, dir unlink failed silently, ok returned regardless) —
+         * hosts could not trust the result and the AT layer's
+         * "Session not found" branch was dead code. */
+        struct fs_dirent entry;
+
+        if (fs_stat(dir_path, &entry) != 0 ||
+            entry.type != FS_DIR_ENTRY_DIR) {
+            LOG_WRN("delete: session %s not found", session_id);
+            return -ENOENT;
+        }
+    }
+
+    /* Recursively delete all contents (files and group subdirectories).
+     * Partial failures are no longer swallowed: a leftover file keeps
+     * the directory non-empty, its unlink then fails too, and the
+     * caller gets -EIO instead of a false success. */
+    bool clean = delete_dir_contents(dir_path);
+
+    /* Remove session dir and prune its empty parents atomically w.r.t.
+     * session creation: GC must not unlink a minute between mkdir(SS)
+     * and the SS mkdir. */
+    k_mutex_lock(&recdir_mutex, K_FOREVER);
+    rc = fs_unlink(dir_path);
+    if (rc == 0) {
+        prune_empty_parents(session_id);
+    }
+    k_mutex_unlock(&recdir_mutex);
+    if (!clean || rc != 0)
+    {
+        LOG_ERR("delete %s incomplete (contents %d, dir %d)",
+                session_id, !clean, rc);
+        return -EIO;
     }
 
     return 0;
+}
+
+/* Tear down the session that was just created at recording START (first
+ * file create failed): remove the tree so no json-only phantom remains.
+ * Safe for the current session (clears the current pointer first). */
+int storage_abort_session(const char *session_id)
+{
+    if (!sd_mounted || !session_id || validate_session_id(session_id) != 0) {
+        return -EINVAL;
+    }
+    if (strcmp(current_session_id, session_id) == 0) {
+        current_session_id[0] = '\0';
+    }
+    return storage_delete_session(session_id);
 }
 
 int storage_format_card(void)
@@ -1565,8 +2214,22 @@ int storage_format_card(void)
         return rc;
     }
 
-    /* 1. Unmount */
-    fs_unmount(&mp);
+    /* Serialize against the idle power-gate: it takes the same mutex, so
+     * it cannot cut LDO2 or unmount the card between our unmount and the
+     * remount below. (storage_ensure_mounted() above takes it itself, so
+     * it must be called before this lock.) */
+    k_mutex_lock(&sd_lifecycle_mutex, K_FOREVER);
+
+    /* 1. Unmount. Check the result: if an open file still holds the volume
+     * (FS log backend, transfer handle), f_mkfs() on the still-mounted
+     * volume would fail or corrupt it. */
+    rc = fs_unmount(&mp);
+    if (rc != 0 && rc != -EINVAL)
+    {
+        LOG_ERR("Unmount before format failed: %d", rc);
+        k_mutex_unlock(&sd_lifecycle_mutex);
+        return rc;
+    }
     sd_mounted = false;
 
     /* 2. Format */
@@ -1584,6 +2247,13 @@ int storage_format_card(void)
     if (rc != FR_OK)
     {
         LOG_ERR("f_mkfs failed: %d", rc);
+        /* Best effort: put the old volume back so a failed format does not
+         * leave the device with an unmounted card. */
+        if (fs_mount(&mp) == 0)
+        {
+            sd_mounted = true;
+        }
+        k_mutex_unlock(&sd_lifecycle_mutex);
         return -EIO;
     }
 
@@ -1592,6 +2262,7 @@ int storage_format_card(void)
     if (rc != 0)
     {
         LOG_ERR("Remount failed after format: %d", rc);
+        k_mutex_unlock(&sd_lifecycle_mutex);
         return rc;
     }
 
@@ -1600,19 +2271,23 @@ int storage_format_card(void)
     /* 4. Recreate REC directory */
     fs_mkdir(STORAGE_BASE_PATH);
 
+    storage_set_unsynced(false);
+
+    k_mutex_unlock(&sd_lifecycle_mutex);
     return 0;
 }
 
 /* Internal functions */
 
-static void delete_dir_contents(const char *dir_path)
+static bool delete_dir_contents(const char *dir_path)
 {
     struct fs_dir_t dirp;
     struct fs_dirent entry;
+    bool ok = true;
 
     fs_dir_t_init(&dirp);
     if (fs_opendir(&dirp, dir_path) != 0) {
-        return;
+        return false;
     }
 
     while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != '\0') {
@@ -1620,18 +2295,133 @@ static void delete_dir_contents(const char *dir_path)
 
         if (storage_path_format(filepath, sizeof(filepath), "%s/%s", dir_path,
                                 entry.name) != 0) {
+            ok = false;
             continue;
         }
 
         if (entry.type == FS_DIR_ENTRY_DIR && entry.name[0] != '.') {
-            delete_dir_contents(filepath);
-            fs_unlink(filepath);
-        } else {
-            fs_unlink(filepath);
+            ok &= delete_dir_contents(filepath);
+            if (fs_unlink(filepath) != 0) {
+                ok = false;
+            }
+        } else if (fs_unlink(filepath) != 0) {
+            ok = false;
         }
     }
 
     fs_closedir(&dirp);
+    return ok;
+}
+
+/* Remove the empty YYYYMMDD/HH/MM chain above a deleted session. FAT
+ * unlink only succeeds on an empty directory, so the first failure means
+ * another session still lives there — stop climbing. STORAGE_BASE_PATH
+ * itself is never removed. */
+static void prune_empty_parents(const char *session_id)
+{
+    char day[STORAGE_PATH_MAX];
+    char hour[STORAGE_PATH_MAX];
+    char minute[STORAGE_PATH_MAX];
+
+    if (storage_path_format(day, sizeof(day), "%s/%.8s", STORAGE_BASE_PATH,
+                            session_id) != 0) {
+        return;
+    }
+    if (storage_path_format(hour, sizeof(hour), "%s/%.2s", day,
+                            session_id + 8) != 0) {
+        return;
+    }
+    if (storage_path_format(minute, sizeof(minute), "%s/%.2s", hour,
+                            session_id + 10) != 0) {
+        return;
+    }
+
+    if (fs_unlink(minute) != 0) {
+        return;
+    }
+    if (fs_unlink(hour) != 0) {
+        return;
+    }
+    (void)fs_unlink(day);
+}
+
+static bool dir_name_is_digits(const char *name, size_t len)
+{
+    if (!name || strlen(name) != len) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (name[i] < '0' || name[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Unlink empty REC/YYYYMMDD/HH/MM buckets. The recdir mutex prevents the
+ * window where a minute is empty just before mkdir(SS); a non-empty dir
+ * also fails fs_unlink, so files/session dirs are never removed. */
+static void prune_empty_time_buckets(void)
+{
+    char date_path[STORAGE_PATH_MAX];
+    char hour_path[STORAGE_PATH_MAX];
+    char minute_path[STORAGE_PATH_MAX];
+    struct fs_dir_t rec_dir, date_dir, hour_dir;
+    struct fs_dirent rec_ent, date_ent, hour_ent;
+
+    fs_dir_t_init(&rec_dir);
+    if (fs_opendir(&rec_dir, STORAGE_BASE_PATH) != 0) {
+        return;
+    }
+    while (fs_readdir(&rec_dir, &rec_ent) == 0 && rec_ent.name[0] != '\0') {
+        if (rec_ent.type != FS_DIR_ENTRY_DIR || !dir_name_is_digits(rec_ent.name, 8)) {
+            continue;
+        }
+        if (storage_path_format(date_path, sizeof(date_path), "%s/%s",
+                                STORAGE_BASE_PATH, rec_ent.name) != 0) {
+            continue;
+        }
+        fs_dir_t_init(&date_dir);
+        if (fs_opendir(&date_dir, date_path) != 0) {
+            continue;
+        }
+        while (fs_readdir(&date_dir, &date_ent) == 0 && date_ent.name[0] != '\0') {
+            if (date_ent.type != FS_DIR_ENTRY_DIR || !dir_name_is_digits(date_ent.name, 2)) {
+                continue;
+            }
+            if (storage_path_format(hour_path, sizeof(hour_path), "%s/%s",
+                                    date_path, date_ent.name) != 0) {
+                continue;
+            }
+            fs_dir_t_init(&hour_dir);
+            if (fs_opendir(&hour_dir, hour_path) != 0) {
+                continue;
+            }
+            while (fs_readdir(&hour_dir, &hour_ent) == 0 && hour_ent.name[0] != '\0') {
+                if (hour_ent.type != FS_DIR_ENTRY_DIR || !dir_name_is_digits(hour_ent.name, 2)) {
+                    continue;
+                }
+                if (storage_path_format(minute_path, sizeof(minute_path), "%s/%s",
+                                        hour_path, hour_ent.name) == 0) {
+                    k_mutex_lock(&recdir_mutex, K_FOREVER);
+                    (void)fs_unlink(minute_path);
+                    k_mutex_unlock(&recdir_mutex);
+                }
+            }
+            fs_closedir(&hour_dir);
+            k_mutex_lock(&recdir_mutex, K_FOREVER);
+            (void)fs_unlink(hour_path);
+            k_mutex_unlock(&recdir_mutex);
+            /* Same pacing rationale as the sweep: keep the system
+             * workqueue responsive while walking a deep tree. */
+            k_sleep(K_MSEC(20));
+        }
+        fs_closedir(&date_dir);
+        k_mutex_lock(&recdir_mutex, K_FOREVER);
+        (void)fs_unlink(date_path);
+        k_mutex_unlock(&recdir_mutex);
+    }
+    fs_closedir(&rec_dir);
 }
 
 static int update_free_space(void)
@@ -1815,7 +2605,30 @@ static int update_session_json(const char *session_id, uint32_t duration_sec,
         }
     }
 
-    /* Write updated JSON with all fields, set recording to false */
+    /* Duration: a real value formats here; the rollover sentinel
+     * preserves what is already on disk (see STORAGE_KEEP_DURATION). */
+    char duration_str[16];
+    if (duration_sec == STORAGE_KEEP_DURATION) {
+        char existing[16] = "0";
+        if (rc == 0 && bytes_read > 0) {
+            char *p = strstr(json_buf, "\"duration\":");
+            if (p) {
+                strncpy(existing, p + 11, sizeof(existing) - 1);
+                existing[sizeof(existing) - 1] = '\0';
+                char *nl = existing;
+                while (*nl >= '0' && *nl <= '9') { nl++; }
+                *nl = '\0';
+            }
+        }
+        snprintf(duration_str, sizeof(duration_str), "%s", existing);
+    } else {
+        snprintf(duration_str, sizeof(duration_str), "%u", duration_sec);
+    }
+    /* Rollover updates keep recording:true (only STOP closes it) */
+    const char *recording_str =
+        (duration_sec == STORAGE_KEEP_DURATION) ? "true" : "false";
+
+    /* Write updated JSON with all fields */
     fs_file_t_init(&file);
     rc = fs_open(&file, json_path, FS_O_CREATE | FS_O_WRITE);
     if (rc != 0)
@@ -1828,18 +2641,19 @@ static int update_session_json(const char *session_id, uint32_t duration_sec,
     len = snprintf(json_buf, sizeof(json_buf),
                    "{\n"
                    "  \"id\": \"%s\",\n"
-                   "  \"duration\": %u,\n"
+                   "  \"duration\": %s,\n"
                    "  \"files\": %u,\n"
                    "  \"size\": %u,\n"
                    "  \"synced\": %s,\n"
                    "  \"channels\": %s,\n"
                    "  \"sample_rate\": %s,\n"
                    "  \"mode\": \"%s\",\n"
-                   "  \"recording\": false\n"
+                   "  \"recording\": %s\n"
                    "}\n",
-                   session_id, duration_sec, chunk_count,
+                   session_id, duration_str, chunk_count,
                    (unsigned int)session_bytes,
-                   synced_str, channels_str, sample_rate_str, mode_str);
+                   synced_str, channels_str, sample_rate_str, mode_str,
+                   recording_str);
 
     if (len < 0 || len >= (int)sizeof(json_buf))
     {
@@ -2080,14 +2894,17 @@ int storage_get_bookmarks(const char *session_id, int page, int per_page,
         count = 0;
     }
 
-    /* Calculate pagination bounds */
-    start_index = (page - 1) * per_page;
-    if (start_index >= count)
+    /* Calculate pagination bounds. Compute in 64-bit: page/per_page come from
+     * an unbounded AT argument and (page - 1) * per_page used to wrap
+     * negative, producing a negative fs_seek() offset. */
+    int64_t start64 = (int64_t)(page - 1) * per_page;
+    if (start64 >= count)
     {
         /* Page beyond available data */
         fs_close(&file);
         return 0;
     }
+    start_index = (int)start64;
 
     end_index = start_index + per_page;
     if (end_index > (int)count)

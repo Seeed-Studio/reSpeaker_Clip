@@ -45,7 +45,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v4
+      # android-actions/setup-android v4, SHA-pinned for supply-chain
+      # reproducibility (CRA Annex I 1.3)
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
       - name: Build sample
         working-directory: mobile/sdk/android
         run: ./gradlew :sample:assembleDebug --no-daemon

@@ -12,6 +12,8 @@
 
 #include "button.h"
 #include "clip_event.h"
+#include "battery.h"
+#include "display.h"
 #include "haptic.h"
 
 LOG_MODULE_REGISTER(button, CONFIG_CLIP_LOG_LEVEL);
@@ -84,7 +86,7 @@ static void button_event_callback(const struct device *dev, enum button_action a
         break;
 
     case BUTTON_LONG_PRESS:
-	LOG_INF("LONG_PRESS (>1s holding) state=%d", state);
+	LOG_DBG("LONG_PRESS (>1s holding) state=%d", state);
 	if (state == CLIP_STATE_RECORDING) {
 		/* Stop recording immediately, vibrate to confirm.
 		 * User can continue holding for power-off (LEVEL_1/2/3).
@@ -98,10 +100,12 @@ static void button_event_callback(const struct device *dev, enum button_action a
 		 */
 		clip_post_event(CLIP_EVENT_STOP);  /* STOP handler vibrates */
 		atomic_set(&recording_stopped, 1);
-	} else if (state == CLIP_STATE_IDLE || state == CLIP_STATE_ERROR
-		   || state == CLIP_STATE_WIFI_SYNC) {
+	} else if (state == CLIP_STATE_IDLE) {
 		/* Vibrate to confirm long-press threshold.
-		 * Actual start deferred to RELEASE.
+		 * Actual start deferred to RELEASE so continuing to hold
+		 * can still enter the power-off flow without starting audio.
+		 * (Button recording is always the SD pipeline; RTC live
+		 * streaming is AT-only — AT+START=rtc.)
 		 */
 		haptic_play_pattern(HAPTIC_SHORT);
 	}
@@ -110,9 +114,12 @@ static void button_event_callback(const struct device *dev, enum button_action a
     case BUTTON_LONG_PRESS_LEVEL_1:
     case BUTTON_LONG_PRESS_LEVEL_2:
     case BUTTON_LONG_PRESS_LEVEL_3:
-	LOG_INF("LONG_PRESS_LVL (pwr off) act=%d st=%d", action, state);
-	if (clip_get_context()->status.battery_charging) {
-		LOG_INF("USB charging, ignore power off");
+	LOG_WRN("LONG_PRESS_LVL (pwr off) act=%d st=%d", action, state);
+	/* Gate on VBUS presence, not battery_charging: a FULL pack on USB
+	 * reports charging=false, but the PMIC still refuses ship mode with
+	 * VBUS up — the shutdown would walk the whole failure path. */
+	if (battery_vbus_present()) {
+		LOG_WRN("USB power present, ignore power off");
 		break;
 	}
 	clip_post_event(CLIP_EVENT_POWER_OFF_SHOW);
@@ -136,9 +143,26 @@ static void button_event_callback(const struct device *dev, enum button_action a
 	     * But handle as safety fallback.
 	     */
 	    clip_post_event(CLIP_EVENT_STOP);  /* STOP event handler vibrates */
-	} else if (state == CLIP_STATE_IDLE || state == CLIP_STATE_ERROR
-		   || state == CLIP_STATE_WIFI_SYNC) {
-	    clip_post_event(CLIP_EVENT_START);
+	} else if (state == CLIP_STATE_IDLE) {
+	    int ret;
+
+	    /* Critical battery: refuse the start with immediate feedback
+	     * (the event-layer guard is the backstop for other paths). */
+	    if (!battery_recording_allowed()) {
+		haptic_play_pattern(HAPTIC_ALERT);
+		display_post_error("Battery Low");
+		break;
+	    }
+
+	    /* Hold-release = SD recording START (deferred from the 1 s
+	     * threshold so continuing to hold enters power-off instead).
+	     * RTC live streaming stays AT-only — a button gesture that
+	     * silently skips the SD card is too easy to trigger by
+	     * accident. */
+	    ret = clip_post_event(CLIP_EVENT_START);
+	    if (ret != 0) {
+		LOG_WRN("START event queue failed: %d", ret);
+	    }
 	}
 	break;
 
@@ -179,7 +203,7 @@ int button_init(void)
         return err;
     }
 
-    LOG_INF("Button handler initialized");
+    LOG_DBG("Button handler initialized");
     return 0;
 }
 

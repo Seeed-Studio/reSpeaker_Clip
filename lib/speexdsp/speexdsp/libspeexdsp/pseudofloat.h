@@ -60,6 +60,8 @@ static const spx_float_t FLOAT_ZERO = {0,0};
 static const spx_float_t FLOAT_ONE = {16384,-14};
 static const spx_float_t FLOAT_HALF = {16384,-15};
 
+/* Zephyr's sys/util.h may already define MIN; avoid a redefinition warning. */
+#undef MIN
 #define MIN(a,b) ((a)<(b)?(a):(b))
 static inline spx_float_t PSEUDOFLOAT(spx_int32_t x)
 {

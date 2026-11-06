@@ -78,6 +78,11 @@ static int16_t processed_buffer[AUDIO_OPUS_FRAME_SIZE];
 
 /* Recording state */
 static bool recording_active = false;
+/* True from audio_start_common's sem-give until the audio thread finishes
+ * (or skips) audio_start_recording_internal — the window where the state
+ * machine says RECORDING but recording_active is still false and a STOP
+ * must reach audio_stop_recording's pending-start path, not be gated out. */
+static bool start_pending;
 static enum audio_mode current_mode = AUDIO_MODE_MERGE;
 static int opus_channels = 1;
 
@@ -104,7 +109,16 @@ static uint32_t recording_frame_count = 0;
 /* Storage integration */
 static struct storage_file current_storage_file = {0};
 static uint32_t current_file_index = 1;
+/* Files actually created this session (incremented only on a successful
+ * storage_create_file). Passed to storage_close_session — the old code
+ * passed current_file_index, which is 1 even when the first file failed,
+ * so stop wrote files:1 into session.json with ZERO files on disk. */
+static uint32_t files_created;
 static uint32_t file_start_frame_count = 0;
+
+/* False for RTC sessions: the pipeline runs but nothing is written to the
+ * SD card (no session dir, no segment files, no session.json on stop). */
+static bool session_persists = true;
 
 /* Transfer state tracking for dynamic segment duration */
 static bool was_transferring = false;
@@ -243,7 +257,7 @@ int audio_init(void)
     }
     k_thread_name_set(&audio_thread_data, "audio_rec");
 
-    LOG_INF("audio: pri=%d stk=%u",
+    LOG_DBG("audio: pri=%d stk=%u",
         CONFIG_CLIP_AUDIO_THREAD_PRIORITY,
         CONFIG_CLIP_AUDIO_STACK_SIZE);
 
@@ -255,7 +269,10 @@ void audio_cleanup(void)
     audio_stop_recording();
 }
 
-int audio_start_recording(enum audio_mode mode)
+/* Common start path for recording and RTC sessions. Recording persists
+ * segments to the SD card; RTC delivers encoded frames through the data
+ * callback only and never touches storage. */
+static int audio_start_common(enum audio_mode mode, bool persists)
 {
     struct clip_context *c = clip_get_context();
     uint16_t year;
@@ -270,6 +287,8 @@ int audio_start_recording(enum audio_mode mode)
         LOG_WRN("Recording already active");
         return -EBUSY;
     }
+
+    session_persists = persists;
 
     /* Store mode for audio thread */
     current_mode = mode;
@@ -296,6 +315,7 @@ int audio_start_recording(enum audio_mode mode)
     /* Reset counters */
     recording_frame_count = 0;
     stop_requested = false;
+    start_pending = true;
     k_sem_reset(&stop_done_sem);
 
     /* Wake up audio thread by giving semaphore */
@@ -304,6 +324,17 @@ int audio_start_recording(enum audio_mode mode)
 
     LOG_INF("rec start (mode=%d, %s)", mode, current_session_id);
     return 0;
+}
+
+int audio_start_recording(enum audio_mode mode)
+{
+    return audio_start_common(mode, true);
+}
+
+int audio_start_rtc(void)
+{
+    /* RTC: encoded frames go to the stream queue, never to the SD card */
+    return audio_start_common(AUDIO_MODE_MERGE, false);
 }
 
 int audio_stop_recording(void)
@@ -326,7 +357,7 @@ int audio_stop_recording(void)
     stop_requested = true;
 
     k_mutex_unlock(&audio_state_mutex);
-    LOG_INF("Recording stop requested");
+    LOG_DBG("Recording stop requested");
 
     /* Wait for audio thread to finish cleanup (file close + sync on slow SD) */
     if (k_sem_take(&stop_done_sem, K_MSEC(5000)) != 0) {
@@ -350,7 +381,7 @@ int audio_pause_recording(void)
     pause_requested = true;
     k_mutex_unlock(&audio_state_mutex);
 
-    LOG_INF("Recording pause requested");
+    LOG_DBG("Recording pause requested");
     return 0;
 }
 
@@ -367,7 +398,7 @@ int audio_resume_recording(void)
     is_paused = false;
     k_mutex_unlock(&audio_state_mutex);
 
-    LOG_INF("Recording resume requested");
+    LOG_DBG("Recording resume requested");
     return 0;
 }
 
@@ -378,6 +409,15 @@ bool audio_is_recording(void)
     k_mutex_unlock(&audio_state_mutex);
 
     return is_active;
+}
+
+bool audio_session_is_rtc(void)
+{
+    k_mutex_lock(&audio_state_mutex, K_FOREVER);
+    bool is_rtc = recording_active && !session_persists;
+    k_mutex_unlock(&audio_state_mutex);
+
+    return is_rtc;
 }
 
 int audio_add_bookmark(void)
@@ -423,6 +463,17 @@ void audio_register_data_callback(audio_data_callback_t callback, void *user_dat
     data_callback_user_data = user_data;
 }
 
+uint32_t audio_thread_stack_free(void)
+{
+    size_t unused = 0;
+
+    if (audio_thread_id == NULL ||
+        k_thread_stack_space_get(audio_thread_id, &unused) != 0) {
+        return 0;
+    }
+    return (uint32_t)unused;
+}
+
 const char *audio_get_session_id(void)
 {
     k_mutex_lock(&audio_state_mutex, K_FOREVER);
@@ -450,6 +501,15 @@ bool audio_is_paused(void)
     k_mutex_unlock(&audio_state_mutex);
 
     return paused;
+}
+
+bool audio_start_pending(void)
+{
+    k_mutex_lock(&audio_state_mutex, K_FOREVER);
+    bool pending = start_pending;
+    k_mutex_unlock(&audio_state_mutex);
+
+    return pending;
 }
 
 /* The haptic motor's mechanical noise couples into the PDM mics; a
@@ -500,13 +560,14 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
     /* Reset file index */
     current_file_index = 1;
+    files_created = 0;
     file_start_frame_count = 0;
 
     /* Boost CPU to 128MHz for encoding, before mic power-on.
      * The 10ms mic stabilization delay also serves as CPU frequency
      * settling time.
      */
-    LOG_INF("Boosting CPU for recording");
+    LOG_DBG("Boosting CPU for recording");
     clip_cpu_boost_acquire();
 
     /* Power on microphone with delay for stabilization */
@@ -558,7 +619,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
     /* Create storage session + first file — done AFTER mic/opus/dmic init
      * so a failure in those steps doesn't leak an orphan session. */
-    {
+    if (session_persists) {
         uint8_t channels = (mode == AUDIO_MODE_STEREO) ? 2 : 1;
         const char *mode_str = (mode == AUDIO_MODE_STEREO) ? "stereo" : "mono";
         ret = storage_create_session(current_session_id, channels,
@@ -570,10 +631,23 @@ static int audio_start_recording_internal(enum audio_mode mode)
         ret = storage_create_file(&current_storage_file, current_session_id,
                                   current_file_index);
         if (ret != 0) {
-            LOG_WRN("Failed to create storage file: %d", ret);
-        } else {
-            LOG_DBG("Recording to: %s", current_storage_file.filename);
+            /* Hard-fail the start: continuing meant recording_active with
+             * no open file (every frame silently dropped) and a stop that
+             * wrote files:1 into session.json with ZERO files on disk —
+             * a json-only phantom the scan trusts forever. Tear the
+             * just-created session down and surface Rec Fail. */
+            LOG_ERR("first file create %d — aborting session", ret);
+            storage_abort_session(current_session_id);
+            current_session_id[0] = '\0';
+            mic_power_off();
+            clip_cpu_boost_release();
+            return ret;
         }
+        files_created++;
+        LOG_DBG("Recording to: %s", current_storage_file.filename);
+    } else {
+        /* RTC: no on-card session/file */
+        memset(&current_storage_file, 0, sizeof(current_storage_file));
     }
 
     recording_active = true;
@@ -582,7 +656,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
     /* Calculate actual bitrate for logging */
     uint32_t actual_bitrate = (current_mode == AUDIO_MODE_STEREO) ?
         CONFIG_CLIP_NORMAL_BITRATE * 2 : CONFIG_CLIP_ENHANCED_BITRATE;
-    LOG_INF("rec: %s %ukbps %s",
+    LOG_DBG("rec: %s %ukbps %s",
         (current_mode == AUDIO_MODE_STEREO) ? "stereo" : "mono",
         actual_bitrate/1000, current_session_id);
     return 0;
@@ -621,11 +695,16 @@ static int audio_stop_recording_internal(void)
     }
 
     /* Close storage session */
-    duration_sec = stats.recording_time_ms / 1000;
-    ret = storage_close_session(current_session_id, duration_sec, current_file_index);
-    if (ret != 0) {
-        LOG_WRN("Failed to close storage session: %d", ret);
+    if (session_persists) {
+        duration_sec = stats.recording_time_ms / 1000;
+        ret = storage_close_session(current_session_id, duration_sec, files_created);
+        if (ret != 0) {
+            LOG_WRN("Failed to close storage session: %d", ret);
+        }
     }
+
+    /* Restore default for the next session */
+    session_persists = true;
 
     /* Sync time baseline so reboot doesn't lose accumulated uptime */
     config_sync_time();
@@ -633,7 +712,7 @@ static int audio_stop_recording_internal(void)
     /* Power off microphone to save power */
     mic_power_off();
 
-    LOG_INF("Recording stopped, releasing CPU boost");
+    LOG_DBG("Recording stopped, releasing CPU boost");
     clip_cpu_boost_release();
 
     /* Note: Keep encoder and DSP initialized for next recording
@@ -663,11 +742,13 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
         /* Check if stop was requested before we started */
         if (stop_requested) {
             stop_requested = false;
+            start_pending = false;   /* single-word store; we own it here */
             continue;
         }
 
         /* Perform initialization in audio thread context */
         ret = audio_start_recording_internal(current_mode);
+        start_pending = false;
         if (ret < 0) {
             LOG_ERR("Failed to start recording: %d", ret);
             continue;
@@ -692,7 +773,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                 mic_power_off();
 
                 is_paused = true;
-                LOG_INF("Recording paused at %u sec", (unsigned int)(stats.recording_time_ms / 1000));
+                LOG_DBG("Recording paused at %u sec", (unsigned int)(stats.recording_time_ms / 1000));
 
                 /* Wait for resume signal */
                 while (is_paused && !stop_requested) {
@@ -712,6 +793,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                     current_file_index--;
                     break;
                 }
+                files_created++;
 
                 file_start_frame_count = recording_frame_count;
 
@@ -728,7 +810,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                 /* Discard initial frames for DMIC settling */
                 dmic_flush_initial();
 
-                LOG_INF("Recording resumed: new file #%u", current_file_index);
+                LOG_DBG("Recording resumed: new file #%u", current_file_index);
                 continue;
             }
 
@@ -739,14 +821,18 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
              */
             ret = dmic_read(dmic_dev, 0, &buffer, &size, 200);
             if (ret < 0) {
-                LOG_WRN("dmic_read: err=%d consec=%d frames=%u",
+                LOG_DBG("dmic_read: err=%d consec=%d frames=%u",
                         ret, dmic_timeout_count + 1, stats.frames_encoded);
                 if (ret == -EAGAIN) {
                     /* Timeout - track consecutive timeouts for recovery */
                     dmic_timeout_count++;
 
                     if (dmic_timeout_count >= 2) {
-                        LOG_WRN("DMIC timeout, retrigger");
+                        /* Random SD flush spikes (>40 ms, card-internal GC/WL) stall the
+		 * audio thread past the 2-block DMIC queue — self-recovering,
+	 * baseline behavior (structural fix = dedicated writer thread).
+	 * DBG: known noise, not actionable on-device. */
+		LOG_DBG("DMIC timeout, retrigger");
                         LOG_WRN("DSP=%uus enc=%uus (frm=%u)",
                                 stats.frames_encoded > 0 ?
                                     (uint32_t)(dsp_time_total_us / stats.frames_encoded) : 0,
@@ -763,7 +849,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                             LOG_ERR("DMIC recovery failed: %d", ret);
                         } else {
                             dmic_flush_initial();
-                            LOG_INF("DMIC recovered");
+                            LOG_DBG("DMIC recovered");
                         }
                     }
                     continue;
@@ -845,6 +931,14 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                 (void)(dsp_time_total_us / stats.frames_encoded);
             }
 
+            /* Deliver the encoded frame to the realtime consumer (RTC).
+             * Runs in this top-priority thread: the callback must be O(1)
+             * (queue push only, never block). */
+            if (data_callback) {
+                data_callback(opus_packet, (size_t)encoded_bytes,
+                              data_callback_user_data);
+            }
+
             /* Calculate energy level for visualization.
              * Skip when BLE vis not subscribed AND display is in REC_DOT
              * (no display animation needs the data). Always calculate when
@@ -873,62 +967,67 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
              * Use different segment durations based on transfer state:
              * - When transferring: shorter segments (CLIP_AUDIO_SEGMENT_DURATION_SYNC)
              * - When not transferring: longer segments (CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC)
+             * Segment management applies only to SD-persisted sessions; RTC
+             * sessions have no files to slice.
              */
-            bool is_transferring = transfer_is_active();
-            uint32_t segment_duration_sec;
+            if (session_persists) {
+                bool is_transferring = transfer_is_active();
+                uint32_t segment_duration_sec;
 
-            if (is_transferring) {
-                segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_SYNC;
-            } else {
-                segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC;
-            }
-
-            /* Calculate frames per file based on current segment duration */
-            uint32_t frames_per_file = segment_duration_sec * (1000 / AUDIO_FRAME_MS);
-
-            /* Check for state transition: not transferring -> transferring
-             * If current file duration exceeds sync segment duration, slice immediately
-             */
-            if (was_transferring == false && is_transferring == true && recording_frame_count > 1) {
-                uint32_t current_file_frames = recording_frame_count - file_start_frame_count;
-                uint32_t sync_frames_per_file = CLIP_AUDIO_SEGMENT_DURATION_SYNC * (1000 / AUDIO_FRAME_MS);
-
-                if (current_file_frames >= sync_frames_per_file) {
-                    /* File exceeds sync duration, slice immediately */
-                    goto create_new_segment;
+                if (is_transferring) {
+                    segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_SYNC;
+                } else {
+                    segment_duration_sec = CLIP_AUDIO_SEGMENT_DURATION_NO_SYNC;
                 }
-            }
 
-            /* Update transfer state tracking */
-            was_transferring = is_transferring;
+                /* Calculate frames per file based on current segment duration */
+                uint32_t frames_per_file = segment_duration_sec * (1000 / AUDIO_FRAME_MS);
 
-            /* Regular segment check based on current segment duration */
-            if (recording_frame_count > 1 && (recording_frame_count - file_start_frame_count) >= frames_per_file) {
+                /* Check for state transition: not transferring -> transferring
+                 * If current file duration exceeds sync segment duration, slice immediately
+                 */
+                if (was_transferring == false && is_transferring == true && recording_frame_count > 1) {
+                    uint32_t current_file_frames = recording_frame_count - file_start_frame_count;
+                    uint32_t sync_frames_per_file = CLIP_AUDIO_SEGMENT_DURATION_SYNC * (1000 / AUDIO_FRAME_MS);
+
+                    if (current_file_frames >= sync_frames_per_file) {
+                        /* File exceeds sync duration, slice immediately */
+                        goto create_new_segment;
+                    }
+                }
+
+                /* Update transfer state tracking */
+                was_transferring = is_transferring;
+
+                /* Regular segment check based on current segment duration */
+                if (recording_frame_count > 1 && (recording_frame_count - file_start_frame_count) >= frames_per_file) {
 create_new_segment:
-                /* Close current file */
-                if (current_storage_file.is_open) {
-                    uint32_t segment_frames = recording_frame_count - file_start_frame_count;
-                    uint32_t segment_bytes = current_storage_file.bytes_written;
+                    /* Close current file */
+                    if (current_storage_file.is_open) {
+                        uint32_t segment_frames = recording_frame_count - file_start_frame_count;
+                        uint32_t segment_bytes = current_storage_file.bytes_written;
 
-                    ret = storage_close_file(&current_storage_file);
-                    if (ret != 0) {
-                        LOG_WRN("Failed to close segment file: %d", ret);
+                        ret = storage_close_file(&current_storage_file);
+                        if (ret != 0) {
+                            LOG_WRN("Failed to close segment file: %d", ret);
+                        }
+
+                        LOG_DBG("seg #%u: %u frm %uB %us",
+                                current_file_index, segment_frames, segment_bytes,
+                                segment_duration_sec);
                     }
 
-                    LOG_INF("seg #%u: %u frm %uB %us",
-                            current_file_index, segment_frames, segment_bytes,
-                            segment_duration_sec);
-                }
-
-                /* Create new file */
-                current_file_index++;
-                ret = storage_create_file(&current_storage_file, current_session_id, current_file_index);
-                if (ret != 0) {
-                    LOG_ERR("Failed to create new segment file: %d", ret);
-                    current_file_index--;
-                    /* Continue recording without storage */
-                } else {
-                    file_start_frame_count = recording_frame_count;
+                    /* Create new file */
+                    current_file_index++;
+                    ret = storage_create_file(&current_storage_file, current_session_id, current_file_index);
+                    if (ret != 0) {
+                        LOG_ERR("Failed to create new segment file: %d", ret);
+                        current_file_index--;
+                        /* Continue recording without storage */
+                    } else {
+                        files_created++;
+                        file_start_frame_count = recording_frame_count;
+                    }
                 }
             }
 
@@ -943,7 +1042,7 @@ create_new_segment:
         /* Signal that stop is complete */
         k_sem_give(&stop_done_sem);
 
-        LOG_INF("rec done: %u frm %us %uKB",
+        LOG_DBG("rec done: %u frm %us %uKB",
             stats.frames_encoded,
             (unsigned int)(stats.recording_time_ms / 1000),
             (unsigned int)(stats.total_bytes / 1024));
@@ -1038,7 +1137,7 @@ static int init_opus_encoder(void)
     encoder_params.channels = opus_channels;
     encoder_params.initialized = true;
 
-    LOG_INF("opus: %dch %ukbps c=%u %s",
+    LOG_DBG("opus: %dch %ukbps c=%u %s",
         opus_channels, actual_bitrate / 1000, effective_complexity,
         (current_mode == AUDIO_MODE_STEREO) ? "stereo" : "mono");
 
@@ -1116,7 +1215,7 @@ static int init_speex_preprocessor(void)
 
     dsp_params.initialized = true;
 
-    LOG_INF("dsp: noise=%ddB drv=%d agc=integer",
+    LOG_DBG("dsp: noise=%ddB drv=%d agc=integer",
             CONFIG_CLIP_DEFAULT_NOISE,
             IS_ENABLED(CONFIG_CLIP_DEFAULT_DEREVERB) ? 1 : 0);
 

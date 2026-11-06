@@ -10,6 +10,12 @@
 #include <zephyr/kernel.h>
 
 /**
+ * @brief Show the power-off page (power symbol) — visual feedback for the
+ * button power-off gesture before ship mode cuts power
+ */
+void oled_show_power_off(void);
+
+/**
  * @brief Initialize OLED display
  * @return 0 on success, negative errno on failure
  */
