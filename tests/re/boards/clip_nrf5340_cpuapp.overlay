@@ -16,3 +16,9 @@
 		status = "disabled";
 	};
 };
+
+/* Certification build: cap charge current at 100 mA (board default 220 mA).
+ * Trickle stays a fixed 10% of ICHG = 10 mA. */
+&npm1300_charger {
+	current-microamp = <100000>;
+};

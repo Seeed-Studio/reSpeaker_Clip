@@ -22,7 +22,7 @@
 #include "transport_udp.h"
 #include "wifi_udp.h"
 
-LOG_MODULE_REGISTER(transport_udp, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(transport_udp, LOG_LEVEL_WRN); /* chatty plumbing logs */
 
 /* Shared socket from wifi_udp.c */
 extern int server_sock;
@@ -366,7 +366,7 @@ static int udp_repair_missing(struct fs_file_t *file, uint32_t file_size, uint32
         }
     }
 
-    LOG_INF("selective repair: resent %d frame(s)", resent);
+    LOG_DBG("selective repair: resent %d frame(s)", resent);
     return resent;
 }
 

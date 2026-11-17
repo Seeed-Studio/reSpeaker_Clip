@@ -36,8 +36,10 @@
 #include "battery.h"
 #include "haptic.h"
 #include "usb_cdc.h"
+#include "rtc_stream.h"
 
-LOG_MODULE_REGISTER(main, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(main, LOG_LEVEL_WRN); /* flash budget: INF kept for
+ * battery/wifi/storage/button/audio */
 
 /* Global context */
 static struct clip_context g_ctx;
@@ -91,32 +93,27 @@ bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_
     /* Convert to seconds */
     uint32_t elapsed_sec = (uint32_t)(elapsed_ms / 1000);
 
-    /* Start from synced time */
+    /* Start from the FULL base time-of-day, not just the seconds field.
+     * Adding elapsed only to g_ctx.time.sec (and then deriving hour/min from
+     * the total) silently dropped the stored hour/min. After every
+     * config_sync_time() rebase the next session id restarted near 00:0x,
+     * and two recordings seconds apart could differ by many hours. */
+    uint64_t day_sec = (uint64_t)g_ctx.time.hour * 3600U
+                     + (uint64_t)g_ctx.time.min * 60U
+                     + (uint64_t)g_ctx.time.sec
+                     + elapsed_sec;
+    uint32_t add_days = (uint32_t)(day_sec / 86400U);
+    day_sec %= 86400U;
+
     uint16_t year = g_ctx.time.year;
     uint8_t month = g_ctx.time.month;
-    uint8_t day = g_ctx.time.day;
-    uint8_t hour = g_ctx.time.hour;
-    uint8_t min = g_ctx.time.min;
-    sec = g_ctx.time.sec;
+    uint32_t day = (uint32_t)g_ctx.time.day + add_days;
 
-    /* Add elapsed seconds */
-    sec += elapsed_sec;
+    uint8_t hour = (uint8_t)(day_sec / 3600U);
+    uint8_t min = (uint8_t)((day_sec % 3600U) / 60U);
+    sec = (uint32_t)(day_sec % 60U);
 
-    /* Handle overflow */
-    while (sec >= 60) {
-        sec -= 60;
-        min++;
-    }
-    while (min >= 60) {
-        min -= 60;
-        hour++;
-    }
-    while (hour >= 24) {
-        hour -= 24;
-        day++;
-    }
-
-    /* Simple day overflow handling */
+    /* Day overflow — recompute February for each year rollover */
     uint8_t days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
         days_in_month[1] = 29;
@@ -128,12 +125,14 @@ bool clip_get_current_time(uint16_t *out_year, uint8_t *out_month, uint8_t *out_
         if (month > 12) {
             month = 1;
             year++;
+            days_in_month[1] =
+                ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) ? 29 : 28;
         }
     }
 
     *out_year = year;
     *out_month = month;
-    *out_day = day;
+    *out_day = (uint8_t)day;
     *out_hour = hour;
     *out_min = min;
     *out_sec = (uint8_t)sec;
@@ -231,9 +230,14 @@ int clip_init(void)
     err = storage_init();
     if (err) {
         LOG_WRN("Storage init failed: %d", err);
+        /* No SD: the FS log backend below is never activated, so make the
+         * idle-power-off gate see "off" even in a debug build. */
+        clip_log_fs_set_active(false);
         /* Continue anyway - storage is optional */
     } else {
-        /* SD card mounted - check for unsynced sessions */
+        /* SD card mounted — restore the untransferred indicator from the
+         * persisted flag (no card walk; boot stays fast). Empty/phantom
+         * sessions are cleaned at encounter time by the transfer path. */
         display_check_untransferred();
 
 #ifdef CONFIG_LOG_BACKEND_FS
@@ -246,9 +250,11 @@ int clip_init(void)
                 for (uint32_t i = 0; i < src_cnt; i++) {
                     log_filter_set(fs_be, 0, (int16_t)i, LOG_LEVEL_INF);
                 }
+                clip_log_fs_set_active(true);
             } else {
                 /* Production: FS log off (enable via AT+LOG) */
                 log_backend_deactivate(fs_be);
+                clip_log_fs_set_active(false);
             }
         }
 #endif
@@ -265,6 +271,13 @@ int clip_init(void)
     if (err) {
         LOG_WRN("Transfer init failed: %d", err);
         /* Continue anyway - transfer is optional */
+    }
+
+    /* Initialize RTC streaming (registers the audio data callback) */
+    err = rtc_stream_init();
+    if (err) {
+        LOG_WRN("RTC stream init failed: %d", err);
+        /* Continue anyway - RTC is optional */
     }
 
     /* Initialize WiFi subsystem */
@@ -415,8 +428,8 @@ SYS_INIT(clip_xo_cap_init, POST_KERNEL, 0);
 int main(void)
 {
     /* Print version and build info at startup */
-    LOG_INF("Clip Firmware v%s", CLIP_VERSION);
-    LOG_INF("Build: %s %s", __DATE__, __TIME__);
+    LOG_WRN("Clip Firmware v%s", CLIP_VERSION); /* WRN so it survives the module diet — boot evidence */
+    LOG_WRN("Build: %s %s", __DATE__, __TIME__);
 
     int err;
 

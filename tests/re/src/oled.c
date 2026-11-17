@@ -132,6 +132,53 @@ static void oled_draw_circle(int radius, int center_x, int center_y)
 	oled_write_buffer();
 }
 
+/* Draw a pixel into the 1bpp buffer (byte = (y/8)*WIDTH + x, bit = y%8) */
+static void oled_set_pixel(int px, int py)
+{
+	if (px >= 0 && px < OLED_WIDTH && py >= 0 && py < OLED_HEIGHT) {
+		int byte_idx = (py / 8) * OLED_WIDTH + px;
+		int bit_idx = py % 8;
+		if (byte_idx < OLED_BUF_SIZE) {
+			display_buffer[byte_idx] |= (1 << bit_idx);
+		}
+	}
+}
+
+/* Power-off page: power symbol (ring with a top gap + vertical bar) */
+void oled_show_power_off(void)
+{
+	const int cx = OLED_WIDTH / 2;
+	const int cy = OLED_HEIGHT / 2 + 2;
+	const int r_out = 16;
+	const int r_in = 14;
+
+	oled_clear_buffer();
+
+	/* Ring, skipping the top segment where the bar passes through */
+	for (int y = 0; y < OLED_HEIGHT; y++) {
+		for (int x = 0; x < OLED_WIDTH; x++) {
+			int dx = x - cx;
+			int dy = y - cy;
+			int dist2 = dx * dx + dy * dy;
+			if (dist2 < r_in * r_in || dist2 > r_out * r_out) {
+				continue;
+			}
+			if (dy < -r_in / 2 && dx > -6 && dx < 6) {
+				continue; /* top gap */
+			}
+			oled_set_pixel(x, y);
+		}
+	}
+
+	/* Vertical bar from above the ring into the center */
+	for (int y = cy - r_out - 5; y <= cy - 4; y++) {
+		oled_set_pixel(cx - 1, y);
+		oled_set_pixel(cx, y);
+	}
+
+	oled_write_buffer();
+}
+
 /* Initialize OLED display */
 int oled_init(void)
 {

@@ -54,6 +54,12 @@ static K_TIMER_DEFINE(haptic_motor_guard, haptic_motor_guard_fn, NULL);
  * thread, clip event handler) must not be stalled while the motor runs. */
 K_MSGQ_DEFINE(haptic_msgq, sizeof(enum haptic_pattern), 4, 1);
 
+/* Set from dequeue to pattern completion: during a pattern's motor-OFF
+ * gaps both the msgq and motor_is_on read idle, and audio capture (which
+ * waits for haptic_is_busy() so motor noise is not recorded) would start
+ * in the middle of a buzz burst. */
+static atomic_t pattern_running = ATOMIC_INIT(0);
+
 #define HAPTIC_THREAD_STACK_SIZE 1024
 static K_THREAD_STACK_DEFINE(haptic_stack, HAPTIC_THREAD_STACK_SIZE);
 static struct k_thread haptic_thread;
@@ -68,7 +74,9 @@ static void haptic_thread_fn(void *p1, void *p2, void *p3)
 
 	while (1) {
 		k_msgq_get(&haptic_msgq, &pattern, K_FOREVER);
+		atomic_set(&pattern_running, 1);
 		(void)execute_pattern(pattern);
+		atomic_clear(&pattern_running);
 	}
 }
 
@@ -133,9 +141,11 @@ int haptic_set_motor(bool enable)
 bool haptic_is_busy(void)
 {
 #ifdef CONFIG_CLIP_HAPTIC_MOTOR_ENABLED
-	/* A queued or running pattern counts: the motor's mechanical noise
-	 * couples into the PDM mics, so audio capture must wait it out. */
-	return k_msgq_num_used_get(&haptic_msgq) > 0 || motor_is_on;
+	/* A queued, running, or mid-pattern (motor-off gap) burst counts: the
+	 * motor's mechanical noise couples into the PDM mics, so audio
+	 * capture must wait the whole pattern out. */
+	return k_msgq_num_used_get(&haptic_msgq) > 0 || motor_is_on ||
+	       atomic_get(&pattern_running);
 #else
 	return false;
 #endif

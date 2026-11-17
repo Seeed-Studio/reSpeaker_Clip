@@ -60,10 +60,29 @@ struct clip_event_result_info {
 int clip_post_event(enum clip_event event);
 
 /**
+ * @brief Post a START event with its recording mode attached
+ *
+ * The mode travels in the event queue item, so concurrent button and AT
+ * requests cannot overwrite each other.
+ *
+ * @param rtc true for an RTC streaming session, false for normal recording
+ */
+int clip_post_start_event(bool rtc);
+
+/**
  * @brief Post an event and wait for result (blocking, for AT commands)
  */
 int clip_post_event_sync(enum clip_event event,
                          struct clip_event_result_info *info);
+
+/**
+ * @brief Post a START event with its recording mode and wait for the result
+ *
+ * @param rtc true for an RTC streaming session, false for normal recording
+ * @param info result details filled by the event dispatcher
+ */
+int clip_post_start_event_sync(bool rtc,
+                               struct clip_event_result_info *info);
 
 /**
  * @brief Get current device state (thread-safe)
@@ -106,6 +125,23 @@ void clip_storage_activity_notify(void);
  * When active, idle SD power-off is suppressed (logs write to SD).
  */
 bool clip_log_fs_active(void);
+
+/**
+ * @brief Reflect the FS-log backend's actual state
+ *
+ * main.c activates/deactivates the backend at boot depending on whether the
+ * SD mounted; the flag used for idle power-off gating must follow it.
+ */
+void clip_log_fs_set_active(bool active);
+
+/**
+ * @brief Stop the FS log backend and wait for its file to close
+ *
+ * Must be called before unmounting/formatting the SD card or handing it to
+ * USB MSC; otherwise the backend's open file makes fs_unmount fail with its
+ * return value unchecked.
+ */
+void clip_log_fs_disable(void);
 
 /**
  * @brief Wait for events (called by main loop)

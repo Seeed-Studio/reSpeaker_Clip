@@ -294,7 +294,6 @@ async def cmd_config(device, args):
         if args.key:
             cmd_map = {
                 "mode": "AT+MODE?",
-                "autodel": "AT+AUTODEL?",
                 "brightness": "AT+BRIGHTNESS?",
                 "wificfg": "AT+WIFICFG?",
                 "name": "AT+NAME?",
@@ -320,7 +319,6 @@ async def cmd_config(device, args):
         key, _, value = args.key_value.partition("=")
         cmd_map = {
             "mode": f"AT+MODE={value}",
-            "autodel": f"AT+AUTODEL={value}",
             "brightness": f"AT+BRIGHTNESS={value}",
             "name": f"AT+NAME={value}",
             "wificfg": f"AT+WIFICFG={value}",

@@ -21,6 +21,9 @@ FRAME_FILE_ACK = 0x03
 FRAME_FILE_START = 0x10
 FRAME_FILE_END = 0x11
 FRAME_TRANSFER_DONE = 0x12
+FRAME_STREAM_START = 0x13
+FRAME_STREAM_DATA = 0x14
+FRAME_STREAM_END = 0x15
 FRAME_AT_RESPONSE = 0x20
 FRAME_HEARTBEAT = 0x30
 
@@ -93,7 +96,31 @@ class TransferDoneFrame:
     file_count: int
 
 
-TransferFrame = DataFrame | FileStartFrame | FileEndFrame | TransferDoneFrame
+@dataclass(frozen=True)
+class StreamStartFrame:
+    session_id: str
+
+
+@dataclass(frozen=True)
+class StreamDataFrame:
+    sequence: int
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class StreamEndFrame:
+    reason: int
+
+
+TransferFrame = (
+    DataFrame
+    | FileStartFrame
+    | FileEndFrame
+    | TransferDoneFrame
+    | StreamStartFrame
+    | StreamDataFrame
+    | StreamEndFrame
+)
 
 
 def decode_file_frame(data: bytes, *, udp: bool = False) -> TransferFrame:
@@ -159,5 +186,31 @@ def decode_file_frame(data: bytes, *, udp: bool = False) -> TransferFrame:
         session_id(sid)
         count = struct.unpack_from("<I", data, 2 + sid_size)[0]
         return TransferDoneFrame(session_id=sid, file_count=count)
+
+    if frame_type == FRAME_STREAM_START:
+        if len(data) < 2:
+            raise ProtocolError("truncated STREAM_START frame")
+        sid_size = data[1]
+        if sid_size == 0 or len(data) != 2 + sid_size:
+            raise ProtocolError("invalid STREAM_START frame")
+        try:
+            sid = data[2 : 2 + sid_size].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ProtocolError("STREAM_START session id is not ASCII") from exc
+        session_id(sid)
+        return StreamStartFrame(session_id=sid)
+
+    if frame_type == FRAME_STREAM_DATA:
+        if len(data) < 5:
+            raise ProtocolError("truncated STREAM_DATA frame")
+        sequence, payload_size = struct.unpack_from("<HH", data, 1)
+        if len(data) != 5 + payload_size:
+            raise ProtocolError("STREAM_DATA frame length does not match its header")
+        return StreamDataFrame(sequence=sequence, payload=data[5:])
+
+    if frame_type == FRAME_STREAM_END:
+        if len(data) != 2:
+            raise ProtocolError("invalid STREAM_END frame")
+        return StreamEndFrame(reason=data[1])
 
     raise ProtocolError(f"unexpected transfer frame type 0x{frame_type:02x}")

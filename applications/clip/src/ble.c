@@ -21,8 +21,9 @@
 #include "display.h"
 #include "config.h"
 #include "clip_event.h"
+#include "rtc_stream.h"
 
-LOG_MODULE_REGISTER(ble, CONFIG_CLIP_LOG_LEVEL);
+LOG_MODULE_REGISTER(ble, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
 /* BLE context */
 static struct ble_context ble_ctx = {
@@ -160,11 +161,27 @@ static struct bt_gatt_exchange_params mtu_params = {
     .func = mtu_exchange_cb,
 };
 
+/* Request MTU exchange. The host stack only invokes the completion
+ * callback when this device sends the MTU request itself. If the central
+ * already exchanged the MTU, bt_gatt_exchange_mtu() returns -EALREADY
+ * without calling the callback, so mark the exchange as done here.
+ * Otherwise mtu_exchanged would stay false forever and a later connection
+ * parameter update would re-trigger the connect-time default parameter
+ * request (overriding e.g. tight RTC parameters). */
+static void ble_mtu_exchange_try(struct bt_conn *conn)
+{
+    int err = bt_gatt_exchange_mtu(conn, &mtu_params);
+
+    if (err == -EALREADY) {
+        mtu_exchanged = true;
+    }
+}
+
 /* Delayed MTU exchange handler */
 static void mtu_work_handler(struct k_work *work)
 {
     if (ble_ctx.conn) {
-        bt_gatt_exchange_mtu(ble_ctx.conn, &mtu_params);
+        ble_mtu_exchange_try(ble_ctx.conn);
     }
 }
 
@@ -177,23 +194,66 @@ static void transfer_cancel_work_handler(struct k_work *work)
     }
 }
 
+/* Coexistence-friendly defaults: moderate interval + long supervision
+ * timeout (8s) so a WiFi-AP cold start (~8s) doesn't supervise the BLE
+ * link out. Was interval=6/timeout=500 -> disconnects on WiFi-on. */
+static const struct bt_le_conn_param conn_params_default = {
+    .interval_min = 15,   /* 18.75 ms */
+    .interval_max = 30,   /* 37.5 ms */
+    .latency = 0,
+    .timeout = 800,       /* 8 s */
+};
+
+/* Tight params for the duration of an RTC stream: 20 ms Opus frames need a
+ * sub-20 ms connection cadence. Same 8 s supervision timeout keeps the WiFi
+ * coexistence margin. */
+static uint16_t conn_interval_units;
+
+static const struct bt_le_conn_param conn_params_rtc = {
+    .interval_min = 6,    /* 7.5 ms */
+    .interval_max = 12,   /* 15 ms */
+    .latency = 0,
+    .timeout = 800,       /* 8 s */
+};
+
+/* True while tight RTC connection parameters are in effect. Prevents the
+ * connect-time default parameter request from overriding them. */
+static bool rtc_params_active;
+
 /* LE parameters updated callback */
 static void le_param_updated(struct bt_conn *conn, uint16_t interval,
                              uint16_t latency, uint16_t timeout)
 {
+
+    conn_interval_units = interval;
+
     if (!mtu_exchanged && ble_ctx.conn == conn) {
-        bt_gatt_exchange_mtu(conn, &mtu_params);
-        /* After MTU exchange, request faster connection parameters */
-        /* Coexistence-friendly params: moderate interval + long supervision
-         * timeout (8s) so a WiFi-AP cold start (~8s) doesn't supervise the
-         * BLE link out. Was interval=6/timeout=500 -> disconnects on WiFi-on. */
-        struct bt_le_conn_param fast_params = {
-            .interval_min = 15,
-            .interval_max = 30,
-            .latency = 0,
-            .timeout = 800,
-        };
-        bt_conn_le_param_update(conn, &fast_params);
+        ble_mtu_exchange_try(conn);
+        /* After MTU exchange, request faster connection parameters.
+         * Never override tight RTC parameters while a stream is active. */
+        if (!rtc_params_active) {
+            bt_conn_le_param_update(conn, &conn_params_default);
+        }
+    }
+}
+
+uint16_t ble_get_conn_interval(void)
+{
+    return conn_interval_units;
+}
+
+void ble_request_rtc_conn_params(bool rtc)
+{
+    if (!ble_ctx.conn) {
+        return;
+    }
+
+    int err = bt_conn_le_param_update(ble_ctx.conn,
+                                      rtc ? &conn_params_rtc : &conn_params_default);
+    if (err && err != -EALREADY) {
+        LOG_DBG("conn param update (%s) failed: %d", rtc ? "rtc" : "default", err);
+    } else {
+        rtc_params_active = rtc;
     }
 }
 
@@ -309,7 +369,7 @@ static void generate_device_name(void)
     uint16_t id_suffix = device_id_low & 0xFFFF;
     snprintf(ble_ctx.device_name, sizeof(ble_ctx.device_name),
              "Clip %04X", id_suffix);
-    LOG_INF("Device name: %s", ble_ctx.device_name);
+    LOG_DBG("Device name: %s", ble_ctx.device_name);
 }
 
 /* Advertising fast→slow timeout handler */
@@ -441,6 +501,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         ble_ctx.notify_enabled = false;
         ble_ctx.file_data_notify_enabled = false;
         ble_ctx.audio_vis_notify_enabled = false;
+        rtc_params_active = false;
 
         /* Cancel security timeout */
         k_work_cancel_delayable(&security_timeout_work);
@@ -467,6 +528,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         if (transfer_is_active()) {
             k_work_submit(&transfer_cancel_work);
         }
+
+        /* Tear down any RTC session — BLE is the RTC lifeline */
+        rtc_stream_ble_disconnected();
 
         /* Restart advertising via work queue */
         k_work_submit(&adv_work);
@@ -883,6 +947,24 @@ int ble_send_file_data(const uint8_t *data, uint16_t len)
     return 0;
 }
 
+int ble_send_stream_data(const uint8_t *data, uint16_t len)
+{
+    if (!ble_ctx.conn) {
+        return -ENOTCONN;
+    }
+    if (!ble_ctx.file_data_notify_enabled) {
+        return -ENOTCONN;
+    }
+
+    /* Refresh inactivity timeout on outgoing stream data */
+    ble_activity_refresh();
+
+    /* Single notification, no retry: RTC drops frames on TX backpressure
+     * instead of blocking the realtime pipeline. File Data characteristic
+     * value is at attrs[7]. */
+    return bt_gatt_notify(ble_ctx.conn, &clip_svc.attrs[7], data, len);
+}
+
 bool ble_is_connected(void)
 {
     return ble_ctx.conn != NULL;
@@ -926,6 +1008,28 @@ int ble_get_bond_addr(char *addr_buf, size_t len)
     addr_buf[0] = '\0';
     bt_foreach_bond(BT_ID_DEFAULT, get_bond_addr_cb, addr_buf);
     return addr_buf[0] ? 0 : -ENOENT;
+}
+
+int ble_get_mac_str(char *buf, size_t len)
+{
+    if (buf == NULL || len < 18) {
+        return -EINVAL;
+    }
+
+    /* Own identity (public) address — the MAC the phone sees. */
+    bt_addr_le_t addrs[1];
+    size_t count = ARRAY_SIZE(addrs);
+    bt_id_get(addrs, &count);
+    if (count == 0) {
+        return -ENODATA;
+    }
+
+    bt_addr_le_to_str(&addrs[0], buf, len);   /* "xx:..:xx (public)" */
+    char *sp = strchr(buf, ' ');
+    if (sp) {
+        *sp = '\0';                           /* keep just the MAC */
+    }
+    return 0;
 }
 
 int ble_clear_bonds(void)

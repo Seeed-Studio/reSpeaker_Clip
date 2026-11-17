@@ -87,3 +87,24 @@ async def test_client_serializes_concurrent_at_commands() -> None:
     async with ClipClient(transport) as client:
         await asyncio.gather(client.request("AT+GSTAT"), client.request("AT+VERSION"))
     assert transport.maximum_in_flight == 1
+
+
+@pytest.mark.asyncio
+async def test_disconnect_failure_cannot_mask_primary_error() -> None:
+    class FailDisconnect(FakeTransport):
+        async def disconnect(self) -> None:
+            raise RuntimeError("disconnect blew up")
+
+    # With a primary error propagating from the body, a failing disconnect
+    # must be suppressed so the primary error survives unchanged.
+    transport = FailDisconnect([{"ok": True, "data": {}}])
+    with pytest.raises(ValueError, match="body error"):
+        async with ClipClient(transport) as client:
+            await client.request("AT+GSTAT")
+            raise ValueError("body error")
+
+    # With no primary error, the disconnect failure IS the failure.
+    transport2 = FailDisconnect([{"ok": True, "data": {}}])
+    with pytest.raises(RuntimeError, match="disconnect blew up"):
+        async with ClipClient(transport2) as client:
+            await client.request("AT+GSTAT")
