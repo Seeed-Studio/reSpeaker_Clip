@@ -317,10 +317,29 @@
 				reg = <0x00000000 0x000F0000>;
 			};
 
-			/* OTA slot 1: Netcore image (256KB) */
+			/* OTA slot 1: Netcore image (248KB; image is ~164KB)
+			 * The last 8KB of the old 256KB slot is carved out for
+			 * the factory-SN backup sectors below — netcore OTA
+			 * writes from the slot head and never reached it. */
 			slot1_secondary: partition@f0000 {
 				label = "image-1-secondary";
-				reg = <0x000F0000 0x00040000>;
+				reg = <0x000F0000 0x0003E000>;
+			};
+
+			/* Factory SN dual backup: two raw 4KB sectors outside
+			 * LittleFS — immune to settings-file corruption, the
+			 * settings-load watchdog wipe, AT+PAIR=reset's LittleFS
+			 * rebuild and AT+FACTORY. The LittleFS partition is left
+			 * untouched so paired devices' bonds/settings survive
+			 * the upgrade in place. See config.c sn_ab_*. */
+			sn_a_partition: partition@12e000 {
+				label = "sn-a";
+				reg = <0x0012E000 0x1000>;
+			};
+
+			sn_b_partition: partition@12f000 {
+				label = "sn-b";
+				reg = <0x0012F000 0x1000>;
 			};
 
 			/* LittleFS partition (~6.8MB, 64KB aligned)

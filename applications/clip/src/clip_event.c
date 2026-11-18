@@ -235,8 +235,12 @@ static enum clip_event_result execute_transition(enum clip_event event,
 #define SHUTDOWN_FAILSAFE_TIMEOUT_S 60
 static K_SEM_DEFINE(shutdown_failsafe_sem, 0, 1);
 
-static void shutdown_failsafe_thread_fn(void)
+static void shutdown_failsafe_thread_fn(void *p1, void *p2, void *p3)
 {
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
 	const struct device *regulators =
 		DEVICE_DT_GET(DT_NODELABEL(npm1300_regulators));
 

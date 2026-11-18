@@ -14,6 +14,7 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/crc.h>
 #include <time.h>
 
 #include "clip.h"
@@ -38,6 +39,151 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_WRN); /* flash budget: INF kept for batter
  * preserves it). ASCII [A-Za-z0-9._-], 1..CLIP_SN_MAX_LEN chars. */
 #define CLIP_SN_MAX_LEN 32
 static char g_serial_number[CLIP_SN_MAX_LEN + 1];
+
+/* ---- Factory SN dual backup (raw flash sectors, outside LittleFS) ----
+ *
+ * The settings file is a high-churn area: BLE pair/unpair writes, power
+ * cuts mid-save, and the corrupt-file watchdog wipe (fs_unlink) all
+ * regularly destroy it — and the SN went down with it. The SN is
+ * one-time factory data, so it now also lives in two raw 4KB sectors
+ * (sn-a/sn-b, carved from the tail of the netcore OTA slot — LittleFS
+ * untouched, so already-paired devices keep their bonds across the
+ * upgrade). Two copies with per-copy CRC32 and a write sequence number:
+ * boot picks the valid copy with the highest seq and repairs the other.
+ * The settings-file copy stays as a tertiary mirror and migration
+ * source for units upgraded from older firmware. */
+#define SN_REC_MAGIC 0x31504C43 /* "CLP1" little-endian */
+
+struct sn_record {
+    uint32_t magic;
+    uint32_t seq;               /* increments per write, 0 = none */
+    uint32_t len;               /* strlen(sn), 1..CLIP_SN_MAX_LEN */
+    char sn[CLIP_SN_MAX_LEN];   /* zero padded */
+    uint32_t crc;               /* crc32_ieee() over the fields above */
+};
+
+BUILD_ASSERT(sizeof(struct sn_record) == 48);
+
+static uint32_t g_sn_seq; /* seq of the newest valid on-flash copy */
+
+static int sn_ab_read(struct sn_record *rec, bool slot_a)
+{
+    const struct flash_area *fa;
+    int rc = flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
+                                    : FIXED_PARTITION_ID(sn_b_partition),
+                             &fa);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = flash_area_read(fa, 0, rec, sizeof(*rec));
+    flash_area_close(fa);
+    if (rc != 0) {
+        return rc;
+    }
+    if (rec->magic != SN_REC_MAGIC || rec->len == 0 ||
+        rec->len > CLIP_SN_MAX_LEN || rec->sn[rec->len] != '\0' ||
+        rec->crc != crc32_ieee((const uint8_t *)rec,
+                                offsetof(struct sn_record, crc))) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int sn_ab_write_copy(bool slot_a, const struct sn_record *rec)
+{
+    const struct flash_area *fa;
+    int rc = flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
+                                    : FIXED_PARTITION_ID(sn_b_partition),
+                             &fa);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = flash_area_erase(fa, 0, fa->fa_size);
+    if (rc == 0) {
+        rc = flash_area_write(fa, 0, rec, sizeof(*rec));
+    }
+    flash_area_close(fa);
+    return rc;
+}
+
+/* Both copies; one surviving is enough (the losing one is healed at the
+ * next boot by sn_ab_init). */
+static int sn_ab_write(const char *sn, size_t len)
+{
+    struct sn_record rec = {0};
+
+    rec.magic = SN_REC_MAGIC;
+    rec.seq = g_sn_seq + 1;
+    rec.len = len;
+    memcpy(rec.sn, sn, len);
+    rec.crc = crc32_ieee((const uint8_t *)&rec,
+                          offsetof(struct sn_record, crc));
+
+    int rc_a = sn_ab_write_copy(true, &rec);
+    int rc_b = sn_ab_write_copy(false, &rec);
+    if (rc_a == 0 || rc_b == 0) {
+        g_sn_seq = rec.seq;
+        if (rc_a != 0 || rc_b != 0) {
+            LOG_WRN("SN backup: one copy failed (a=%d b=%d), will heal",
+                    rc_a, rc_b);
+        }
+        return 0;
+    }
+    return rc_a;
+}
+
+/* Boot: pick the best copy, adopt it, heal the twin, and migrate a
+ * settings-only SN (units upgraded from older firmware) into the raw
+ * copies. */
+static void sn_ab_init(void)
+{
+    struct sn_record a, b;
+    int rc_a = sn_ab_read(&a, true);
+    int rc_b = sn_ab_read(&b, false);
+
+    struct sn_record *best = NULL;
+    if (rc_a == 0 && rc_b == 0) {
+        best = (a.seq >= b.seq) ? &a : &b;
+    } else if (rc_a == 0) {
+        best = &a;
+    } else if (rc_b == 0) {
+        best = &b;
+    }
+
+    if (best == NULL) {
+        if (g_serial_number[0] != '\0') {
+            int rc = sn_ab_write(g_serial_number, strlen(g_serial_number));
+            LOG_WRN("SN migrated to raw dual backup: %d", rc);
+        }
+        return;
+    }
+
+    g_sn_seq = best->seq;
+    if (strcmp(g_serial_number, best->sn) != 0) {
+        /* Raw copies win over the settings mirror: they are the copy
+         * the watchdog wipe / reformat cannot reach. */
+        size_t len = best->len;
+        memcpy(g_serial_number, best->sn, len);
+        g_serial_number[len] = '\0';
+        if (g_serial_number[0] != '\0') {
+            (void)settings_save_one(SETTING_SN, g_serial_number, len);
+        }
+        LOG_WRN("SN restored from raw backup copy (settings disagreed)");
+    }
+
+    /* Heal the stale or invalid twin so a single good copy survives the
+     * next power cut. */
+    if (rc_a != 0 || a.seq != best->seq) {
+        if (sn_ab_write_copy(true, best) == 0) {
+            LOG_WRN("SN backup copy A healed");
+        }
+    }
+    if (rc_b != 0 || b.seq != best->seq) {
+        if (sn_ab_write_copy(false, best) == 0) {
+            LOG_WRN("SN backup copy B healed");
+        }
+    }
+}
 
 /* settings_load is normally <100 ms. A corrupt settings file (typically
  * from repeated BLE pair/unpair churning bond records) makes it block for
@@ -330,6 +476,10 @@ int config_init(void)
 
     /* Load time settings (optional) */
     settings_load_subtree("time");
+
+    /* Adopt / migrate / heal the raw dual-backup SN copies (settings
+     * value, if any, is the migration source). */
+    sn_ab_init();
 
     LOG_INF("Configuration initialized");
 
@@ -681,7 +831,7 @@ int config_reformat_settings(void)
     LOG_WRN("settings heal: file system rebuilt");
 
     /* Re-save everything we own, from RAM. */
-    (void)config_save();                       /* config/* keys  */
+    (void)config_save();                       /* config keys */
     (void)config_sync_time();                  /* time/unix_timestamp */
     if (g_serial_number[0] != '\0') {          /* sn/value (factory SN) */
         (void)settings_save_one(SETTING_SN, g_serial_number,
@@ -765,9 +915,21 @@ static int sn_write(const char *sn, bool allow_overwrite)
     }
 
     size_t len = strlen(sn);
-    ret = settings_save_one(SETTING_SN, sn, len);
+    ret = sn_ab_write(sn, len);
+    int ret_s = settings_save_one(SETTING_SN, sn, len);
     if (ret == 0) {
         memcpy(g_serial_number, sn, len + 1);
+        if (ret_s != 0) {
+            LOG_WRN("SN settings mirror failed: %d", ret_s);
+        }
+        return 0;
+    }
+    /* Raw copies both failed — fall back to the settings-only write of
+     * the original implementation. */
+    if (ret_s == 0) {
+        memcpy(g_serial_number, sn, len + 1);
+        LOG_WRN("SN raw backup failed (%d), settings only", ret);
+        return 0;
     }
     return ret;
 }
@@ -784,7 +946,19 @@ int config_set_sn_force(const char *sn)
 
 int config_clear_sn(void)
 {
+    const struct flash_area *fa;
     int ret = settings_delete(SETTING_SN);
+
+    /* Also invalidate both raw backup copies. */
+    for (int slot_a = 0; slot_a <= 1; slot_a++) {
+        if (flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
+                                   : FIXED_PARTITION_ID(sn_b_partition),
+                            &fa) == 0) {
+            (void)flash_area_erase(fa, 0, fa->fa_size);
+            flash_area_close(fa);
+        }
+    }
+    g_sn_seq = 0;
     if (ret == 0) {
         g_serial_number[0] = '\0';
     }
