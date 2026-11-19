@@ -26,6 +26,7 @@ target_sources(app PRIVATE
 	src/identity.c
 	src/flash_test.c
 	src/sn_prog.c
+	src/swd_ctrl.c
 	# The test image builds the CH1115 driver directly. CONFIG_OLED_DISPLAY is
 	# deliberately disabled in prj.conf to prevent the module from adding the
 	# same source a second time.

@@ -41,41 +41,51 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_WRN); /* flash budget: INF kept for batter
 #define CLIP_SN_MAX_LEN 32
 static char g_serial_number[CLIP_SN_MAX_LEN + 1];
 
-/* ---- Factory SN dual backup (raw flash sectors, outside LittleFS) ----
+/* ---- Factory SN dual backup (fixed linker section, outside the image) ----
  *
  * The settings file is a high-churn area: BLE pair/unpair writes, power
  * cuts mid-save, and the corrupt-file watchdog wipe (fs_unlink) all
  * regularly destroy it — and the SN went down with it. The SN is
- * one-time factory data, so it now also lives in two raw 4KB sectors
- * (sn-a/sn-b, at the external flash tail 0x7FE000/0x7FF000 — outside
- * LittleFS (shrunk 8KB at its end; usage is a <128KB settings file
- * growing from the head, the tail is never reached) and outside every
- * MCUboot slot, so already-paired devices keep their bonds across the
- * upgrade and netcore OTA keeps its full 256KB slot). Two copies with
- * per-copy CRC32 and a write sequence number:
- * boot picks the valid copy with the highest seq and repairs the other.
- * The settings-file copy stays as a tertiary mirror and migration
- * source for units upgraded from older firmware. The record format is
- * shared with the factory tool (tests/clip sn_prog.c) via clip_sn.h. */
-
+ * one-time factory data, so it now also lives in the .sn_backup linker
+ * section at a FIXED address (0xFE000) in the app-slot tail — outside
+ * the linked image (linker/sn_reserve.ld reserves it, NOLOAD, and the
+ * linker refuses to grow the image past it):
+ *  - OTA / MCUboot copy only the image, never this far
+ *  - the watchdog wipe, erase-settings and LittleFS live in external
+ *    flash and cannot reach it
+ *  - J-Link app flashing only writes the image area
+ * Two records with per-record CRC32 and a write sequence number share
+ * the one reserved sector; a write erases the sector and programs both.
+ * Boot picks the valid record with the highest seq and rewrites the
+ * pair if they disagree. The settings-file copy stays as a tertiary
+ * mirror and migration source for units upgraded from older firmware.
+ * The record format is shared with the factory tool (tests/clip
+ * sn_prog.c) via clip_sn.h. */
 BUILD_ASSERT(sizeof(struct clip_sn_record) == 48);
 
-static uint32_t g_sn_seq; /* seq of the newest valid on-flash copy */
+static int sn_file_write(const struct clip_sn_record *rec);
 
-static int sn_ab_read(struct clip_sn_record *rec, bool slot_a)
+extern uint8_t __sn_backup_start[]; /* linker: 0xFE000, one 4KB sector */
+#define SN_SECTOR_ADDR   ((uintptr_t)__sn_backup_start)
+#define SN_SLOT_OFF_A    0
+#define SN_SLOT_OFF_B    0x100
+
+static uint32_t g_sn_seq; /* seq of the newest valid on-flash record */
+
+static const struct device *sn_flash_dev(void)
 {
-    const struct flash_area *fa;
-    int rc = flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
-                                    : FIXED_PARTITION_ID(sn_b_partition),
-                             &fa);
-    if (rc != 0) {
-        return rc;
+    const struct device *dev =
+        DEVICE_DT_GET(DT_CHOSEN(zephyr_flash_controller));
+
+    if (!device_is_ready(dev)) {
+        return NULL;
     }
-    rc = flash_area_read(fa, 0, rec, sizeof(*rec));
-    flash_area_close(fa);
-    if (rc != 0) {
-        return rc;
-    }
+    return dev;
+}
+
+static int sn_read_slot(struct clip_sn_record *rec, uint32_t off)
+{
+    memcpy(rec, (const void *)(SN_SECTOR_ADDR + off), sizeof(*rec));
     if (rec->magic != CLIP_SN_MAGIC || rec->len == 0 ||
         rec->len > CLIP_SN_MAX_LEN || rec->sn[rec->len] != '\0' ||
         rec->crc != crc32_ieee((const uint8_t *)rec,
@@ -85,25 +95,26 @@ static int sn_ab_read(struct clip_sn_record *rec, bool slot_a)
     return 0;
 }
 
-static int sn_ab_write_copy(bool slot_a, const struct clip_sn_record *rec)
+/* Erase the sector and program both records. */
+static int sn_write_both(const struct clip_sn_record *rec)
 {
-    const struct flash_area *fa;
-    int rc = flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
-                                    : FIXED_PARTITION_ID(sn_b_partition),
-                             &fa);
+    const struct device *dev = sn_flash_dev();
+    int rc;
+
+    if (dev == NULL) {
+        return -ENODEV;
+    }
+    rc = flash_erase(dev, SN_SECTOR_ADDR, 0x1000);
     if (rc != 0) {
         return rc;
     }
-    rc = flash_area_erase(fa, 0, fa->fa_size);
-    if (rc == 0) {
-        rc = flash_area_write(fa, 0, rec, sizeof(*rec));
+    rc = flash_write(dev, SN_SECTOR_ADDR + SN_SLOT_OFF_A, rec, sizeof(*rec));
+    if (rc != 0) {
+        return rc;
     }
-    flash_area_close(fa);
-    return rc;
+    return flash_write(dev, SN_SECTOR_ADDR + SN_SLOT_OFF_B, rec, sizeof(*rec));
 }
 
-/* Both copies; one surviving is enough (the losing one is healed at the
- * next boot by sn_ab_init). */
 static int sn_ab_write(const char *sn, size_t len)
 {
     struct clip_sn_record rec = {0};
@@ -115,68 +126,136 @@ static int sn_ab_write(const char *sn, size_t len)
     rec.crc = crc32_ieee((const uint8_t *)&rec,
                           offsetof(struct clip_sn_record, crc));
 
-    int rc_a = sn_ab_write_copy(true, &rec);
-    int rc_b = sn_ab_write_copy(false, &rec);
-    if (rc_a == 0 || rc_b == 0) {
-        g_sn_seq = rec.seq;
-        if (rc_a != 0 || rc_b != 0) {
-            LOG_WRN("SN backup: one copy failed (a=%d b=%d), will heal",
-                    rc_a, rc_b);
-        }
-        return 0;
+    int rc = sn_write_both(&rec);
+    if (rc != 0) {
+        return rc;
     }
-    return rc_a;
+    g_sn_seq = rec.seq;
+
+    /* The sn.bin mirror is best-effort: a failure here is logged and
+     * healed at the next boot (the internal pair is authoritative this
+     * session). */
+    if (sn_file_write(&rec) != 0) {
+        LOG_WRN("SN file copy write failed, will heal at next boot");
+    }
+    return 0;
 }
 
-/* Boot: pick the best copy, adopt it, heal the twin, and migrate a
- * settings-only SN (units upgraded from older firmware) into the raw
- * copies. */
+/* Second/third insurance: an independent LittleFS file (/lfs/sn.bin)
+ * written through the normal filesystem API — no raw flash access, no
+ * partition/geometry change (paired devices and the frozen MCUboot
+ * never see a difference). A separate inode from the settings file, so
+ * settings-file corruption and the watchdog's file-scoped unlink leave
+ * it alone. The settings key (sn/value) stays as the migration source
+ * for units upgraded from older firmware. */
+#define SN_FILE_PATH "/lfs/sn.bin"
+
+static int sn_file_read(struct clip_sn_record *rec)
+{
+    struct fs_file_t f;
+    int rc;
+
+    fs_file_t_init(&f);
+    rc = fs_open(&f, SN_FILE_PATH, FS_O_READ);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fs_read(&f, rec, sizeof(*rec));
+    fs_close(&f);
+    if (rc != (ssize_t)sizeof(*rec)) {
+        return -EINVAL;
+    }
+    if (rec->magic != CLIP_SN_MAGIC || rec->len == 0 ||
+        rec->len > CLIP_SN_MAX_LEN || rec->sn[rec->len] != '\0' ||
+        rec->crc != crc32_ieee((const uint8_t *)rec,
+                                offsetof(struct clip_sn_record, crc))) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int sn_file_write(const struct clip_sn_record *rec)
+{
+    struct fs_file_t f;
+    int rc;
+
+    fs_file_t_init(&f);
+    rc = fs_open(&f, SN_FILE_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = fs_write(&f, rec, sizeof(*rec));
+    if (rc != (ssize_t)sizeof(*rec)) {
+        rc = -EIO;
+    } else {
+        rc = 0;
+    }
+    fs_close(&f);
+    return rc;
+}
+
+/* Boot: pick the best record across all copies (internal fixed-section
+ * pair, sn.bin; the settings value is the seq-less migration fallback),
+ * adopt it, and rewrite every stale copy so all agree. */
 static void sn_ab_init(void)
 {
-    struct clip_sn_record a, b;
-    int rc_a = sn_ab_read(&a, true);
-    int rc_b = sn_ab_read(&b, false);
+    struct clip_sn_record int_a, int_b, file_rec;
+    int rc_ia = sn_read_slot(&int_a, SN_SLOT_OFF_A);
+    int rc_ib = sn_read_slot(&int_b, SN_SLOT_OFF_B);
+    int rc_f = sn_file_read(&file_rec);
 
     struct clip_sn_record *best = NULL;
-    if (rc_a == 0 && rc_b == 0) {
-        best = (a.seq >= b.seq) ? &a : &b;
-    } else if (rc_a == 0) {
-        best = &a;
-    } else if (rc_b == 0) {
-        best = &b;
+    struct clip_sn_record *cands[] = {NULL, NULL, NULL};
+    int n = 0;
+    if (rc_ia == 0) {
+        cands[n++] = &int_a;
+    }
+    if (rc_ib == 0) {
+        cands[n++] = &int_b;
+    }
+    if (rc_f == 0) {
+        cands[n++] = &file_rec;
+    }
+    for (int i = 0; i < n; i++) {
+        if (best == NULL || cands[i]->seq > best->seq) {
+            best = cands[i];
+        }
     }
 
     if (best == NULL) {
         if (g_serial_number[0] != '\0') {
             int rc = sn_ab_write(g_serial_number, strlen(g_serial_number));
-            LOG_WRN("SN migrated to raw dual backup: %d", rc);
+            LOG_WRN("SN migrated to backup copies: %d", rc);
         }
         return;
     }
 
     g_sn_seq = best->seq;
     if (strcmp(g_serial_number, best->sn) != 0) {
-        /* Raw copies win over the settings mirror: they are the copy
-         * the watchdog wipe / reformat cannot reach. */
+        /* The fixed-section/file copies win over the settings mirror:
+         * they are the copies the watchdog wipe / reformat can only
+         * partially reach. */
         size_t len = best->len;
         memcpy(g_serial_number, best->sn, len);
         g_serial_number[len] = '\0';
         if (g_serial_number[0] != '\0') {
             (void)settings_save_one(SETTING_SN, g_serial_number, len);
         }
-        LOG_WRN("SN restored from raw backup copy (settings disagreed)");
+        LOG_WRN("SN restored from backup copy (settings disagreed)");
     }
 
-    /* Heal the stale or invalid twin so a single good copy survives the
-     * next power cut. */
-    if (rc_a != 0 || a.seq != best->seq) {
-        if (sn_ab_write_copy(true, best) == 0) {
-            LOG_WRN("SN backup copy A healed");
-        }
+    /* Bring every copy up to the winning record. */
+    bool int_ok = (rc_ia == 0 && int_a.seq == best->seq &&
+                   memcmp(int_a.sn, best->sn, CLIP_SN_MAX_LEN) == 0) &&
+                  (rc_ib == 0 && int_b.seq == best->seq &&
+                   memcmp(int_b.sn, best->sn, CLIP_SN_MAX_LEN) == 0);
+    if (!int_ok && sn_write_both(best) == 0) {
+        LOG_WRN("SN internal backup pair restored");
     }
-    if (rc_b != 0 || b.seq != best->seq) {
-        if (sn_ab_write_copy(false, best) == 0) {
-            LOG_WRN("SN backup copy B healed");
+    if (!(rc_f == 0 && file_rec.seq == best->seq &&
+          memcmp(file_rec.sn, best->sn, CLIP_SN_MAX_LEN) == 0)) {
+        if (sn_file_write(best) == 0) {
+            LOG_WRN("SN file copy restored");
         }
     }
 }
@@ -938,18 +1017,14 @@ int config_set_sn_force(const char *sn)
 
 int config_clear_sn(void)
 {
-    const struct flash_area *fa;
+    const struct device *dev = sn_flash_dev();
     int ret = settings_delete(SETTING_SN);
 
-    /* Also invalidate both raw backup copies. */
-    for (int slot_a = 0; slot_a <= 1; slot_a++) {
-        if (flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
-                                   : FIXED_PARTITION_ID(sn_b_partition),
-                            &fa) == 0) {
-            (void)flash_area_erase(fa, 0, fa->fa_size);
-            flash_area_close(fa);
-        }
+    /* Also invalidate the fixed-section pair and the sn.bin mirror. */
+    if (dev != NULL) {
+        (void)flash_erase(dev, SN_SECTOR_ADDR, 0x1000);
     }
+    (void)fs_unlink(SN_FILE_PATH);
     g_sn_seq = 0;
     if (ret == 0) {
         g_serial_number[0] = '\0';

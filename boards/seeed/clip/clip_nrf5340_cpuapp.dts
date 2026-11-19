@@ -317,37 +317,20 @@
 				reg = <0x00000000 0x000F0000>;
 			};
 
-			/* OTA slot 1: Netcore image (256KB = 4x64KB) */
+			/* OTA slot 1: Netcore image (256KB) */
 			slot1_secondary: partition@f0000 {
 				label = "image-1-secondary";
 				reg = <0x000F0000 0x00040000>;
 			};
 
-			/* LittleFS partition (~6.8MB, 64KB aligned; tail 8KB
-			 * carved out for the SN backup sectors below — the
-			 * settings file is <128KB growing from the head, the
-			 * tail is never reached)
+			/* LittleFS partition (~6.8MB, 64KB aligned)
 			 * External flash: 8MB = 128 x 64KB blocks total
-			 * OTA slots: 15 + 4 = 19 blocks, SN: tail 8KB
+			 * OTA slots: 15 + 4 = 19 blocks used
+			 * LittleFS: 128 - 19 = 109 blocks = 6960KB = 0x6D0000
 			 */
 			lfs_partition: partition@130000 {
 				label = "lfs-storage";
-				reg = <0x00130000 0x006CE000>;
-			};
-
-			/* Factory SN dual backup: two raw 4KB sectors at the
-			 * flash tail, outside LittleFS and outside every
-			 * MCUboot slot — immune to settings-file corruption,
-			 * the settings-load watchdog wipe, AT+PAIR=reset's
-			 * LittleFS rebuild and AT+FACTORY. See config.c sn_ab_*. */
-			sn_a_partition: partition@7fe000 {
-				label = "sn-a";
-				reg = <0x007FE000 0x1000>;
-			};
-
-			sn_b_partition: partition@7ff000 {
-				label = "sn-b";
-				reg = <0x007FF000 0x1000>;
+				reg = <0x00130000 0x006D0000>;
 			};
 		};
 	};

@@ -13,11 +13,11 @@
 
 /* Factory SN on-flash record, shared between the application
  * (applications/clip/src/config.c) and the factory firmware SN tool
- * (tests/clip/src/sn_prog.c). Two raw copies live in the sn-a/sn-b
- * 4KB sectors at the tail of the external flash (0x7FE000/0x7FF000,
- * beyond the end of the LittleFS partition); each carries a
- * magic, a per-write sequence number and a CRC32 over the preceding
- * fields. The copy with the highest seq that passes CRC wins. */
+ * (tests/clip/src/sn_prog.c). Two records live in the .sn_backup
+ * linker section — a FIXED address in the app-slot tail (0xFE000),
+ * outside the linked image (linker/sn_reserve.ld) — each with a magic,
+ * a per-write sequence number and a CRC32 over the preceding fields.
+ * The valid record with the highest seq wins. */
 #define CLIP_SN_MAGIC      0x31504C43 /* "CLP1" little-endian */
 #define CLIP_SN_MAX_LEN    32
 
