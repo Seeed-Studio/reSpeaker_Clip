@@ -19,6 +19,7 @@
 
 #include "clip.h"
 #include "config.h"
+#include "clip_sn.h"
 
 LOG_MODULE_REGISTER(config, LOG_LEVEL_WRN); /* flash budget: INF kept for battery/wifi/storage/button/audio/main */
 
@@ -51,22 +52,14 @@ static char g_serial_number[CLIP_SN_MAX_LEN + 1];
  * upgrade). Two copies with per-copy CRC32 and a write sequence number:
  * boot picks the valid copy with the highest seq and repairs the other.
  * The settings-file copy stays as a tertiary mirror and migration
- * source for units upgraded from older firmware. */
-#define SN_REC_MAGIC 0x31504C43 /* "CLP1" little-endian */
+ * source for units upgraded from older firmware. The record format is
+ * shared with the factory tool (tests/clip sn_prog.c) via clip_sn.h. */
 
-struct sn_record {
-    uint32_t magic;
-    uint32_t seq;               /* increments per write, 0 = none */
-    uint32_t len;               /* strlen(sn), 1..CLIP_SN_MAX_LEN */
-    char sn[CLIP_SN_MAX_LEN];   /* zero padded */
-    uint32_t crc;               /* crc32_ieee() over the fields above */
-};
-
-BUILD_ASSERT(sizeof(struct sn_record) == 48);
+BUILD_ASSERT(sizeof(struct clip_sn_record) == 48);
 
 static uint32_t g_sn_seq; /* seq of the newest valid on-flash copy */
 
-static int sn_ab_read(struct sn_record *rec, bool slot_a)
+static int sn_ab_read(struct clip_sn_record *rec, bool slot_a)
 {
     const struct flash_area *fa;
     int rc = flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
@@ -80,16 +73,16 @@ static int sn_ab_read(struct sn_record *rec, bool slot_a)
     if (rc != 0) {
         return rc;
     }
-    if (rec->magic != SN_REC_MAGIC || rec->len == 0 ||
+    if (rec->magic != CLIP_SN_MAGIC || rec->len == 0 ||
         rec->len > CLIP_SN_MAX_LEN || rec->sn[rec->len] != '\0' ||
         rec->crc != crc32_ieee((const uint8_t *)rec,
-                                offsetof(struct sn_record, crc))) {
+                                offsetof(struct clip_sn_record, crc))) {
         return -EINVAL;
     }
     return 0;
 }
 
-static int sn_ab_write_copy(bool slot_a, const struct sn_record *rec)
+static int sn_ab_write_copy(bool slot_a, const struct clip_sn_record *rec)
 {
     const struct flash_area *fa;
     int rc = flash_area_open(slot_a ? FIXED_PARTITION_ID(sn_a_partition)
@@ -110,14 +103,14 @@ static int sn_ab_write_copy(bool slot_a, const struct sn_record *rec)
  * next boot by sn_ab_init). */
 static int sn_ab_write(const char *sn, size_t len)
 {
-    struct sn_record rec = {0};
+    struct clip_sn_record rec = {0};
 
-    rec.magic = SN_REC_MAGIC;
+    rec.magic = CLIP_SN_MAGIC;
     rec.seq = g_sn_seq + 1;
     rec.len = len;
     memcpy(rec.sn, sn, len);
     rec.crc = crc32_ieee((const uint8_t *)&rec,
-                          offsetof(struct sn_record, crc));
+                          offsetof(struct clip_sn_record, crc));
 
     int rc_a = sn_ab_write_copy(true, &rec);
     int rc_b = sn_ab_write_copy(false, &rec);
@@ -137,11 +130,11 @@ static int sn_ab_write(const char *sn, size_t len)
  * copies. */
 static void sn_ab_init(void)
 {
-    struct sn_record a, b;
+    struct clip_sn_record a, b;
     int rc_a = sn_ab_read(&a, true);
     int rc_b = sn_ab_read(&b, false);
 
-    struct sn_record *best = NULL;
+    struct clip_sn_record *best = NULL;
     if (rc_a == 0 && rc_b == 0) {
         best = (a.seq >= b.seq) ? &a : &b;
     } else if (rc_a == 0) {
@@ -828,6 +821,17 @@ int config_reformat_settings(void)
     if (rc != 0) {
         return rc;
     }
+
+    /* The settings file backend only creates its directory during
+     * settings_backend_init() at boot (mkdir_for_file); after this
+     * erase the directory is gone and every settings_save would fail
+     * with -ENOENT until the next reboot — silently defeating the
+     * re-saves below. Recreate it first. */
+    rc = fs_mkdir("/lfs/settings");
+    if (rc != 0 && rc != -EEXIST) {
+        LOG_WRN("settings heal: mkdir %d", rc);
+    }
+
     LOG_WRN("settings heal: file system rebuilt");
 
     /* Re-save everything we own, from RAM. */
@@ -878,26 +882,11 @@ bool config_sn_is_set(void)
     return g_serial_number[0] != '\0';
 }
 
-/* Charset/length validation shared by both SN writers. */
+/* Charset/length validation shared by both SN writers (single source:
+ * clip_sn.h, enforced identically by the factory tool). */
 static int sn_validate(const char *sn)
 {
-    if (!sn || !sn[0]) {
-        return -EINVAL;
-    }
-
-    size_t len = strlen(sn);
-    if (len > CLIP_SN_MAX_LEN) {
-        return -EINVAL;
-    }
-    for (size_t i = 0; i < len; i++) {
-        char c = sn[i];
-        bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-        if (!ok) {
-            return -EINVAL;
-        }
-    }
-    return 0;
+    return clip_sn_validate(sn) != 0 ? -EINVAL : 0;
 }
 
 static int sn_write(const char *sn, bool allow_overwrite)
