@@ -47,9 +47,12 @@ static char g_serial_number[CLIP_SN_MAX_LEN + 1];
  * cuts mid-save, and the corrupt-file watchdog wipe (fs_unlink) all
  * regularly destroy it — and the SN went down with it. The SN is
  * one-time factory data, so it now also lives in two raw 4KB sectors
- * (sn-a/sn-b, carved from the tail of the netcore OTA slot — LittleFS
- * untouched, so already-paired devices keep their bonds across the
- * upgrade). Two copies with per-copy CRC32 and a write sequence number:
+ * (sn-a/sn-b, at the external flash tail 0x7FE000/0x7FF000 — outside
+ * LittleFS (shrunk 8KB at its end; usage is a <128KB settings file
+ * growing from the head, the tail is never reached) and outside every
+ * MCUboot slot, so already-paired devices keep their bonds across the
+ * upgrade and netcore OTA keeps its full 256KB slot). Two copies with
+ * per-copy CRC32 and a write sequence number:
  * boot picks the valid copy with the highest seq and repairs the other.
  * The settings-file copy stays as a tertiary mirror and migration
  * source for units upgraded from older firmware. The record format is

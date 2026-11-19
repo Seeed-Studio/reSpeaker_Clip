@@ -9,10 +9,10 @@
 #
 # External flash layout:
 #   0x000000 - 0x0effff : mcuboot_secondary (app OTA slot, 960KB=15x64KB, 64KB-aligned)
-#   0x0f0000 - 0x12dfff : mcuboot_secondary_1 (netcore OTA slot, 248KB)
-#   0x12e000 - 0x12efff : sn_a_partition (factory SN backup copy A, 4KB)
-#   0x12f000 - 0x12ffff : sn_b_partition (factory SN backup copy B, 4KB)
-#   0x130000 - end      : lfs-storage (LittleFS for config, ~6.8MB=109x64KB, 64KB-aligned)
+#   0x0f0000 - 0x12ffff : mcuboot_secondary_1 (netcore OTA slot, 256KB=4x64KB, 64KB-aligned)
+#   0x130000 - 0x7fdfff : lfs-storage (LittleFS for config, ~6.8MB, 64KB-aligned)
+#   0x7fe000 - 0x7fefff : sn_a_partition (factory SN backup copy A, 4KB)
+#   0x7ff000 - 0x7fffff : sn_b_partition (factory SN backup copy B, 4KB)
 
 # ============================================================
 # Internal flash (flash_primary)
@@ -70,34 +70,35 @@ mcuboot_secondary:
   device: DT_CHOSEN(nordic_pm_ext_flash)
   region: external_flash
 
-# DFU secondary slot for netcore (image 1) -- 248KB (was 256KB; last 8KB
-# carved out for the SN backup sectors below). ipc_radio.bin fits
-# (173256B < 253952B). Netcore OTA writes from the slot head and never
-# reached the tail.
+# DFU secondary slot for netcore (image 1) -- 256KB = 4x64KB, ipc_radio.bin fits (173256B < 262144B)
 mcuboot_secondary_1:
   address: 0xf0000
-  size: 0x3e000
+  size: 0x40000
   device: DT_CHOSEN(nordic_pm_ext_flash)
   region: external_flash
 
-# Factory SN dual backup -- two raw 4KB sectors outside LittleFS,
-# immune to settings-file corruption, the settings-load watchdog wipe,
+# LittleFS storage partition on external flash (shrunk by 8KB at the tail
+# for the SN backup sectors below; usage is a <128KB settings file growing
+# from the partition head, so the tail is never reached)
+lfs_storage:
+  address: 0x130000
+  size: 0x6ce000
+  device: DT_CHOSEN(nordic_pm_ext_flash)
+  region: external_flash
+
+# Factory SN dual backup -- two raw 4KB sectors at the flash tail,
+# outside LittleFS and outside every MCUboot slot, immune to
+# settings-file corruption, the settings-load watchdog wipe,
 # AT+PAIR=reset's LittleFS rebuild and AT+FACTORY. See config.c sn_ab_*.
 sn_a_partition:
-  address: 0x12e000
+  address: 0x7fe000
   size: 0x1000
   device: DT_CHOSEN(nordic_pm_ext_flash)
   region: external_flash
 
 sn_b_partition:
-  address: 0x12f000
+  address: 0x7ff000
   size: 0x1000
   device: DT_CHOSEN(nordic_pm_ext_flash)
   region: external_flash
 
-# LittleFS storage partition on external flash
-lfs_storage:
-  address: 0x130000
-  size: 0x6d0000
-  device: DT_CHOSEN(nordic_pm_ext_flash)
-  region: external_flash
